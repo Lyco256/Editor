@@ -22,6 +22,14 @@ pub use selection::{Selection, SelectionSet};
 pub use smart::{IndentStyle, PairConfig, SmartEditOutcome};
 pub use transaction::{Edit, Transaction, TransactionBuilder};
 
+/// Immutable document metadata shared with asynchronous syntax and language services.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DocumentDescriptor {
+    pub id: editor_types::DocumentId,
+    pub version: u64,
+    pub large_file_mode: bool,
+}
+
 /// Typed failures caused by invalid input to the editing engine.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum EditorError {

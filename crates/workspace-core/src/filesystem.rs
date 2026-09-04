@@ -87,8 +87,14 @@ pub enum FileOperationPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileChangeEvent {
-    Reload { path: PathBuf, document: TextDocument },
-    Conflict { path: PathBuf, document: TextDocument },
+    Reload {
+        path: PathBuf,
+        document: TextDocument,
+    },
+    Conflict {
+        path: PathBuf,
+        document: TextDocument,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,7 +222,11 @@ impl QuickOpenIndex {
                 });
             }
         }
-        scored.sort_by(|left, right| left.score.cmp(&right.score).then_with(|| left.path.cmp(&right.path)));
+        scored.sort_by(|left, right| {
+            left.score
+                .cmp(&right.score)
+                .then_with(|| left.path.cmp(&right.path))
+        });
         scored
     }
 }
@@ -229,7 +239,11 @@ impl FileChangeTracker {
         }
     }
 
-    pub fn watch(&mut self, document: &TextDocument, dirty: bool) -> Result<(), FileOperationError> {
+    pub fn watch(
+        &mut self,
+        document: &TextDocument,
+        dirty: bool,
+    ) -> Result<(), FileOperationError> {
         let fingerprint = fingerprint_path(document.path.as_path())?;
         self.watched.insert(
             normalized_path_key(document.path.as_path()),
@@ -362,7 +376,10 @@ pub fn delete_file(path: &Path) -> Result<(), FileOperationError> {
     Ok(())
 }
 
-fn visible_file_entries(root: &Path, excludes: &[String]) -> Result<Vec<PathBuf>, FileOperationError> {
+fn visible_file_entries(
+    root: &Path,
+    excludes: &[String],
+) -> Result<Vec<PathBuf>, FileOperationError> {
     let mut files = Vec::new();
     walk_visible_files(root, &[], excludes, &mut files)?;
     Ok(files)
@@ -413,7 +430,10 @@ fn is_visible_entry(
     gitignore_patterns: &[String],
     excludes: &[String],
 ) -> bool {
-    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
     let relative = path
         .strip_prefix(directory)
         .ok()
@@ -423,7 +443,11 @@ fn is_visible_entry(
     !gitignore_patterns
         .iter()
         .chain(excludes.iter())
-        .any(|pattern| candidates.iter().any(|candidate| matches_ignore_pattern(pattern, candidate, is_directory)))
+        .any(|pattern| {
+            candidates
+                .iter()
+                .any(|candidate| matches_ignore_pattern(pattern, candidate, is_directory))
+        })
 }
 
 fn matches_ignore_pattern(pattern: &str, candidate: &str, is_directory: bool) -> bool {

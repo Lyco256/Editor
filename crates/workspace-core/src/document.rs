@@ -3,8 +3,7 @@
     clippy::double_must_use,
     clippy::map_unwrap_or,
     clippy::missing_errors_doc,
-    clippy::must_use_candidate
-    ,
+    clippy::must_use_candidate,
     clippy::match_same_arms,
     clippy::single_match_else,
     clippy::trivially_copy_pass_by_ref
@@ -322,7 +321,10 @@ pub fn save_text_document(
     save_bytes_atomically(path, &bytes)
 }
 
-pub(crate) fn save_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<SaveOutcome, DocumentError> {
+pub(crate) fn save_bytes_atomically(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<SaveOutcome, DocumentError> {
     save_bytes_atomically_with(path, bytes, |temp_path, destination| {
         temp_path
             .persist(destination)
@@ -368,7 +370,10 @@ pub(crate) fn is_large_file(path: &Path, settings: &LargeFileSettings) -> bool {
         .unwrap_or(false)
 }
 
-fn detect_encoding(bytes: &[u8], fallback: &EncodingKind) -> Result<(EncodingKind, bool), EncodingError> {
+fn detect_encoding(
+    bytes: &[u8],
+    fallback: &EncodingKind,
+) -> Result<(EncodingKind, bool), EncodingError> {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return Ok((EncodingKind::Utf8, true));
     }

@@ -41,3 +41,6 @@ Tests:
 - Unit tests in the module files cover line conversions, grapheme-safe navigation, transaction
   semantics, search, folding, and smart pair behavior.
 - The repository doc-mirror test verifies that this file stays paired with `src/lib.rs`.
+
+`DocumentDescriptor` is the immutable cross-crate metadata contract used by syntax and language
+services: document identity, version, and the large-file semantic-service suppression flag.

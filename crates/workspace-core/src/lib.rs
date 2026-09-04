@@ -18,21 +18,21 @@ pub use document::{
     normalize_line_endings, save_text_document,
 };
 pub use filesystem::{
-    DeletePlan, ExplorerEntry, ExplorerEntryKind, ExplorerTree, FileChangeEvent,
-    FileChangeTracker, FileOperationError, FileOperationPlan, QuickOpenCandidate, QuickOpenIndex,
-    create_file, delete_file, move_path, plan_delete, plan_move, plan_rename, rename_path,
+    DeletePlan, ExplorerEntry, ExplorerEntryKind, ExplorerTree, FileChangeEvent, FileChangeTracker,
+    FileOperationError, FileOperationPlan, QuickOpenCandidate, QuickOpenIndex, create_file,
+    delete_file, move_path, plan_delete, plan_move, plan_rename, rename_path,
 };
 pub use path::{
-    CanonicalPath, PathError, canonicalize_path, canonical_workspace_identity,
-    canonical_workspace_key, lexical_normalize_path, path_eq, workspace_identity_key,
+    CanonicalPath, PathError, canonical_workspace_identity, canonical_workspace_key,
+    canonicalize_path, lexical_normalize_path, path_eq, workspace_identity_key,
 };
 pub use search::{
-    ReplacementEdit, ReplacementPlan, SearchBackendPreference, SearchError, SearchEvent,
-    SearchHit, SearchOptions, SearchSession, apply_replacement_plan, collect_search_results,
+    ReplacementEdit, ReplacementPlan, SearchBackendPreference, SearchError, SearchEvent, SearchHit,
+    SearchOptions, SearchSession, apply_replacement_plan, collect_search_results,
     plan_replacements, search_workspace,
 };
 pub use workspace::{
-    RecentWorkspaceEntry, RecentWorkspaceStore, TrustStore, TrustStoreEntry, TrustState,
+    RecentWorkspaceEntry, RecentWorkspaceStore, TrustState, TrustStore, TrustStoreEntry,
     WorkspaceIdentity, WorkspaceModel, WorkspaceRoot, WorkspaceSet, add_workspace_root,
     load_recent_workspaces, load_trust_store, persist_recent_workspaces, persist_trust_store,
     remove_workspace_root,

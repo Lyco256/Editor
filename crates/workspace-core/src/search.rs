@@ -26,7 +26,7 @@ use std::{
     thread,
 };
 
-use ignore::{overrides::OverrideBuilder, WalkBuilder};
+use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use regex::RegexBuilder;
 use serde::Deserialize;
 use thiserror::Error;
@@ -147,9 +147,7 @@ pub fn search_workspace(options: SearchOptions) -> Result<SearchSession, SearchE
     let cancel_clone = Arc::clone(&cancel);
     thread::spawn(move || {
         let result = match options.backend {
-            SearchBackendPreference::ForceRust => {
-                run_rust_search(&options, &sender, &cancel_clone)
-            }
+            SearchBackendPreference::ForceRust => run_rust_search(&options, &sender, &cancel_clone),
             SearchBackendPreference::ForceRg => run_rg_search(&options, &sender, &cancel_clone)
                 .or_else(|error| {
                     let _ = sender.send(SearchEvent::Error(error.to_string()));
@@ -158,7 +156,9 @@ pub fn search_workspace(options: SearchOptions) -> Result<SearchSession, SearchE
             SearchBackendPreference::PreferRg => {
                 match run_rg_search(&options, &sender, &cancel_clone) {
                     Ok(()) => Ok(()),
-                    Err(SearchError::RgUnavailable) => run_rust_search(&options, &sender, &cancel_clone),
+                    Err(SearchError::RgUnavailable) => {
+                        run_rust_search(&options, &sender, &cancel_clone)
+                    }
                     Err(error) => Err(error),
                 }
             }
@@ -187,10 +187,7 @@ pub fn search_workspace(options: SearchOptions) -> Result<SearchSession, SearchE
             }
         }
     });
-    Ok(SearchSession {
-        receiver,
-        cancel,
-    })
+    Ok(SearchSession { receiver, cancel })
 }
 
 pub fn collect_search_results(session: &SearchSession) -> Result<Vec<SearchHit>, SearchError> {
@@ -198,10 +195,12 @@ pub fn collect_search_results(session: &SearchSession) -> Result<Vec<SearchHit>,
     loop {
         match session.receiver.recv() {
             Ok(SearchEvent::Match(hit)) => hits.push(hit),
-            Ok(SearchEvent::Finished { .. })
-            | Ok(SearchEvent::Cancelled)
-            | Err(_) => return Ok(hits),
-            Ok(SearchEvent::Error(message)) => return Err(SearchError::Io(std::io::Error::other(message))),
+            Ok(SearchEvent::Finished { .. }) | Ok(SearchEvent::Cancelled) | Err(_) => {
+                return Ok(hits);
+            }
+            Ok(SearchEvent::Error(message)) => {
+                return Err(SearchError::Io(std::io::Error::other(message)));
+            }
         }
     }
 }
@@ -223,10 +222,13 @@ impl SearchSession {
 pub fn plan_replacements(hits: &[SearchHit], replacement: &str) -> ReplacementPlan {
     let mut grouped: BTreeMap<PathBuf, Vec<ReplacementEdit>> = BTreeMap::new();
     for hit in hits {
-        grouped.entry(hit.path.clone()).or_default().push(ReplacementEdit {
-            range: hit.byte_range.clone(),
-            replacement: replacement.to_owned(),
-        });
+        grouped
+            .entry(hit.path.clone())
+            .or_default()
+            .push(ReplacementEdit {
+                range: hit.byte_range.clone(),
+                replacement: replacement.to_owned(),
+            });
     }
     let mut files = Vec::new();
     for (path, mut edits) in grouped {
@@ -256,11 +258,7 @@ fn apply_file_edits(file: &FileReplacementPlan) -> Result<(), SearchError> {
         }
         buffer.replace_range(edit.range.clone(), &edit.replacement);
     }
-    save_text_document(
-        &file.path,
-        &buffer,
-        &DocumentSaveOptions::default(),
-    )?;
+    save_text_document(&file.path, &buffer, &DocumentSaveOptions::default())?;
     Ok(())
 }
 
@@ -302,9 +300,10 @@ fn run_rg_search(
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        SearchError::Io(std::io::Error::other("rg stdout unavailable"))
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| SearchError::Io(std::io::Error::other("rg stdout unavailable")))?;
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         if cancel.load(Ordering::SeqCst) {
@@ -355,7 +354,11 @@ fn run_rust_search(
                     continue;
                 }
             };
-            if !entry.file_type().map(|file_type| file_type.is_file()).unwrap_or(false) {
+            if !entry
+                .file_type()
+                .map(|file_type| file_type.is_file())
+                .unwrap_or(false)
+            {
                 continue;
             }
             let path = entry.path().to_path_buf();
@@ -446,10 +449,14 @@ fn build_overrides(
 ) -> Result<ignore::overrides::Override, SearchError> {
     let mut builder = OverrideBuilder::new(Path::new("."));
     for include in includes {
-        builder.add(include).map_err(|error| SearchError::Io(std::io::Error::other(error)))?;
+        builder
+            .add(include)
+            .map_err(|error| SearchError::Io(std::io::Error::other(error)))?;
     }
     for exclude in excludes {
-        builder.add(&format!("!{exclude}")).map_err(|error| SearchError::Io(std::io::Error::other(error)))?;
+        builder
+            .add(&format!("!{exclude}"))
+            .map_err(|error| SearchError::Io(std::io::Error::other(error)))?;
     }
     builder
         .build()

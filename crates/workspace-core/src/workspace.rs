@@ -16,7 +16,9 @@ use editor_types::WorkspaceId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::path::{CanonicalPath, PathError, canonical_workspace_key, canonical_workspace_identity};
+use crate::path::{
+    CanonicalPath, PathError, canonical_workspace_identity, canonical_workspace_key,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrustState {
@@ -210,7 +212,10 @@ impl RecentWorkspaceStore {
 }
 
 #[must_use]
-pub fn add_workspace_root(set: &mut WorkspaceSet, path: &Path) -> Result<WorkspaceId, WorkspaceError> {
+pub fn add_workspace_root(
+    set: &mut WorkspaceSet,
+    path: &Path,
+) -> Result<WorkspaceId, WorkspaceError> {
     set.add_root(path)
 }
 

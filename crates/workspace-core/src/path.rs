@@ -92,9 +92,7 @@ pub fn normalized_path_key(path: &Path) -> String {
 
 #[must_use]
 pub fn is_case_only_rename(source: &Path, target: &Path) -> bool {
-    cfg!(windows)
-        && normalized_path_key(source) == normalized_path_key(target)
-        && source != target
+    cfg!(windows) && normalized_path_key(source) == normalized_path_key(target) && source != target
 }
 
 #[must_use]

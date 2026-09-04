@@ -6,13 +6,13 @@ use std::{
 
 use tempfile::tempdir;
 use workspace_core::{
+    DecodePolicy, DeletePlan, DocumentLoadOptions, DocumentSaveOptions, EncodingKind, ExplorerTree,
+    FileChangeEvent, FileChangeTracker, LargeFileSettings, LineEndings, QuickOpenIndex,
+    SearchBackendPreference, SearchHit, SearchOptions, TrustState, WorkspaceSet,
     add_workspace_root, apply_replacement_plan, canonical_workspace_key, collect_search_results,
     create_file, delete_file, load_text_document, move_path, persist_recent_workspaces,
     persist_trust_store, plan_delete, plan_move, plan_rename, rename_path, save_text_document,
-    search::parse_rg_json_lines, search_workspace, workspace_identity_key, DecodePolicy,
-    DeletePlan, DocumentLoadOptions, DocumentSaveOptions, EncodingKind, ExplorerTree,
-    FileChangeEvent, FileChangeTracker, LargeFileSettings, LineEndings, QuickOpenIndex,
-    SearchBackendPreference, SearchHit, SearchOptions, TrustState, WorkspaceSet,
+    search::parse_rg_json_lines, search_workspace, workspace_identity_key,
 };
 
 #[test]
@@ -40,7 +40,10 @@ fn workspace_roots_deduplicate_and_persistence_round_trip() {
     persist_recent_workspaces(&recent, &recent_path).expect("save recent");
     let loaded_recent = workspace_core::load_recent_workspaces(&recent_path).expect("load recent");
     assert_eq!(loaded_recent.entries().len(), 1);
-    assert_eq!(canonical_workspace_key(&root), workspace_identity_key(&alias));
+    assert_eq!(
+        canonical_workspace_key(&root),
+        workspace_identity_key(&alias)
+    );
 }
 
 #[test]
@@ -58,9 +61,21 @@ fn explorer_and_quick_open_respect_gitignore_and_excludes() {
         vec!["*.log".to_owned()],
     );
     let children = tree.children(dir.path()).expect("children");
-    assert!(children.iter().any(|entry| entry.path.ends_with("included.txt")));
-    assert!(!children.iter().any(|entry| entry.path.ends_with("ignored.txt")));
-    assert!(!children.iter().any(|entry| entry.path.ends_with("visible.log")));
+    assert!(
+        children
+            .iter()
+            .any(|entry| entry.path.ends_with("included.txt"))
+    );
+    assert!(
+        !children
+            .iter()
+            .any(|entry| entry.path.ends_with("ignored.txt"))
+    );
+    assert!(
+        !children
+            .iter()
+            .any(|entry| entry.path.ends_with("visible.log"))
+    );
 
     let index = QuickOpenIndex::rebuild(&tree).expect("index");
     let entries = index.entries();
@@ -82,9 +97,16 @@ fn symlink_loop_does_not_recurse_forever() {
         return;
     }
 
-    let tree = ExplorerTree::new(vec![workspace_core::CanonicalPath::new(root.to_path_buf())], Vec::new());
+    let tree = ExplorerTree::new(
+        vec![workspace_core::CanonicalPath::new(root.to_path_buf())],
+        Vec::new(),
+    );
     let children = tree.children(root.join("a").as_path()).expect("children");
-    assert!(children.iter().any(|entry| entry.path.ends_with("file.txt")));
+    assert!(
+        children
+            .iter()
+            .any(|entry| entry.path.ends_with("file.txt"))
+    );
     assert!(children.len() < 10);
 }
 
@@ -159,7 +181,11 @@ fn external_changes_reload_clean_buffers_and_conflict_dirty_buffers() {
     tracker.watch(&clean, false).expect("watch");
     fs::write(&path, "two").expect("mutate");
     let events = tracker.poll().expect("poll");
-    assert!(events.iter().any(|event| matches!(event, FileChangeEvent::Reload { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, FileChangeEvent::Reload { .. }))
+    );
 
     fs::write(&path, "three").expect("mutate");
     let dirty = load_text_document(
@@ -175,7 +201,11 @@ fn external_changes_reload_clean_buffers_and_conflict_dirty_buffers() {
     conflict_tracker.watch(&dirty, true).expect("watch");
     fs::write(&path, "four").expect("mutate");
     let events = conflict_tracker.poll().expect("poll");
-    assert!(events.iter().any(|event| matches!(event, FileChangeEvent::Conflict { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, FileChangeEvent::Conflict { .. }))
+    );
 }
 
 #[test]
@@ -215,7 +245,11 @@ fn rg_fixture_and_backend_equivalence_cover_required_options() {
 
     let dir = tempdir().expect("dir");
     fs::create_dir_all(dir.path().join("src")).expect("dir");
-    fs::write(dir.path().join("src").join("alpha.rs"), "apple Banana\nneedle here\n").expect("file");
+    fs::write(
+        dir.path().join("src").join("alpha.rs"),
+        "apple Banana\nneedle here\n",
+    )
+    .expect("file");
     fs::write(dir.path().join("src").join("beta.rs"), "apple\nbanana\n").expect("file");
     fs::write(dir.path().join("skip.log"), "apple\n").expect("file");
 
@@ -236,8 +270,8 @@ fn rg_fixture_and_backend_equivalence_cover_required_options() {
         backend: SearchBackendPreference::ForceRg,
         ..options
     };
-    let rg_hits = collect_search_results(&search_workspace(rg_options).expect("rg"))
-        .expect("rg results");
+    let rg_hits =
+        collect_search_results(&search_workspace(rg_options).expect("rg")).expect("rg results");
 
     let rust_paths: Vec<_> = rust_hits.iter().map(hit_key).collect();
     let rg_paths: Vec<_> = rg_hits.iter().map(hit_key).collect();
@@ -291,7 +325,12 @@ fn replacement_plans_apply_and_report_failures() {
     let report = apply_replacement_plan(&plan).expect("apply");
     assert!(report.modified_files.contains(&a));
     assert!(report.modified_files.contains(&b));
-    assert!(report.failed_files.iter().any(|path| path.ends_with("missing.txt")));
+    assert!(
+        report
+            .failed_files
+            .iter()
+            .any(|path| path.ends_with("missing.txt"))
+    );
     assert_eq!(fs::read_to_string(&a).expect("read"), "zip zip");
 }
 
@@ -316,7 +355,13 @@ fn rename_move_delete_plans_and_operations_work() {
     assert!(moved.exists());
 
     let delete_plan = plan_delete(&moved).expect("plan");
-    assert!(matches!(delete_plan, DeletePlan { is_directory: false, .. }));
+    assert!(matches!(
+        delete_plan,
+        DeletePlan {
+            is_directory: false,
+            ..
+        }
+    ));
     delete_file(&moved).expect("delete");
     assert!(!moved.exists());
 }
