@@ -1,0 +1,9 @@
+title = "Example"
+
+[package]
+name = "demo"
+version = "0.1.0"
+authors = ["Example <example@example.com>"]
+
+[dependencies]
+serde = "1

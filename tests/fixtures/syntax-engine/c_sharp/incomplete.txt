@@ -1,0 +1,4 @@
+namespace Demo {
+    public class Greeter {
+        public string Name => "hi";
+    }

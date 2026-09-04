@@ -1,0 +1,10 @@
+mod demo {
+    pub struct Greeter {
+        value: i32,
+    }
+
+    pub fn greet(name: &str) -> String {
+        let value = 1;
+        format!("hi {}", name)
+    }
+}

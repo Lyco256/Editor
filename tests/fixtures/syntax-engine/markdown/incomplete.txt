@@ -1,0 +1,6 @@
+# Demo
+
+Some text.
+
+```rust
+fn main() {}

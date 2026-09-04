@@ -1,0 +1,12 @@
+# Example
+
+This paragraph has **bold text** and a [link](https://example.com).
+
+- item one
+- item two
+
+```rust
+fn main() {
+    println!("hello");
+}
+```

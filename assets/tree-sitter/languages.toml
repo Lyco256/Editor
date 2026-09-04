@@ -1,0 +1,63 @@
+[[language]]
+name = "rust"
+extensions = ["rs"]
+
+[[language]]
+name = "c"
+extensions = ["c", "h"]
+
+[[language]]
+name = "cpp"
+extensions = ["cc", "cpp", "cxx", "hpp", "hh", "hxx"]
+
+[[language]]
+name = "c-sharp"
+extensions = ["cs"]
+
+[[language]]
+name = "java"
+extensions = ["java"]
+
+[[language]]
+name = "go"
+extensions = ["go"]
+
+[[language]]
+name = "python"
+extensions = ["py"]
+
+[[language]]
+name = "javascript"
+extensions = ["js", "mjs", "cjs", "jsx"]
+
+[[language]]
+name = "typescript"
+extensions = ["ts", "tsx"]
+
+[[language]]
+name = "html"
+extensions = ["html", "htm", "xhtml"]
+
+[[language]]
+name = "css"
+extensions = ["css"]
+
+[[language]]
+name = "json"
+extensions = ["json", "jsonc"]
+
+[[language]]
+name = "toml"
+extensions = ["toml"]
+
+[[language]]
+name = "yaml"
+extensions = ["yaml", "yml"]
+
+[[language]]
+name = "markdown"
+extensions = ["md", "markdown", "mdown"]
+
+[[language]]
+name = "bash"
+extensions = ["sh", "bash", "zsh", "ksh"]

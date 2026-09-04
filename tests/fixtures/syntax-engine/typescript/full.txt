@@ -1,0 +1,9 @@
+export interface Greeter {
+  name: string;
+}
+
+export class Demo {
+  greet(name: string): string {
+    return `hi ${name}`;
+  }
+}
