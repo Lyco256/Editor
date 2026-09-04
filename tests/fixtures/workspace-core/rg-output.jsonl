@@ -1,0 +1,1 @@
+{"type":"match","data":{"path":{"text":"src/main.rs"},"lines":{"text":"let apple = 1;"},"line_number":3,"absolute_offset":21,"submatches":[{"match":{"text":"apple"},"start":4,"end":9}]}}
