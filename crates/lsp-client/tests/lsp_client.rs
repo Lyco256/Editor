@@ -95,6 +95,7 @@ async fn position_mapper_round_trips_unicode_text() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::too_many_lines)]
 async fn lsp_lifecycle_and_requests_round_trip() {
     let client = initialize_client("normal", "utf8").await;
     let mut events = client.subscribe();
@@ -330,7 +331,7 @@ async fn malformed_initialize_response_is_typed_error() {
         .await;
     assert!(matches!(
         error,
-        Err(ClientError::Protocol(_)) | Err(ClientError::Initialize(_))
+        Err(ClientError::Protocol(_) | ClientError::Initialize(_))
     ));
 }
 
@@ -351,11 +352,12 @@ async fn crashing_server_updates_status() {
         .expect("didOpen");
     let event = time::timeout(Duration::from_secs(2), async {
         loop {
-            match events.recv().await.expect("event") {
-                event @ (ClientEvent::Crashed { .. } | ClientEvent::Exited { .. }) => {
-                    break event;
-                }
-                _ => {}
+            let event = events.recv().await.expect("event");
+            if matches!(
+                event,
+                ClientEvent::Crashed { .. } | ClientEvent::Exited { .. }
+            ) {
+                break event;
             }
         }
     })
