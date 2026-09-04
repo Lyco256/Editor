@@ -6,9 +6,12 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+crossterm = "0.29"
 editor-types = { path = "../editor-types" }
 thiserror.workspace = true
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
 
 [lints]
 workspace = true
-
