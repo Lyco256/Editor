@@ -1,0 +1,15 @@
+[package]
+name = "lsp-client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+config-core = { path = "../config-core" }
+editor-core = { path = "../editor-core" }
+editor-types = { path = "../editor-types" }
+
+[lints]
+workspace = true
+

@@ -1,0 +1,13 @@
+[package]
+name = "config-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+editor-types = { path = "../editor-types" }
+
+[lints]
+workspace = true
+

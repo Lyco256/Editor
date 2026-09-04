@@ -1,0 +1,21 @@
+[package]
+name = "app-ui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+config-core = { path = "../config-core" }
+editor-core = { path = "../editor-core" }
+editor-types = { path = "../editor-types" }
+lsp-client = { path = "../lsp-client" }
+syntax-engine = { path = "../syntax-engine" }
+terminal-backend = { path = "../terminal-backend" }
+vcs-git = { path = "../vcs-git" }
+vscode-compat = { path = "../vscode-compat" }
+workspace-core = { path = "../workspace-core" }
+
+[lints]
+workspace = true
+
