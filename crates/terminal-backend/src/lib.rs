@@ -1,95 +1,23 @@
-//! Terminal lifecycle and virtual-framebuffer boundary.
+//! Terminal lifecycle, normalized input, clipboard, and virtual-framebuffer boundary.
 
-use editor_types::{StyleRole, TerminalCapabilities};
-use thiserror::Error;
+mod capability;
+mod clipboard;
+mod framebuffer;
+mod input;
+mod renderer;
+mod terminal;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cell {
-    pub symbol: String,
-    pub foreground: StyleRole,
-    pub background: StyleRole,
-    pub bold: bool,
-    pub continuation: bool,
-}
+pub use capability::{
+    ResolvedColor, ResolvedUnderline, RgbColor, Theme, detect_capabilities, quantize_ansi16,
+    quantize_ansi256, resolve_color, resolve_underline,
+};
+pub use clipboard::{Clipboard, ClipboardError, MemoryClipboard, SystemClipboard};
+pub use framebuffer::{Cell, Framebuffer, FramebufferError};
+pub use input::{InputReader, normalize_event, normalize_key, normalize_mouse};
+pub use renderer::DifferentialRenderer;
+pub use terminal::{CrosstermBackend, CursorShape, TerminalError};
 
-impl Default for Cell {
-    fn default() -> Self {
-        Self {
-            symbol: " ".to_owned(),
-            foreground: StyleRole::EditorText,
-            background: StyleRole::EditorBackground,
-            bold: false,
-            continuation: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Framebuffer {
-    columns: u16,
-    rows: u16,
-    cells: Vec<Cell>,
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum FramebufferError {
-    #[error("cell ({column}, {row}) is outside framebuffer {columns}x{rows}")]
-    OutOfBounds {
-        column: u16,
-        row: u16,
-        columns: u16,
-        rows: u16,
-    },
-}
-
-impl Framebuffer {
-    #[must_use]
-    pub fn new(columns: u16, rows: u16) -> Self {
-        let len = usize::from(columns) * usize::from(rows);
-        Self {
-            columns,
-            rows,
-            cells: vec![Cell::default(); len],
-        }
-    }
-
-    #[must_use]
-    pub const fn size(&self) -> (u16, u16) {
-        (self.columns, self.rows)
-    }
-
-    /// Replaces one framebuffer cell.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FramebufferError::OutOfBounds`] when the coordinate is outside this frame.
-    pub fn set(&mut self, column: u16, row: u16, cell: Cell) -> Result<(), FramebufferError> {
-        let index = self.index(column, row)?;
-        self.cells[index] = cell;
-        Ok(())
-    }
-
-    /// Returns one framebuffer cell.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FramebufferError::OutOfBounds`] when the coordinate is outside this frame.
-    pub fn get(&self, column: u16, row: u16) -> Result<&Cell, FramebufferError> {
-        self.index(column, row).map(|index| &self.cells[index])
-    }
-
-    fn index(&self, column: u16, row: u16) -> Result<usize, FramebufferError> {
-        if column >= self.columns || row >= self.rows {
-            return Err(FramebufferError::OutOfBounds {
-                column,
-                row,
-                columns: self.columns,
-                rows: self.rows,
-            });
-        }
-        Ok(usize::from(row) * usize::from(self.columns) + usize::from(column))
-    }
-}
+use editor_types::TerminalCapabilities;
 
 pub trait TerminalAdapter {
     type Error: std::error::Error + Send + Sync + 'static;
@@ -113,20 +41,4 @@ pub trait TerminalAdapter {
     ///
     /// Returns the adapter error when restoration is incomplete.
     fn restore(&mut self) -> Result<(), Self::Error>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Cell, Framebuffer};
-
-    #[test]
-    fn cell_can_be_replaced() {
-        let mut frame = Framebuffer::new(2, 1);
-        let cell = Cell {
-            symbol: "x".to_owned(),
-            ..Cell::default()
-        };
-        frame.set(1, 0, cell.clone()).expect("valid cell");
-        assert_eq!(frame.get(1, 0), Ok(&cell));
-    }
 }
