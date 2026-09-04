@@ -1,0 +1,930 @@
+use std::{fmt, sync::Arc};
+
+use ropey::Rope;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+use crate::{
+    CharacterOffset, Edit, EditorError, LogicalPosition, Result, Selection, SelectionSet,
+    TextRange, Transaction, TransactionBuilder,
+};
+
+pub const DEFAULT_LARGE_FILE_THRESHOLD: usize = 32 * 1024 * 1024;
+
+/// Whether whole-document semantic services may run for this document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticServicePolicy {
+    Enabled,
+    SuppressedLargeFile,
+}
+
+/// Result metadata for a transaction application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedTransaction {
+    pub changed: bool,
+    pub version: u64,
+}
+
+/// An immutable, thread-safe read view detached from future buffer mutations.
+#[derive(Debug, Clone)]
+pub struct TextSnapshot {
+    text: Arc<str>,
+    version: u64,
+}
+
+impl TextSnapshot {
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+
+    #[must_use]
+    pub fn len_chars(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    #[must_use]
+    pub fn len_bytes(&self) -> usize {
+        self.text.len()
+    }
+
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.text
+            .chars()
+            .filter(|character| *character == '\n')
+            .count()
+            + 1
+    }
+
+    pub fn text_in_range(&self, range: TextRange) -> Result<&str> {
+        validate_range_in_text(&self.text, range)?;
+        let start = char_to_byte(&self.text, range.start.0);
+        let end = char_to_byte(&self.text, range.end.0);
+        Ok(&self.text[start..end])
+    }
+
+    pub fn line_text(&self, line: u32) -> Result<&str> {
+        let (start, content_end, _) = line_bounds(&self.text, line)
+            .ok_or(EditorError::InvalidPosition { line, character: 0 })?;
+        Ok(&self.text[char_to_byte(&self.text, start)..char_to_byte(&self.text, content_end)])
+    }
+
+    pub fn offset_to_position(&self, offset: CharacterOffset) -> Result<LogicalPosition> {
+        offset_to_position_in_text(&self.text, offset)
+    }
+
+    pub fn position_to_offset(&self, position: LogicalPosition) -> Result<CharacterOffset> {
+        position_to_offset_in_text(&self.text, position)
+    }
+
+    pub fn display_column(&self, offset: CharacterOffset, tab_width: usize) -> Result<usize> {
+        display_column_in_text(&self.text, offset, tab_width)
+    }
+
+    pub fn offset_for_display_column(
+        &self,
+        line: u32,
+        column: usize,
+        tab_width: usize,
+    ) -> Result<CharacterOffset> {
+        offset_for_display_column_in_text(&self.text, line, column, tab_width)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AutoPairMarker {
+    pub open_start: usize,
+    pub open: String,
+    pub close_start: usize,
+    pub close: String,
+}
+
+impl AutoPairMarker {
+    fn end(&self) -> usize {
+        self.close_start + self.close.chars().count()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    forward: Transaction,
+    inverse: Transaction,
+    selections_before: SelectionSet,
+    selections_after: SelectionSet,
+    markers_before: Vec<AutoPairMarker>,
+    markers_after: Vec<AutoPairMarker>,
+    state_before: u64,
+    state_after: u64,
+}
+
+/// Mutable Unicode text and all transaction-scoped editor state.
+#[derive(Debug)]
+pub struct TextBuffer {
+    rope: Rope,
+    selections: SelectionSet,
+    version: u64,
+    current_state: u64,
+    saved_state: u64,
+    next_state: u64,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
+    auto_pairs: Vec<AutoPairMarker>,
+    large_file_threshold: usize,
+}
+
+impl Default for TextBuffer {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+impl TextBuffer {
+    #[must_use]
+    pub fn new(text: &str) -> Self {
+        Self::with_large_file_threshold(text, DEFAULT_LARGE_FILE_THRESHOLD)
+    }
+
+    #[must_use]
+    pub fn with_large_file_threshold(text: &str, threshold: usize) -> Self {
+        Self {
+            rope: Rope::from_str(text),
+            selections: SelectionSet::default(),
+            version: 0,
+            current_state: 0,
+            saved_state: 0,
+            next_state: 1,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            auto_pairs: Vec::new(),
+            large_file_threshold: threshold,
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> TextSnapshot {
+        TextSnapshot {
+            text: Arc::from(self.rope.to_string()),
+            version: self.version,
+        }
+    }
+
+    #[must_use]
+    pub fn len_chars(&self) -> usize {
+        self.rope.len_chars()
+    }
+
+    #[must_use]
+    pub fn len_bytes(&self) -> usize {
+        self.rope.len_bytes()
+    }
+
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.rope.len_lines()
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.current_state != self.saved_state
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.saved_state = self.current_state;
+    }
+
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    #[must_use]
+    pub fn selections(&self) -> &SelectionSet {
+        &self.selections
+    }
+
+    pub fn set_selections(&mut self, selections: SelectionSet) -> Result<()> {
+        validate_selections_in_text(&self.rope.to_string(), &selections)?;
+        self.selections = selections;
+        Ok(())
+    }
+
+    pub(crate) fn auto_pairs(&self) -> &[AutoPairMarker] {
+        &self.auto_pairs
+    }
+
+    #[must_use]
+    pub const fn large_file_threshold(&self) -> usize {
+        self.large_file_threshold
+    }
+
+    pub fn set_large_file_threshold(&mut self, threshold: usize) {
+        self.large_file_threshold = threshold;
+    }
+
+    #[must_use]
+    pub fn is_large_file(&self) -> bool {
+        self.len_bytes() >= self.large_file_threshold
+    }
+
+    #[must_use]
+    pub fn semantic_service_policy(&self) -> SemanticServicePolicy {
+        if self.is_large_file() {
+            SemanticServicePolicy::SuppressedLargeFile
+        } else {
+            SemanticServicePolicy::Enabled
+        }
+    }
+
+    pub fn offset_to_position(&self, offset: CharacterOffset) -> Result<LogicalPosition> {
+        offset_to_position_in_text(&self.rope.to_string(), offset)
+    }
+
+    pub fn position_to_offset(&self, position: LogicalPosition) -> Result<CharacterOffset> {
+        position_to_offset_in_text(&self.rope.to_string(), position)
+    }
+
+    pub fn display_column(&self, offset: CharacterOffset, tab_width: usize) -> Result<usize> {
+        display_column_in_text(&self.rope.to_string(), offset, tab_width)
+    }
+
+    pub fn offset_for_display_column(
+        &self,
+        line: u32,
+        column: usize,
+        tab_width: usize,
+    ) -> Result<CharacterOffset> {
+        offset_for_display_column_in_text(&self.rope.to_string(), line, column, tab_width)
+    }
+
+    pub fn insert(&mut self, at: CharacterOffset, text: &str) -> Result<AppliedTransaction> {
+        self.apply_transaction(Transaction::new(vec![Edit::insert(at, text)])?)
+    }
+
+    pub fn delete(&mut self, range: TextRange) -> Result<AppliedTransaction> {
+        self.apply_transaction(Transaction::new(vec![Edit::delete(range)])?)
+    }
+
+    pub fn replace(&mut self, range: TextRange, text: &str) -> Result<AppliedTransaction> {
+        self.apply_transaction(Transaction::new(vec![Edit::replace(range, text)])?)
+    }
+
+    pub fn apply_transaction(&mut self, transaction: Transaction) -> Result<AppliedTransaction> {
+        self.apply_transaction_internal(transaction, None)
+    }
+
+    pub(crate) fn apply_transaction_with_markers(
+        &mut self,
+        transaction: Transaction,
+        additional_markers: Vec<AutoPairMarker>,
+    ) -> Result<AppliedTransaction> {
+        self.apply_transaction_internal(transaction, Some(additional_markers))
+    }
+
+    fn apply_transaction_internal(
+        &mut self,
+        mut transaction: Transaction,
+        additional_markers: Option<Vec<AutoPairMarker>>,
+    ) -> Result<AppliedTransaction> {
+        let original = self.rope.to_string();
+        validate_transaction_in_text(&original, &transaction)?;
+        transaction.edits.retain(|edit| {
+            let start = char_to_byte(&original, edit.range.start.0);
+            let end = char_to_byte(&original, edit.range.end.0);
+            original[start..end] != edit.replacement
+        });
+
+        if transaction.edits.is_empty() {
+            if let Some(selections) = transaction.selection_after {
+                validate_selections_in_text(&original, &selections)?;
+                self.selections = selections;
+            }
+            return Ok(AppliedTransaction {
+                changed: false,
+                version: self.version,
+            });
+        }
+
+        let final_text = apply_edits_to_string(&original, &transaction.edits);
+        let selections_before = self.selections.clone();
+        let selections_after = if let Some(selections) = &transaction.selection_after {
+            validate_selections_in_text(&final_text, selections)?;
+            selections.clone()
+        } else {
+            transform_selections(&self.selections, &transaction.edits)?
+        };
+        validate_selections_in_text(&final_text, &selections_after)?;
+
+        let inverse = inverse_transaction(&original, &transaction.edits)?;
+        let markers_before = self.auto_pairs.clone();
+        let mut markers_after = transform_markers(&markers_before, &transaction.edits);
+        if let Some(mut markers) = additional_markers {
+            markers_after.append(&mut markers);
+            markers_after.sort_by_key(|marker| marker.open_start);
+        }
+
+        apply_edits_to_rope(&mut self.rope, &transaction.edits);
+        self.selections = selections_after.clone();
+        self.auto_pairs.clone_from(&markers_after);
+        let state_before = self.current_state;
+        let state_after = self.next_state;
+        self.next_state = self.next_state.saturating_add(1);
+        self.current_state = state_after;
+        self.version = self.version.saturating_add(1);
+        self.undo.push(HistoryEntry {
+            forward: transaction,
+            inverse,
+            selections_before,
+            selections_after,
+            markers_before,
+            markers_after,
+            state_before,
+            state_after,
+        });
+        self.redo.clear();
+        Ok(AppliedTransaction {
+            changed: true,
+            version: self.version,
+        })
+    }
+
+    pub fn undo(&mut self) -> Result<bool> {
+        let Some(entry) = self.undo.pop() else {
+            return Ok(false);
+        };
+        let current = self.rope.to_string();
+        validate_transaction_in_text(&current, &entry.inverse)?;
+        apply_edits_to_rope(&mut self.rope, &entry.inverse.edits);
+        self.selections = entry.selections_before.clone();
+        self.auto_pairs.clone_from(&entry.markers_before);
+        self.current_state = entry.state_before;
+        self.version = self.version.saturating_add(1);
+        self.redo.push(entry);
+        Ok(true)
+    }
+
+    pub fn redo(&mut self) -> Result<bool> {
+        let Some(entry) = self.redo.pop() else {
+            return Ok(false);
+        };
+        let current = self.rope.to_string();
+        validate_transaction_in_text(&current, &entry.forward)?;
+        apply_edits_to_rope(&mut self.rope, &entry.forward.edits);
+        self.selections = entry.selections_after.clone();
+        self.auto_pairs.clone_from(&entry.markers_after);
+        self.current_state = entry.state_after;
+        self.version = self.version.saturating_add(1);
+        self.undo.push(entry);
+        Ok(true)
+    }
+
+    pub fn move_left(&mut self, extend: bool) -> Result<()> {
+        let text = self.rope.to_string();
+        self.selections = self.selections.mapped(|selection| {
+            let active = if !extend && !selection.is_cursor() {
+                selection.range().start
+            } else {
+                previous_grapheme_offset(&text, selection.active)
+            };
+            selection.with_active(active, extend)
+        })?;
+        Ok(())
+    }
+
+    pub fn move_right(&mut self, extend: bool) -> Result<()> {
+        let text = self.rope.to_string();
+        self.selections = self.selections.mapped(|selection| {
+            let active = if !extend && !selection.is_cursor() {
+                selection.range().end
+            } else {
+                next_grapheme_offset(&text, selection.active)
+            };
+            selection.with_active(active, extend)
+        })?;
+        Ok(())
+    }
+
+    pub fn move_vertical(&mut self, line_delta: i32, extend: bool, tab_width: usize) -> Result<()> {
+        let text = self.rope.to_string();
+        let mut moved = Vec::with_capacity(self.selections.len());
+        for selection in self.selections.selections() {
+            let position = offset_to_position_in_text(&text, selection.active)?;
+            let desired = display_column_in_text(&text, selection.active, tab_width)?;
+            let last_line = line_bounds(&text, u32::MAX).map_or_else(
+                || text.chars().filter(|character| *character == '\n').count(),
+                |_| 0,
+            );
+            let target = i64::from(position.line)
+                .saturating_add(i64::from(line_delta))
+                .clamp(0, i64::try_from(last_line).unwrap_or(i64::MAX));
+            let line = u32::try_from(target).unwrap_or(u32::MAX);
+            let active = offset_for_display_column_in_text(&text, line, desired, tab_width)?;
+            moved.push(selection.with_active(active, extend));
+        }
+        self.selections = SelectionSet::new(moved, self.selections.primary_index())?;
+        Ok(())
+    }
+}
+
+impl fmt::Display for TextBuffer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.rope.to_string())
+    }
+}
+
+fn validate_transaction_in_text(text: &str, transaction: &Transaction) -> Result<()> {
+    let mut previous: Option<&Edit> = None;
+    for edit in &transaction.edits {
+        validate_range_in_text(text, edit.range)?;
+        if let Some(left) = previous {
+            let overlap = edit.range.start < left.range.end;
+            let collision = edit.range.start == left.range.start
+                && (edit.range.start == edit.range.end || left.range.start == left.range.end);
+            if overlap || collision {
+                return Err(EditorError::OverlappingEdits {
+                    offset: edit.range.start.0,
+                });
+            }
+        }
+        previous = Some(edit);
+    }
+    Ok(())
+}
+
+fn validate_range_in_text(text: &str, range: TextRange) -> Result<()> {
+    let length = text.chars().count();
+    if range.start > range.end || range.end.0 > length {
+        return Err(EditorError::InvalidRange {
+            start: range.start.0,
+            end: range.end.0,
+            length,
+        });
+    }
+    validate_caret_boundary(text, range.start)?;
+    validate_caret_boundary(text, range.end)
+}
+
+fn validate_selections_in_text(text: &str, selections: &SelectionSet) -> Result<()> {
+    for selection in selections.selections() {
+        validate_range_in_text(text, selection.range())?;
+    }
+    Ok(())
+}
+
+fn validate_caret_boundary(text: &str, offset: CharacterOffset) -> Result<()> {
+    let length = text.chars().count();
+    if offset.0 > length {
+        return Err(EditorError::OffsetOutOfBounds {
+            offset: offset.0,
+            length,
+        });
+    }
+    if offset.0 > 0 && offset.0 < length {
+        let before = text.chars().nth(offset.0 - 1);
+        let after = text.chars().nth(offset.0);
+        if before == Some('\r') && after == Some('\n') {
+            return Err(EditorError::InvalidCaretBoundary { offset: offset.0 });
+        }
+    }
+    Ok(())
+}
+
+fn inverse_transaction(original: &str, edits: &[Edit]) -> Result<Transaction> {
+    let mut delta: isize = 0;
+    let mut inverse = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let start = char_to_byte(original, edit.range.start.0);
+        let end = char_to_byte(original, edit.range.end.0);
+        let removed = original[start..end].to_owned();
+        let final_start = edit.range.start.0.saturating_add_signed(delta);
+        let inserted_len = edit.replacement.chars().count();
+        inverse.push(Edit::replace(
+            TextRange {
+                start: CharacterOffset(final_start),
+                end: CharacterOffset(final_start + inserted_len),
+            },
+            removed,
+        ));
+        let removed_len = edit.range.end.0 - edit.range.start.0;
+        delta = delta.saturating_add(
+            isize::try_from(inserted_len).unwrap_or(isize::MAX)
+                - isize::try_from(removed_len).unwrap_or(isize::MAX),
+        );
+    }
+    TransactionBuilder::new().extend(inverse).build()
+}
+
+fn apply_edits_to_rope(rope: &mut Rope, edits: &[Edit]) {
+    for edit in edits.iter().rev() {
+        rope.remove(edit.range.start.0..edit.range.end.0);
+        if !edit.replacement.is_empty() {
+            rope.insert(edit.range.start.0, &edit.replacement);
+        }
+    }
+}
+
+fn apply_edits_to_string(text: &str, edits: &[Edit]) -> String {
+    let mut result = text.to_owned();
+    for edit in edits.iter().rev() {
+        let start = char_to_byte(&result, edit.range.start.0);
+        let end = char_to_byte(&result, edit.range.end.0);
+        result.replace_range(start..end, &edit.replacement);
+    }
+    result
+}
+
+fn transform_selections(selections: &SelectionSet, edits: &[Edit]) -> Result<SelectionSet> {
+    selections.mapped(|selection| Selection {
+        anchor: transform_offset(selection.anchor, edits),
+        active: transform_offset(selection.active, edits),
+    })
+}
+
+fn transform_offset(offset: CharacterOffset, edits: &[Edit]) -> CharacterOffset {
+    let mut delta: isize = 0;
+    for edit in edits {
+        let inserted = edit.replacement.chars().count();
+        let removed = edit.range.end.0 - edit.range.start.0;
+        if offset < edit.range.start {
+            break;
+        }
+        if offset <= edit.range.end {
+            return CharacterOffset(edit.range.start.0.saturating_add_signed(delta) + inserted);
+        }
+        delta = delta.saturating_add(
+            isize::try_from(inserted).unwrap_or(isize::MAX)
+                - isize::try_from(removed).unwrap_or(isize::MAX),
+        );
+    }
+    CharacterOffset(offset.0.saturating_add_signed(delta))
+}
+
+fn transform_markers(markers: &[AutoPairMarker], edits: &[Edit]) -> Vec<AutoPairMarker> {
+    markers
+        .iter()
+        .filter_map(|marker| {
+            let mut delta: isize = 0;
+            for edit in edits {
+                let inserted = edit.replacement.chars().count();
+                let removed = edit.range.end.0 - edit.range.start.0;
+                if edit.range.end.0 <= marker.open_start {
+                    delta = delta.saturating_add(
+                        isize::try_from(inserted).unwrap_or(isize::MAX)
+                            - isize::try_from(removed).unwrap_or(isize::MAX),
+                    );
+                } else if edit.range.start.0 < marker.end()
+                    || (edit.range.start == edit.range.end
+                        && edit.range.start.0 > marker.open_start
+                        && edit.range.start.0 < marker.end())
+                {
+                    return None;
+                }
+            }
+            let mut shifted = marker.clone();
+            shifted.open_start = shifted.open_start.saturating_add_signed(delta);
+            shifted.close_start = shifted.close_start.saturating_add_signed(delta);
+            Some(shifted)
+        })
+        .collect()
+}
+
+pub(crate) fn previous_grapheme_offset(text: &str, offset: CharacterOffset) -> CharacterOffset {
+    if offset.0 == 0 {
+        return offset;
+    }
+    let byte = char_to_byte(text, offset.0);
+    let previous_byte = text[..byte]
+        .grapheme_indices(true)
+        .next_back()
+        .map_or(0, |(index, _)| index);
+    CharacterOffset(text[..previous_byte].chars().count())
+}
+
+pub(crate) fn next_grapheme_offset(text: &str, offset: CharacterOffset) -> CharacterOffset {
+    let byte = char_to_byte(text, offset.0);
+    let next = text[byte..]
+        .graphemes(true)
+        .next()
+        .map_or(offset.0, |grapheme| offset.0 + grapheme.chars().count());
+    CharacterOffset(next)
+}
+
+pub(crate) fn char_to_byte(text: &str, char_offset: usize) -> usize {
+    text.char_indices()
+        .nth(char_offset)
+        .map_or(text.len(), |(byte, _)| byte)
+}
+
+fn line_bounds(text: &str, requested_line: u32) -> Option<(usize, usize, usize)> {
+    let requested = usize::try_from(requested_line).ok()?;
+    let mut line = 0;
+    let mut start = 0;
+    let chars: Vec<char> = text.chars().collect();
+    for (index, character) in chars.iter().enumerate() {
+        if *character == '\n' {
+            if line == requested {
+                let content_end = if index > start && chars[index - 1] == '\r' {
+                    index - 1
+                } else {
+                    index
+                };
+                return Some((start, content_end, index + 1));
+            }
+            line += 1;
+            start = index + 1;
+        }
+    }
+    (line == requested).then_some((start, chars.len(), chars.len()))
+}
+
+fn offset_to_position_in_text(text: &str, offset: CharacterOffset) -> Result<LogicalPosition> {
+    validate_caret_boundary(text, offset)?;
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for current in text.chars().take(offset.0) {
+        if current == '\n' {
+            line = line.saturating_add(1);
+            character = 0;
+        } else if current != '\r' || text.chars().nth(offset.0) != Some('\n') {
+            character = character.saturating_add(1);
+        }
+    }
+    Ok(LogicalPosition { line, character })
+}
+
+fn position_to_offset_in_text(text: &str, position: LogicalPosition) -> Result<CharacterOffset> {
+    let (start, content_end, _) =
+        line_bounds(text, position.line).ok_or(EditorError::InvalidPosition {
+            line: position.line,
+            character: position.character,
+        })?;
+    let character =
+        usize::try_from(position.character).map_err(|_| EditorError::InvalidPosition {
+            line: position.line,
+            character: position.character,
+        })?;
+    if start + character > content_end {
+        return Err(EditorError::InvalidPosition {
+            line: position.line,
+            character: position.character,
+        });
+    }
+    Ok(CharacterOffset(start + character))
+}
+
+fn display_column_in_text(text: &str, offset: CharacterOffset, tab_width: usize) -> Result<usize> {
+    let position = offset_to_position_in_text(text, offset)?;
+    let (start, _, _) = line_bounds(text, position.line).ok_or(EditorError::InvalidPosition {
+        line: position.line,
+        character: position.character,
+    })?;
+    let prefix = &text[char_to_byte(text, start)..char_to_byte(text, offset.0)];
+    let mut column = 0;
+    for grapheme in prefix.graphemes(true) {
+        if grapheme == "\t" {
+            let width = tab_width.max(1);
+            column += width - (column % width);
+        } else {
+            column += UnicodeWidthStr::width(grapheme);
+        }
+    }
+    Ok(column)
+}
+
+fn offset_for_display_column_in_text(
+    text: &str,
+    line: u32,
+    target: usize,
+    tab_width: usize,
+) -> Result<CharacterOffset> {
+    let (start, content_end, _) =
+        line_bounds(text, line).ok_or(EditorError::InvalidPosition { line, character: 0 })?;
+    let line_text = &text[char_to_byte(text, start)..char_to_byte(text, content_end)];
+    let mut column = 0;
+    let mut chars = 0;
+    for grapheme in line_text.graphemes(true) {
+        let width = if grapheme == "\t" {
+            let tab = tab_width.max(1);
+            tab - (column % tab)
+        } else {
+            UnicodeWidthStr::width(grapheme)
+        };
+        if column + width > target {
+            break;
+        }
+        column += width;
+        chars += grapheme.chars().count();
+    }
+    Ok(CharacterOffset(start + chars))
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case("a\nb", LogicalPosition { line: 1, character: 1 }, CharacterOffset(3))]
+    #[case("a\r\nb", LogicalPosition { line: 1, character: 1 }, CharacterOffset(4))]
+    #[case("界🙂\n", LogicalPosition { line: 0, character: 2 }, CharacterOffset(2))]
+    fn logical_positions_round_trip(
+        #[case] text: &str,
+        #[case] position: LogicalPosition,
+        #[case] offset: CharacterOffset,
+    ) {
+        let buffer = TextBuffer::new(text);
+        assert_eq!(buffer.position_to_offset(position), Ok(offset));
+        assert_eq!(buffer.offset_to_position(offset), Ok(position));
+    }
+
+    #[test]
+    fn crlf_split_is_rejected() {
+        let mut buffer = TextBuffer::new("a\r\nb");
+        let error =
+            buffer.set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(2))));
+        assert_eq!(error, Err(EditorError::InvalidCaretBoundary { offset: 2 }));
+    }
+
+    #[test]
+    fn wide_and_combining_graphemes_move_as_units() {
+        let mut buffer = TextBuffer::new("e\u{301}界🙂");
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(4))))
+            .expect("valid cursor");
+        buffer.move_left(false).expect("movement succeeds");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(3));
+        buffer.move_left(false).expect("movement succeeds");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(2));
+        buffer.move_left(false).expect("movement succeeds");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(0));
+        assert_eq!(buffer.display_column(CharacterOffset(3), 4), Ok(3));
+    }
+
+    #[test]
+    fn crlf_fixture_round_trips_positions_and_offsets() {
+        let text = "a\r\n界🙂\r\n";
+        let buffer = TextBuffer::new(text);
+        assert_eq!(buffer.line_count(), 3);
+        assert_eq!(
+            buffer.offset_to_position(CharacterOffset(0)),
+            Ok(LogicalPosition {
+                line: 0,
+                character: 0
+            })
+        );
+        assert_eq!(
+            buffer.position_to_offset(LogicalPosition {
+                line: 1,
+                character: 1
+            }),
+            Ok(CharacterOffset(4))
+        );
+        assert_eq!(
+            buffer.offset_to_position(CharacterOffset(5)),
+            Ok(LogicalPosition {
+                line: 1,
+                character: 2
+            })
+        );
+    }
+
+    #[test]
+    fn simultaneous_edits_use_original_coordinates() {
+        let mut buffer = TextBuffer::new("abcdef");
+        let transaction = Transaction::new(vec![
+            Edit::replace(
+                TextRange::new(CharacterOffset(1), CharacterOffset(3)).unwrap(),
+                "X",
+            ),
+            Edit::replace(
+                TextRange::new(CharacterOffset(4), CharacterOffset(6)).unwrap(),
+                "Y",
+            ),
+        ])
+        .expect("non-overlapping");
+        buffer.apply_transaction(transaction).expect("valid edits");
+        assert_eq!(buffer.to_string(), "aXdY");
+        assert_eq!(buffer.version(), 1);
+    }
+
+    #[test]
+    fn overlapping_edits_are_typed_errors() {
+        let result = Transaction::new(vec![
+            Edit::delete(TextRange::new(CharacterOffset(1), CharacterOffset(4)).unwrap()),
+            Edit::delete(TextRange::new(CharacterOffset(3), CharacterOffset(5)).unwrap()),
+        ]);
+        assert_eq!(result, Err(EditorError::OverlappingEdits { offset: 3 }));
+    }
+
+    #[test]
+    fn undo_redo_restore_text_selections_dirty_and_versions() {
+        let mut buffer = TextBuffer::new("hello");
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(5))))
+            .expect("valid selection");
+        let after = SelectionSet::single(Selection::cursor(CharacterOffset(6)));
+        let transaction = Transaction::new(vec![Edit::insert(CharacterOffset(5), "!")])
+            .expect("transaction")
+            .with_selection_after(after.clone());
+        buffer.apply_transaction(transaction).expect("apply");
+        assert!(buffer.is_dirty());
+        assert_eq!(buffer.selections(), &after);
+        assert_eq!(buffer.version(), 1);
+        assert!(buffer.undo().expect("undo"));
+        assert_eq!(buffer.to_string(), "hello");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(5));
+        assert!(!buffer.is_dirty());
+        assert_eq!(buffer.version(), 2);
+        assert!(buffer.redo().expect("redo"));
+        assert_eq!(buffer.to_string(), "hello!");
+        assert_eq!(buffer.selections(), &after);
+        assert_eq!(buffer.version(), 3);
+    }
+
+    #[test]
+    fn large_file_policy_tracks_edits() {
+        let mut buffer = TextBuffer::with_large_file_threshold("1234", 5);
+        assert_eq!(
+            buffer.semantic_service_policy(),
+            SemanticServicePolicy::Enabled
+        );
+        buffer.insert(CharacterOffset(4), "5").expect("insert");
+        assert_eq!(
+            buffer.semantic_service_policy(),
+            SemanticServicePolicy::SuppressedLargeFile
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_insert_delete_sequences_preserve_valid_text(
+            initial in ".{0,80}",
+            operations in prop::collection::vec((any::<bool>(), 0usize..100, ".{0,8}"), 0..40),
+        ) {
+            let mut buffer = TextBuffer::new(&initial);
+            for (insert, raw, value) in operations {
+                let length = buffer.len_chars();
+                let at = raw % (length + 1);
+                if insert {
+                    buffer.insert(CharacterOffset(at), &value).expect("bounded insert");
+                } else if length > 0 {
+                    let end = (at + value.chars().count()).min(length);
+                    if at <= end {
+                        buffer.delete(TextRange::new(CharacterOffset(at), CharacterOffset(end)).unwrap())
+                            .expect("bounded delete");
+                    }
+                }
+                let text = buffer.to_string();
+                prop_assert_eq!(text.chars().count(), buffer.len_chars());
+            }
+        }
+
+        #[test]
+        fn transaction_undo_redo_is_exact(
+            initial in ".{0,80}",
+            replacement in ".{0,30}",
+            raw_start in 0usize..100,
+            raw_end in 0usize..100,
+        ) {
+            let mut buffer = TextBuffer::new(&initial);
+            let length = buffer.len_chars();
+            let start = raw_start.min(raw_end) % (length + 1);
+            let end = (raw_start.max(raw_end) % (length + 1)).max(start);
+            let before_selection = SelectionSet::single(Selection::cursor(CharacterOffset(start)));
+            buffer.set_selections(before_selection.clone()).expect("valid selection");
+            let after_offset = start + replacement.chars().count();
+            let after_selection = SelectionSet::single(Selection::cursor(CharacterOffset(after_offset)));
+            let transaction = Transaction::new(vec![Edit::replace(
+                TextRange::new(CharacterOffset(start), CharacterOffset(end)).unwrap(),
+                replacement,
+            )]).expect("transaction").with_selection_after(after_selection.clone());
+            let changed = buffer.apply_transaction(transaction).expect("apply").changed;
+            let edited = buffer.to_string();
+            if changed {
+                prop_assert!(buffer.undo().expect("undo"));
+                prop_assert_eq!(buffer.to_string(), initial);
+                prop_assert_eq!(buffer.selections(), &before_selection);
+                prop_assert!(buffer.redo().expect("redo"));
+                prop_assert_eq!(buffer.to_string(), edited);
+                prop_assert_eq!(buffer.selections(), &after_selection);
+            }
+        }
+    }
+}

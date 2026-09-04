@@ -7,7 +7,15 @@ license.workspace = true
 
 [dependencies]
 editor-types = { path = "../editor-types" }
+regex = "1.11"
+ropey = "1.6"
+thiserror.workspace = true
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
+
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true
-
