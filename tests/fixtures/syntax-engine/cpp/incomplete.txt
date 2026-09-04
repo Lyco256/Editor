@@ -1,0 +1,7 @@
+namespace demo {
+class Greeter {
+public:
+    int value() const {
+        return 1;
+    }
+};
