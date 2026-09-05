@@ -323,8 +323,17 @@ fn apply_extension_language_configuration(state: &mut AppState, root: &Path) {
         .collect::<Vec<_>>();
     directories.sort();
     for directory in directories {
-        let Ok(package) = vscode_compat::load_static_extension_directory(&directory) else {
-            continue;
+        let package = match vscode_compat::load_static_extension_directory(&directory) {
+            Ok(package) => package,
+            Err(error) => {
+                state.output.push(editor_types::OutputMessage {
+                    subsystem: "vscode-compat".to_owned(),
+                    operation: "extension".to_owned(),
+                    level: editor_types::OutputLevel::Warning,
+                    message: format!("{}: {error}", directory.display()),
+                });
+                continue;
+            }
         };
         let Some(language) = package.languages.iter().find(|language| {
             language.id.eq_ignore_ascii_case(&language_id)

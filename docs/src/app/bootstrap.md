@@ -30,4 +30,6 @@ resolved format, indentation, line-number, and large-file settings are applied t
 malformed settings remain visible as warning output. A workspace-local
 `.vscode/language-configuration.json`, when present, is parsed through the static compatibility
 boundary and its bracket pairs are applied to smart editing; parse failures and unsupported fields
-are surfaced as typed output instead of enabling unsafe defaults silently.
+are surfaced as typed output instead of enabling unsafe defaults silently. If the workspace file is
+absent, static language configurations from `.vscode/extensions` are considered; malformed extension
+metadata is reported as a compatibility warning rather than being silently discarded.
