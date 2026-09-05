@@ -292,6 +292,9 @@ fn json_path(uri: &str) -> PathBuf {
     let decoded = String::from_utf8_lossy(&decoded).replace('/', std::path::MAIN_SEPARATOR_STR);
     #[cfg(windows)]
     {
+        if prefix == "//" && decoded.as_bytes().get(1) == Some(&b':') {
+            return PathBuf::from(decoded);
+        }
         if prefix == "//" {
             return PathBuf::from(format!("\\\\{decoded}"));
         }

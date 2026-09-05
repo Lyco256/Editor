@@ -1015,6 +1015,9 @@ fn lsp_uri_path(uri: &str) -> PathBuf {
         let decoded = percent_decode_uri_path(path);
         #[cfg(windows)]
         {
+            if decoded.as_bytes().get(1) == Some(&b':') {
+                return PathBuf::from(decoded.replace('/', std::path::MAIN_SEPARATOR_STR));
+            }
             return PathBuf::from(format!(
                 "\\\\{}",
                 decoded.replace('/', std::path::MAIN_SEPARATOR_STR)
@@ -2572,6 +2575,11 @@ mod tests {
         };
         let uri = lsp_client::protocol::DocumentUri::from_path(&path);
         assert!(workspace_core::path_eq(&lsp_uri_path(&uri.0), &path));
+        #[cfg(windows)]
+        assert!(workspace_core::path_eq(
+            &lsp_uri_path(&uri.0.replacen("file:///", "file://", 1)),
+            &path
+        ));
     }
 
     #[test]
