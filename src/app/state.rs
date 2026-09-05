@@ -3144,6 +3144,7 @@ impl AppState {
         }
         let before_version = self.buffer.snapshot().version();
         let before_text = self.buffer.snapshot().text().to_owned();
+        let direct_paste = matches!(input, InputEvent::Paste(_));
         let result = match input {
             InputEvent::Paste(text) => self
                 .buffer
@@ -3260,6 +3261,13 @@ impl AppState {
         if self.buffer.snapshot().version() != before_version {
             self.diagnostics.clear();
             self.queue_lsp_did_change(before_text);
+            if direct_paste && self.format_on_paste {
+                if let Some(effect) = self.start_lsp_format(false) {
+                    self.deferred_effects.push(effect);
+                } else if let Some(effect) = self.start_format(false) {
+                    self.deferred_effects.push(effect);
+                }
+            }
         }
         self.sync_buffer_projection();
     }
@@ -5413,6 +5421,26 @@ mod tests {
             state.take_deferred_effects().first(),
             Some(Effect::FormatDocument { .. })
         ));
+    }
+
+    #[test]
+    fn direct_terminal_paste_schedules_formatting() {
+        let mut state = AppState {
+            workspace_trusted: true,
+            format_on_paste: true,
+            external_formatter: Some(ProcessSpec {
+                executable: "formatter".to_owned(),
+                arguments: Vec::new(),
+            }),
+            ..AppState::default()
+        };
+        let _ = state.apply_action(Action::Input(InputEvent::Paste(" pasted".to_owned())));
+        assert!(
+            state
+                .take_deferred_effects()
+                .iter()
+                .any(|effect| matches!(effect, Effect::FormatDocument { .. }))
+        );
     }
 
     #[test]

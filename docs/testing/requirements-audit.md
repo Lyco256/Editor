@@ -26,6 +26,7 @@ Implemented in the integration pass:
   and final-newline behavior;
 - confirmed root filesystem-operation prompts and background create/rename/move/delete effects,
   including dirty-buffer deletion protection and Explorer refresh;
+- direct terminal paste now participates in format-on-paste precedence and remains undoable;
 - root headless acceptance coverage for create, rename, move, and delete confirmation workflows;
 - Windows installer (`build/editor.iss`) and packaging script (`build/package.ps1`).
 
