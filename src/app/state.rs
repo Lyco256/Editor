@@ -728,6 +728,12 @@ impl AppState {
         &self.language_ui
     }
 
+    /// Exposes the latest syntax snapshot for host integrations and deterministic tests.
+    #[must_use]
+    pub const fn syntax_snapshot(&self) -> &syntax_engine::SyntaxSnapshot {
+        &self.syntax_snapshot
+    }
+
     /// Takes effects scheduled by asynchronous event application.
     pub(crate) fn take_deferred_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.deferred_effects)

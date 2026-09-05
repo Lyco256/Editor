@@ -1,5 +1,8 @@
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use editor::app::{
     action::Action,
@@ -47,6 +50,77 @@ struct FakeTerminal {
 #[derive(Debug, Default)]
 struct SaveDispatcher {
     events: Vec<Event>,
+}
+
+#[derive(Debug, Default)]
+struct SyntaxDispatcher {
+    events: Vec<Event>,
+}
+
+impl EffectDispatcher for SyntaxDispatcher {
+    fn dispatch(&mut self, effect: Effect) {
+        if let Effect::RefreshSyntax {
+            request,
+            document,
+            version,
+            path,
+            text,
+            large_file,
+        } = effect
+        {
+            let mut engine = syntax_engine::SyntaxEngine::default();
+            let update = engine.open_document(
+                syntax_engine::OpenDocument {
+                    descriptor: editor_core::DocumentDescriptor {
+                        id: document,
+                        version,
+                        large_file_mode: large_file,
+                    },
+                    path: path.as_deref(),
+                    language_override: None,
+                    text: &text,
+                },
+                None,
+            );
+            self.events.push(Event::SyntaxUpdated { request, update });
+        }
+    }
+
+    fn poll_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.events)
+    }
+}
+
+#[derive(Debug, Default)]
+struct CapturingTerminal {
+    entered: bool,
+    restored: bool,
+    shared_frame: Arc<Mutex<Option<Framebuffer>>>,
+}
+
+impl TerminalAdapter for CapturingTerminal {
+    type Error = Infallible;
+
+    fn capabilities(&self) -> TerminalCapabilities {
+        TerminalCapabilities::default()
+    }
+
+    fn enter(&mut self) -> Result<(), Self::Error> {
+        self.entered = true;
+        Ok(())
+    }
+
+    fn render(&mut self, frame: &Framebuffer) -> Result<(), Self::Error> {
+        if let Ok(mut captured) = self.shared_frame.lock() {
+            *captured = Some(frame.clone());
+        }
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<(), Self::Error> {
+        self.restored = true;
+        Ok(())
+    }
 }
 
 impl EffectDispatcher for SaveDispatcher {
@@ -159,6 +233,52 @@ fn startup_file_is_loaded_without_launching_external_effects() {
     assert_eq!(state.active_path.as_deref(), Some(path.as_path()));
     assert_eq!(state.active_text, "fn main() {}\n");
     assert!(state.output.is_empty());
+}
+
+#[test]
+fn root_headless_syntax_effect_renders_a_highlighted_frame() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let path = directory.path().join("main.rs");
+    std::fs::write(&path, "fn main() {}\n").expect("fixture");
+    let mut state = editor::app::state::AppState::default();
+    state.open_startup_path(&path);
+    let input = Action::Input(editor_types::InputEvent::Key(editor_types::KeyEvent {
+        code: editor_types::KeyCode::Character(' '),
+        modifiers: editor_types::Modifiers::default(),
+        repeat: false,
+    }));
+    let captured = Arc::new(Mutex::new(None));
+    let runtime = AppRuntime::with_state(
+        CapturingTerminal {
+            shared_frame: Arc::clone(&captured),
+            ..CapturingTerminal::default()
+        },
+        QueueActionSource::new([input, Action::Quit]),
+        SyntaxDispatcher::default(),
+        (80, 24),
+        state,
+    );
+    let final_state = runtime.run().expect("syntax runtime should finish");
+    assert!(final_state.syntax_snapshot().ticket.is_some());
+    assert!(
+        final_state
+            .syntax_snapshot()
+            .highlights
+            .iter()
+            .any(|span| span.role == editor_types::StyleRole::SyntaxKeyword)
+    );
+    let frame = captured
+        .lock()
+        .expect("captured frame lock")
+        .clone()
+        .expect("headless runtime should render a frame");
+    assert!((0..80).any(|column| {
+        (0..24).any(|row| {
+            frame
+                .get(column, row)
+                .is_ok_and(|cell| cell.foreground == editor_types::StyleRole::SyntaxKeyword)
+        })
+    }));
 }
 
 #[test]

@@ -36,9 +36,9 @@ Still release-blocking or environment-blocked:
 3. The root-level headless acceptance suite now covers the fake-server initialize/request/response
    lifecycle, semantic tokens, Git projection/mutation routing, encoding round trips, and
    large-file suppression, as well as language panels, cancellation, crash notification, and
-   replacement-server startup. Full scenario breadth is still short of the release matrix,
-   notably a root-driven Syntax output event test and complete interactive UI routing for all
-   language actions.
+   replacement-server startup. A Syntax effect now reaches a rendered Root framebuffer. Full
+   scenario breadth is still short of the release matrix, notably complete interactive UI routing
+   for all language actions.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining root acceptance coverage, installer/performance/smoke evidence, and
