@@ -866,10 +866,17 @@ fn remove_resource(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
-fn restore_resource_backups(backups: &[ResourceBackup]) {
+fn restore_resource_backups(backups: &[ResourceBackup]) -> Result<(), String> {
+    let mut failures = Vec::new();
     for backup in backups.iter().rev() {
         if backup.path.exists() {
-            let _ = remove_resource(&backup.path);
+            if let Err(error) = remove_resource(&backup.path) {
+                failures.push(format!(
+                    "could not remove {}: {error}",
+                    backup.path.display()
+                ));
+                continue;
+            }
         }
         let Some(entries) = &backup.entries else {
             continue;
@@ -881,14 +888,32 @@ fn restore_resource_backups(backups: &[ResourceBackup]) {
                 backup.path.join(relative)
             };
             if *is_directory {
-                let _ = std::fs::create_dir_all(&destination);
+                if let Err(error) = std::fs::create_dir_all(&destination) {
+                    failures.push(format!(
+                        "could not restore {}: {error}",
+                        destination.display()
+                    ));
+                }
             } else {
                 if let Some(parent) = destination.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                    if let Err(error) = std::fs::create_dir_all(parent) {
+                        failures.push(format!("could not restore {}: {error}", parent.display()));
+                        continue;
+                    }
                 }
-                let _ = std::fs::write(destination, bytes);
+                if let Err(error) = std::fs::write(&destination, bytes) {
+                    failures.push(format!(
+                        "could not restore {}: {error}",
+                        destination.display()
+                    ));
+                }
             }
         }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
     }
 }
 
@@ -1168,8 +1193,12 @@ fn apply_lsp_workspace_edit(
             }
         };
         if let Err(error) = result {
-            restore_resource_backups(&backups);
-            return Err(format!("workspace resource operation failed: {error}"));
+            return Err(match restore_resource_backups(&backups) {
+                Ok(()) => format!("workspace resource operation failed: {error}"),
+                Err(rollback_error) => format!(
+                    "workspace resource operation failed: {error}; rollback failed: {rollback_error}"
+                ),
+            });
         }
     }
     let text_result = (|| {
@@ -1254,10 +1283,10 @@ fn apply_lsp_workspace_edit(
     })();
     match text_result {
         Ok(prepared) => Ok(prepared),
-        Err(error) => {
-            restore_resource_backups(&backups);
-            Err(error)
-        }
+        Err(error) => Err(match restore_resource_backups(&backups) {
+            Ok(()) => error,
+            Err(rollback_error) => format!("{error}; rollback failed: {rollback_error}"),
+        }),
     }
 }
 
