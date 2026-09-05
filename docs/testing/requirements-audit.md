@@ -1,8 +1,8 @@
 # Requirements audit (2026-09-05)
 
-The integrated `devenv` and `main` refs point to the same verified commit.
-Automated quality gates pass: formatting, workspace Clippy with warnings denied, all workspace
-tests, source/document mirrors, release build, and redirected headless startup.
+`devenv` is the current integration branch; it is not yet promoted to `main` because release gates
+remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
+all workspace tests, source/document mirrors, release build, and redirected headless startup.
 
 Implemented in the integration pass:
 
@@ -20,25 +20,26 @@ Implemented in the integration pass:
   LSP discovery state, and asynchronous Git status effects;
 - root syntax refresh/folding/error markers, streaming project-search events with cancellation,
   structured trust-gated LSP request effects with negotiated position encoding, and Git dashboard
-  population/status refresh after successful mutations;
+  population/status refresh after successful mutations; Tokio scheduling for root background work;
+- root command-palette routing for Git Changes, Diff, Branches, Stashes, History, Commit, and
+  Conflicts views;
 - Windows installer (`build/editor.iss`) and packaging script (`build/package.ps1`).
 
 Still release-blocking or environment-blocked:
 
-1. Search and native watcher workers use standard threads; the architecture target is Tokio-based
-   orchestration for search, watcher, and background services.
-2. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
+1. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
    open/close measurements because this environment cannot provide an interactive Windows Terminal.
    `docs/testing/final-smoke.md` records the same limitation. The master requirement requires user
    approval before treating those missing measurements as an exception.
-3. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
+2. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
    been compiled; the release binary and staging package script are verified.
-4. The root-level headless acceptance suite now covers the fake-server initialize/request/response
+3. The root-level headless acceptance suite now covers the fake-server initialize/request/response
    lifecycle, semantic tokens, Git projection/mutation routing, encoding round trips, and
-   large-file suppression. Full scenario breadth is still short of the release matrix (notably
-   root-driven Syntax output, LSP cancellation/crash-restart, and complete UI routing for some
-   Git and language actions).
+   large-file suppression, as well as language panels, cancellation, crash notification, and
+   replacement-server startup. Full scenario breadth is still short of the release matrix,
+   notably a root-driven Syntax output event test and complete interactive UI routing for all
+   language actions.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
-complete until the remaining service wiring, root acceptance coverage, and Windows performance/smoke
-evidence are supplied.
+complete until the remaining root acceptance coverage, installer/performance/smoke evidence, and
+promotion to an identical verified `main` state are supplied.
