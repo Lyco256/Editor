@@ -13,7 +13,7 @@ The interactive PTY sample measured approximately **7.5 MiB working set** (7,897
 0.06 s (no measurable CPU increase in that sample). Five redirected release launches completed in
 157.51 ms total (**31.50 ms average**), covering repeated startup/close lifecycle overhead.
 
-The deterministic editor-core 10 MiB edit transaction completed in **21.26 ms** on the same host,
+The deterministic editor-core 10 MiB edit transaction completed in **21.22 ms** on the same host,
 below the 250 ms automated budget. This measures the bounded text-edit path without terminal I/O;
 native keystroke-to-frame latency is still not directly profiled.
 

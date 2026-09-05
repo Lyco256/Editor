@@ -295,7 +295,7 @@ fn ten_mib_edit_transaction_stays_within_interactive_budget() {
         .apply_transaction(transaction)
         .expect("10 MiB edit should be valid");
     let elapsed = started.elapsed();
-    println!("10 MiB edit transaction: {:.2?}", elapsed);
+    println!("10 MiB edit transaction: {elapsed:.2?}");
     assert!(elapsed < std::time::Duration::from_millis(250));
 }
 
