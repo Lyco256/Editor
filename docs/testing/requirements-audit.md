@@ -28,13 +28,16 @@ Still release-blocking or environment-blocked:
 2. Format-on-save and format-on-paste, plus full Problems/Git/LSP interactive views, remain
    UI-service integration work. Manual formatting, clipboard commands, Save As, dirty close
    protection, and project replacement effects are covered by root transitions and headless tests.
-3. Search and native watcher workers use standard threads; the architecture target is Tokio-based
+3. Root document tabs do not yet retain detected encoding/BOM and line-ending metadata: session
+   serialization emits `None` for the original encoding/EOL and ordinary saves use UTF-8/LF
+   defaults. Encoding-preserving reopen/save and the status-bar values are therefore incomplete.
+4. Search and native watcher workers use standard threads; the architecture target is Tokio-based
    orchestration.
-4. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
+5. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
    open/close measurements because this environment cannot provide an interactive Windows Terminal.
    `docs/testing/final-smoke.md` records the same limitation. The master requirement requires user
    approval before treating those missing measurements as an exception.
-5. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
+6. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
    been compiled; the release binary and staging package script are verified.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
