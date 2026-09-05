@@ -1,6 +1,6 @@
 # Final integration results
 
-Wave 2 integration is verified on the current tip of `devenv`. It has not yet been promoted to
+Wave 2 integration is verified on the current tip of `devenv` (2026-09-06). It has not yet been promoted to
 `main`, because release-blocking evidence and promotion remain. On this
 verified integration state, format check, workspace Clippy with
 warnings denied, all workspace tests, source/document mirror check, release build, and redirected
@@ -31,7 +31,8 @@ replace-all behavior through root state, with keyboard prompt entry and typed in
 errors. Quick Open and project search also have keyboard prompt entry, and resolved VS Code
 keybindings dispatch through root commands.
 Explorer directory clicks now toggle an expanded-directory set and dispatch background refreshes;
-file rows continue to open tabs without renderer I/O.
+Ctrl+Shift+E focuses the tree for keyboard navigation and Enter opens files; file rows continue to
+open tabs without renderer I/O.
 
 LSP didChange notifications now carry the smallest changed range derivable from the old/current
 snapshots. Workspace-local and static-extension language configuration drives bracket/surrounding
