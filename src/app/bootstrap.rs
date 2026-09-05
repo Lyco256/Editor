@@ -680,84 +680,93 @@ fn apply_lsp_workspace_edit(
             return Err(format!("workspace resource operation failed: {error}"));
         }
     }
-    let mut prepared = Vec::new();
-    for path in lsp_workspace_text_paths(edit) {
-        let document = workspace_core::load_text_document(
-            &path,
-            &workspace_core::DocumentLoadOptions::default(),
-        )
-        .map_err(|error| format!("could not load {}: {error}", path.display()))?;
-        let edits = lsp_workspace_edits_for_path(edit, &path);
-        if edits.is_empty() {
-            return Err(format!(
-                "workspace edit contained no text edits for {}",
-                path.display()
-            ));
-        }
-        let snapshot = lsp_client::TextSnapshot::new(document.text.clone());
-        let mut converted = Vec::new();
-        for value in edits {
-            let range = value
-                .get("range")
-                .ok_or_else(|| "workspace edit omitted a range".to_owned())?;
-            let start: lsp_client::protocol::Position = serde_json::from_value(
-                range
-                    .get("start")
-                    .cloned()
-                    .ok_or_else(|| "workspace edit omitted a start position".to_owned())?,
+    let text_result = (|| {
+        let mut prepared = Vec::new();
+        for path in lsp_workspace_text_paths(edit) {
+            let document = workspace_core::load_text_document(
+                &path,
+                &workspace_core::DocumentLoadOptions::default(),
             )
-            .map_err(|error| format!("invalid workspace edit start position: {error}"))?;
-            let end: lsp_client::protocol::Position = serde_json::from_value(
-                range
-                    .get("end")
-                    .cloned()
-                    .ok_or_else(|| "workspace edit omitted an end position".to_owned())?,
+            .map_err(|error| format!("could not load {}: {error}", path.display()))?;
+            let edits = lsp_workspace_edits_for_path(edit, &path);
+            if edits.is_empty() {
+                return Err(format!(
+                    "workspace edit contained no text edits for {}",
+                    path.display()
+                ));
+            }
+            let snapshot = lsp_client::TextSnapshot::new(document.text.clone());
+            let mut converted = Vec::new();
+            for value in edits {
+                let range = value
+                    .get("range")
+                    .ok_or_else(|| "workspace edit omitted a range".to_owned())?;
+                let start: lsp_client::protocol::Position = serde_json::from_value(
+                    range
+                        .get("start")
+                        .cloned()
+                        .ok_or_else(|| "workspace edit omitted a start position".to_owned())?,
+                )
+                .map_err(|error| format!("invalid workspace edit start position: {error}"))?;
+                let end: lsp_client::protocol::Position = serde_json::from_value(
+                    range
+                        .get("end")
+                        .cloned()
+                        .ok_or_else(|| "workspace edit omitted an end position".to_owned())?,
+                )
+                .map_err(|error| format!("invalid workspace edit end position: {error}"))?;
+                let start = lsp_client::PositionMapper::new(&snapshot, encoding)
+                    .from_lsp(start)
+                    .map_err(|error| format!("could not map workspace edit start: {error}"))?;
+                let end = lsp_client::PositionMapper::new(&snapshot, encoding)
+                    .from_lsp(end)
+                    .map_err(|error| format!("could not map workspace edit end: {error}"))?;
+                let buffer = editor_core::TextBuffer::new(&document.text);
+                let start = buffer
+                    .position_to_offset(start)
+                    .map_err(|error| format!("invalid workspace edit start: {error}"))?;
+                let end = buffer
+                    .position_to_offset(end)
+                    .map_err(|error| format!("invalid workspace edit end: {error}"))?;
+                let replacement = value
+                    .get("newText")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "workspace edit omitted replacement text".to_owned())?;
+                converted.push(editor_core::Edit::replace(
+                    editor_types::TextRange { start, end },
+                    replacement,
+                ));
+            }
+            let transaction = editor_core::Transaction::new(converted)
+                .map_err(|error| format!("invalid workspace edit transaction: {error}"))?;
+            let mut buffer = editor_core::TextBuffer::new(&document.text);
+            buffer
+                .apply_transaction(transaction)
+                .map_err(|error| format!("could not apply workspace edit: {error}"))?;
+            let mut updated = document;
+            updated.text = buffer.to_string();
+            workspace_core::save_text_document(
+                &updated.path,
+                &updated.text,
+                &workspace_core::DocumentSaveOptions {
+                    encoding: updated.encoding.clone(),
+                    with_bom: updated.had_bom,
+                    line_endings: updated.line_endings,
+                    ..workspace_core::DocumentSaveOptions::default()
+                },
             )
-            .map_err(|error| format!("invalid workspace edit end position: {error}"))?;
-            let start = lsp_client::PositionMapper::new(&snapshot, encoding)
-                .from_lsp(start)
-                .map_err(|error| format!("could not map workspace edit start: {error}"))?;
-            let end = lsp_client::PositionMapper::new(&snapshot, encoding)
-                .from_lsp(end)
-                .map_err(|error| format!("could not map workspace edit end: {error}"))?;
-            let buffer = editor_core::TextBuffer::new(&document.text);
-            let start = buffer
-                .position_to_offset(start)
-                .map_err(|error| format!("invalid workspace edit start: {error}"))?;
-            let end = buffer
-                .position_to_offset(end)
-                .map_err(|error| format!("invalid workspace edit end: {error}"))?;
-            let replacement = value
-                .get("newText")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "workspace edit omitted replacement text".to_owned())?;
-            converted.push(editor_core::Edit::replace(
-                editor_types::TextRange { start, end },
-                replacement,
-            ));
+            .map_err(|error| format!("could not save {}: {error}", updated.path.display()))?;
+            prepared.push(updated);
         }
-        let transaction = editor_core::Transaction::new(converted)
-            .map_err(|error| format!("invalid workspace edit transaction: {error}"))?;
-        let mut buffer = editor_core::TextBuffer::new(&document.text);
-        buffer
-            .apply_transaction(transaction)
-            .map_err(|error| format!("could not apply workspace edit: {error}"))?;
-        let mut updated = document;
-        updated.text = buffer.to_string();
-        workspace_core::save_text_document(
-            &updated.path,
-            &updated.text,
-            &workspace_core::DocumentSaveOptions {
-                encoding: updated.encoding.clone(),
-                with_bom: updated.had_bom,
-                line_endings: updated.line_endings,
-                ..workspace_core::DocumentSaveOptions::default()
-            },
-        )
-        .map_err(|error| format!("could not save {}: {error}", updated.path.display()))?;
-        prepared.push(updated);
+        Ok::<_, String>(prepared)
+    })();
+    match text_result {
+        Ok(prepared) => Ok(prepared),
+        Err(error) => {
+            rollback(&backups);
+            Err(error)
+        }
     }
-    Ok(prepared)
 }
 
 struct ServiceDispatcher {
@@ -1933,5 +1942,27 @@ mod tests {
         .expect_err("outside operation must be rejected");
         assert!(error.contains("untrusted path"));
         assert!(!outside.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn server_workspace_edit_resource_failure_rolls_back_prior_changes() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let created = directory.path().join("created.txt");
+        let missing = directory.path().join("missing.txt");
+        let edit = serde_json::json!({
+            "documentChanges": [
+                {"kind": "create", "uri": format!("file:///{}", created.to_string_lossy().replace('\\', "/"))},
+                {"kind": "delete", "uri": format!("file:///{}", missing.to_string_lossy().replace('\\', "/"))}
+            ]
+        });
+        assert!(
+            apply_lsp_workspace_edit(
+                &edit,
+                &[directory.path().to_path_buf()],
+                lsp_client::protocol::PositionEncoding::Utf16,
+            )
+            .is_err()
+        );
+        assert!(!created.exists());
     }
 }
