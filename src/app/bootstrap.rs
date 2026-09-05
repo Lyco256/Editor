@@ -1019,27 +1019,33 @@ impl EffectDispatcher for ServiceDispatcher {
                 });
                 return;
             }
-            if let Effect::RefreshExplorer { request, roots } = effect.clone() {
+            if let Effect::RefreshExplorer {
+                request,
+                roots,
+                expanded,
+            } = effect.clone()
+            {
                 let sender = self.sender.clone();
                 self.runtime.spawn_blocking(move || {
                     let mut entries = Vec::new();
                     let mut failure = None;
                     for root in roots {
                         match workspace_core::canonicalize_path(&root) {
-                            Ok(canonical) => match workspace_core::ExplorerTree::new(
-                                vec![canonical.clone()],
-                                Vec::new(),
-                            )
-                            .children(canonical.as_path())
-                            {
-                                Ok(children) => entries.extend(children.into_iter().map(|entry| {
-                                    super::event::ExplorerEntryData {
-                                        path: entry.path,
-                                        depth: u8::try_from(entry.depth).unwrap_or(u8::MAX),
-                                    }
-                                })),
-                                Err(error) => failure = Some(error.to_string()),
-                            },
+                            Ok(canonical) => {
+                                let tree = workspace_core::ExplorerTree::new(
+                                    vec![canonical.clone()],
+                                    Vec::new(),
+                                );
+                                if let Err(error) = collect_explorer_entries(
+                                    &tree,
+                                    canonical.as_path(),
+                                    1,
+                                    &expanded,
+                                    &mut entries,
+                                ) {
+                                    failure = Some(error.to_string());
+                                }
+                            }
                             Err(error) => failure = Some(error.to_string()),
                         }
                     }
@@ -1923,6 +1929,31 @@ impl EffectDispatcher for ServiceDispatcher {
     fn poll_events(&mut self) -> Vec<Event> {
         self.events.try_iter().collect()
     }
+}
+
+fn collect_explorer_entries(
+    tree: &workspace_core::ExplorerTree,
+    directory: &Path,
+    depth: u8,
+    expanded: &[PathBuf],
+    output: &mut Vec<super::event::ExplorerEntryData>,
+) -> Result<(), workspace_core::FileOperationError> {
+    for entry in tree.children(directory)? {
+        let is_directory = entry.kind == workspace_core::ExplorerEntryKind::Directory;
+        output.push(super::event::ExplorerEntryData {
+            path: entry.path.clone(),
+            depth,
+            is_directory,
+        });
+        if is_directory
+            && expanded
+                .iter()
+                .any(|path| workspace_core::path_eq(path, &entry.path))
+        {
+            collect_explorer_entries(tree, &entry.path, depth.saturating_add(1), expanded, output)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

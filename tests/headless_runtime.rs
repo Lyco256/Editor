@@ -157,20 +157,18 @@ impl EffectDispatcher for SaveDispatcher {
             } else {
                 Event::DocumentSaved { path }
             });
-        } else if let Effect::RefreshExplorer { request, roots } = effect {
+        } else if let Effect::RefreshExplorer {
+            request,
+            roots,
+            expanded,
+        } = effect
+        {
             let mut entries = Vec::new();
             for root in roots {
                 let canonical = workspace_core::canonicalize_path(&root).expect("root");
-                let children =
-                    workspace_core::ExplorerTree::new(vec![canonical.clone()], Vec::new())
-                        .children(canonical.as_path())
-                        .expect("children");
-                entries.extend(children.into_iter().map(|entry| {
-                    editor::app::event::ExplorerEntryData {
-                        path: entry.path,
-                        depth: u8::try_from(entry.depth).unwrap_or(u8::MAX),
-                    }
-                }));
+                let tree = workspace_core::ExplorerTree::new(vec![canonical.clone()], Vec::new());
+                collect_entries(&tree, canonical.as_path(), 1, &expanded, &mut entries)
+                    .expect("children");
             }
             self.events
                 .push(Event::ExplorerUpdated { request, entries });
@@ -180,6 +178,31 @@ impl EffectDispatcher for SaveDispatcher {
     fn poll_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
+}
+
+fn collect_entries(
+    tree: &workspace_core::ExplorerTree,
+    directory: &std::path::Path,
+    depth: u8,
+    expanded: &[std::path::PathBuf],
+    output: &mut Vec<editor::app::event::ExplorerEntryData>,
+) -> Result<(), workspace_core::FileOperationError> {
+    for entry in tree.children(directory)? {
+        let is_directory = entry.kind == workspace_core::ExplorerEntryKind::Directory;
+        output.push(editor::app::event::ExplorerEntryData {
+            path: entry.path.clone(),
+            depth,
+            is_directory,
+        });
+        if is_directory
+            && expanded
+                .iter()
+                .any(|path| workspace_core::path_eq(path, &entry.path))
+        {
+            collect_entries(tree, &entry.path, depth.saturating_add(1), expanded, output)?;
+        }
+    }
+    Ok(())
 }
 
 impl TerminalAdapter for FakeTerminal {

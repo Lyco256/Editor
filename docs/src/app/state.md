@@ -27,8 +27,8 @@ Trusting a file workspace discovers a conventional language server on `PATH`; it
 events update the visible `LanguageServerStatus` without allowing untrusted process execution.
 Left-click and drag input is translated from screen cells to logical buffer selections with bounded
 layout offsets, keeping mouse selection in the same state machine as keyboard editing.
-Mouse clicks on the tab strip switch tabs, and drag gestures adjust an active split ratio with
-bounded 10–90% limits.
+Mouse clicks on the tab strip switch tabs, directory rows toggle asynchronous Explorer expansion,
+file rows open tabs, and drag gestures adjust an active split ratio with bounded 10–90% limits.
 Workspace roots and Explorer entries are retained in root state; `OpenPath` and `AddWorkspaceRoot`
 actions refresh the projection without letting views perform filesystem I/O.
 `apply_editor_action`, `apply_language_action`, and `apply_git_action` are typed adapters for the

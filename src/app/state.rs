@@ -50,6 +50,7 @@ pub struct AppState {
     pub active_path: Option<PathBuf>,
     pub workspace_roots: Vec<PathBuf>,
     pub explorer_entries: Vec<ExplorerProjection>,
+    explorer_expanded: HashSet<PathBuf>,
     pub active_text: String,
     pub active_dirty: bool,
     pub explorer_visible: bool,
@@ -113,6 +114,7 @@ pub struct ExplorerProjection {
     pub label: String,
     pub active: bool,
     pub expanded: bool,
+    pub is_directory: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -805,6 +807,7 @@ impl Default for AppState {
             active_path: None,
             workspace_roots: Vec::new(),
             explorer_entries: Vec::new(),
+            explorer_expanded: HashSet::new(),
             active_text: String::new(),
             active_dirty: false,
             explorer_visible: true,
@@ -3725,12 +3728,20 @@ impl AppState {
                     && mouse.position.row >= 3
                 {
                     let index = usize::from(mouse.position.row.saturating_sub(3));
-                    if let Some(path) = self
-                        .explorer_entries
-                        .get(index)
-                        .map(|entry| entry.path.clone())
-                    {
-                        let _ = self.open_tab(path);
+                    if let Some(entry) = self.explorer_entries.get(index).cloned() {
+                        if entry.is_directory {
+                            if self.explorer_expanded.contains(&entry.path) {
+                                self.explorer_expanded.remove(&entry.path);
+                            } else {
+                                self.explorer_expanded.insert(entry.path.clone());
+                            }
+                            return self
+                                .explorer_refresh_transition()
+                                .effects
+                                .into_iter()
+                                .next();
+                        }
+                        let _ = self.open_tab(entry.path);
                         return None;
                     }
                 }
@@ -4488,6 +4499,7 @@ impl AppState {
                         ),
                         active: self.active_path.as_ref() == Some(&entry.path),
                         expanded: false,
+                        is_directory: entry.kind == workspace_core::ExplorerEntryKind::Directory,
                     }));
                 }
                 Err(error) => self.output.push(OutputMessage {
@@ -4508,6 +4520,7 @@ impl AppState {
             effects: vec![Effect::RefreshExplorer {
                 request,
                 roots: self.workspace_roots.clone(),
+                expanded: self.explorer_expanded.iter().cloned().collect(),
             }],
             render: true,
             ..Transition::default()
@@ -4678,7 +4691,8 @@ impl AppState {
                             |name| name.to_string_lossy().into_owned(),
                         ),
                         active: self.active_path.as_ref() == Some(&entry.path),
-                        expanded: false,
+                        expanded: self.explorer_expanded.contains(&entry.path),
+                        is_directory: entry.is_directory,
                     })
                     .collect();
             }
@@ -6034,6 +6048,44 @@ mod tests {
         let _ = state.apply_action(Action::Input(InputEvent::Mouse(drag)));
         assert_eq!(state.buffer.selections().primary().range().start.0, 0);
         assert_eq!(state.buffer.selections().primary().range().end.0, 5);
+    }
+
+    #[test]
+    fn explorer_directory_click_toggles_async_expansion() {
+        use super::ExplorerProjection;
+        use editor_types::{
+            InputEvent, Modifiers, MouseAction, MouseButton, MouseEvent, ScreenCell,
+        };
+
+        let directory = tempfile::tempdir().expect("workspace");
+        let source = directory.path().join("src");
+        std::fs::create_dir_all(&source).expect("source directory");
+        std::fs::write(source.join("main.rs"), "fn main() {}\n").expect("source file");
+        let mut state = AppState {
+            workspace_roots: vec![directory.path().to_path_buf()],
+            explorer_entries: vec![ExplorerProjection {
+                path: source.clone(),
+                depth: 1,
+                label: "src".to_owned(),
+                active: false,
+                expanded: false,
+                is_directory: true,
+            }],
+            ..AppState::default()
+        };
+        let transition = state.apply_action(Action::Input(InputEvent::Mouse(MouseEvent {
+            position: ScreenCell { row: 3, column: 2 },
+            action: MouseAction::Down(MouseButton::Left),
+            modifiers: Modifiers::default(),
+        })));
+        assert!(state.explorer_expanded.contains(&source));
+        assert!(transition.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::RefreshExplorer { expanded, .. }
+                    if expanded.iter().any(|path| workspace_core::path_eq(path, &source))
+            )
+        }));
     }
 
     #[test]

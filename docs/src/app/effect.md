@@ -5,7 +5,8 @@ separate, while `SaveDocument` carries an immutable document snapshot plus encod
 metadata to the workspace adapter. The
 `requires_trusted_workspace` invariant makes every external process kind subject to the root trust
 policy before dispatch. `RefreshGitStatus` is also trust-gated and returns its result through a
-typed event. `RefreshExplorer` carries workspace roots to a background filesystem traversal.
+typed event. `RefreshExplorer` carries workspace roots and the expanded-directory set to a
+background filesystem traversal, so Explorer expansion never performs I/O in the UI path.
 `ClipboardWrite` and `ClipboardRead` carry clipboard operations through the terminal-backend
 adapter; cut is acknowledged before its deletion transaction is committed.
 `SaveDocumentAs` uses the same atomic workspace writer and metadata while reporting a distinct completion event

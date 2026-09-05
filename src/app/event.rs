@@ -143,4 +143,5 @@ pub enum Event {
 pub struct ExplorerEntryData {
     pub path: PathBuf,
     pub depth: u8,
+    pub is_directory: bool,
 }

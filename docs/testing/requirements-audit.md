@@ -75,8 +75,9 @@ Release-gate status and evidence:
    workspace edits, with deterministic root-state coverage.
 
 Remaining product-integration gaps include applying imported VS Code themes/snippets and static
-VSIX contributions in the runtime (the compatibility parser and safety checks are present), and
-full Explorer/list hit-testing beyond the root file-opening path. Language configuration currently
+VSIX contributions in the runtime (the compatibility parser and safety checks are present).
+Explorer directory rows now expand/collapse through a background refresh; keyboard focus and
+context-menu hit-testing remain outside the current shell surface. Language configuration currently
 applies bracket pairs only; comments, word patterns, on-enter rules, and indentation rules are not
 yet wired into document behavior. VS Code keybinding `when` contexts and multi-key chords are
 parsed but not evaluated by root dispatch. Directory resource-operation semantics remain explicitly

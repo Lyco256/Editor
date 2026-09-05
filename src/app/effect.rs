@@ -65,6 +65,7 @@ pub enum Effect {
     RefreshExplorer {
         request: RequestId,
         roots: Vec<PathBuf>,
+        expanded: Vec<PathBuf>,
     },
     ClipboardWrite {
         request: RequestId,
