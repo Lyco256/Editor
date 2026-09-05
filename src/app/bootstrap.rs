@@ -59,16 +59,20 @@ pub fn run() -> ExitCode {
         }
     };
 
-    if request.path.is_some() {
-        return run_interactive_session(request);
-    }
-
     if std::io::stdout().is_terminal() {
-        return run_interactive_session(StartupRequest { path: None });
+        return run_interactive_session(request);
     }
 
     // A non-interactive invocation still exercises the complete lifecycle and is useful for
     // redirected/headless launches where crossterm cannot enter raw mode.
+    run_headless_session(request)
+}
+
+fn run_headless_session(request: StartupRequest) -> ExitCode {
+    let mut state = AppState::default();
+    if let Some(path) = request.path {
+        state.open_startup_path(path);
+    }
     let input = QueueActionSource::new([Action::Quit]);
     let runtime = AppRuntime::new(
         BootstrapTerminal,
@@ -2421,6 +2425,15 @@ mod tests {
     fn rejects_unknown_options_and_multiple_paths() {
         assert!(StartupRequest::from_args([OsString::from("--version")]).is_err());
         assert!(StartupRequest::from_args([OsString::from("a"), OsString::from("b")]).is_err());
+    }
+
+    #[test]
+    fn redirected_file_startup_runs_headless_lifecycle() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("document.txt");
+        std::fs::write(&path, "headless startup").expect("document");
+        let exit = super::run_headless_session(StartupRequest { path: Some(path) });
+        assert_eq!(exit, std::process::ExitCode::SUCCESS);
     }
 
     #[test]

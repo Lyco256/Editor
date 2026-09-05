@@ -19,6 +19,12 @@ The deterministic editor-core 10 MiB edit transaction completed in **21.22 ms** 
 below the 250 ms automated budget. This measures the bounded text-edit path without terminal I/O;
 native keystroke-to-frame latency is still not directly profiled.
 
+After the bootstrap headless-path fix, five redirected 10 MiB file open/close launches completed
+with exit code 0 in 343.16, 331.47, 346.79, 333.86, and 331.34 ms (**337.32 ms average**).
+Concurrent sampling recorded peak working sets of 30.12, 42.21, 29.91, 42.21, and 31.05 MiB
+(**35.10 MiB average**). This is a deterministic non-terminal lifecycle measurement and does not
+replace interactive keystroke-to-frame or native terminal open/close profiling.
+
 10 MiB typing latency and repeated open/close of a 10 MiB document still require a dedicated native
 Windows Terminal profiling session; they are not inferred from the startup measurements above.
 

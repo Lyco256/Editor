@@ -1,9 +1,10 @@
 # Process bootstrap
 
 Role: owns process-level startup, positional path parsing, terminal-size fallback, and exit-code
-conversion. A path (or an interactive no-argument terminal) launches the crossterm adapter for a file
-or workspace; a redirected launch uses the deterministic headless lifecycle. Save effects run on a
-Tokio background worker and return typed completion events. Interactive no-argument startup restores
+conversion. A terminal-connected launch uses the crossterm adapter for a file or workspace; a
+redirected launch (with or without a path) uses the deterministic headless lifecycle and loads the
+requested path before quitting. Save effects run on a Tokio background worker and return typed
+completion events. Interactive no-argument startup restores
 the latest application-data session (falling back to the current directory), and shutdown persists
 the resulting session atomically. Invalid options return a usage error without starting a
 subprocess. A panic hook performs best-effort terminal restoration and safe crash logging. The

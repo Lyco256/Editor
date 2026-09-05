@@ -9,11 +9,12 @@ atomic save effects, dirty-quit protection, Save As, split/session recovery, cli
 manual formatter transactions, project replacement effects, command palette routing, native watcher
 abstraction, and session recovery.
 
-The release binary was launched without arguments in the current environment and exited 0 through the
-safe headless startup path. A PTY-backed smoke run, idle memory/CPU samples, a five-iteration
-Windows Terminal 10 MiB process-level open/force-close sample, and successful Inno Setup compilation
-are recorded in the smoke/performance documents; native 10 MiB typing-latency and clean interactive
-open/close profiling remain outstanding.
+The release binary was launched without arguments and with a file path in the current environment;
+both exited 0 through the safe headless startup path. Five redirected 10 MiB file open/close runs
+averaged 337.32 ms with a 35.10 MiB average peak working set. A PTY-backed smoke run, idle
+memory/CPU samples, a five-iteration Windows Terminal 10 MiB process-level open/force-close sample,
+and successful Inno Setup compilation are recorded in the smoke/performance documents; native
+10 MiB typing-latency and clean interactive open/close profiling remain outstanding.
 
 Server-originated `workspace/applyEdit` requests now pass through root validation, a background
 atomic-save worker, open-tab refresh, and a typed JSON-RPC response. Multi-document edits and
