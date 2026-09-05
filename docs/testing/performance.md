@@ -6,7 +6,10 @@ single codegen unit, stripped symbols, panic abort). The release executable meas
 Redirected no-argument startup measured approximately **48 ms** on this host. This is a headless
 lifecycle measurement and does not substitute for interactive idle profiling.
 
-Resident-memory, idle-CPU, 10 MiB typing-latency, and repeated open/close observations require an
-interactive Windows Terminal profiling session unavailable to this headless run. They remain explicit
-follow-up measurements rather than being guessed or reported as passing. A budget exception must
-include a measured limitation and explicit user approval.
+The interactive PTY sample measured approximately **7.5 MiB working set** (7,897,088 bytes) and
+**1.7 MiB private memory** while idle. Two seconds later the process CPU counter was unchanged at
+0.06 s (no measurable CPU increase in that sample). Five redirected release launches completed in
+157.51 ms total (**31.50 ms average**), covering repeated startup/close lifecycle overhead.
+
+10 MiB typing latency and repeated open/close of a 10 MiB document still require a dedicated native
+Windows Terminal profiling session; they are not inferred from the startup measurements above.

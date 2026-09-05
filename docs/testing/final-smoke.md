@@ -1,7 +1,11 @@
 # Windows Terminal smoke test
 
-The final smoke checklist covers startup with no argument, file and workspace opening, keyboard and
-mouse editing, clipboard, resize, tabs/splits, Explorer, Command Palette, diagnostic fallback, Git
-view, and terminal restoration. An interactive Windows Terminal was not available in this headless
-Codex session, so the smoke result is **not run**; terminal lifecycle, normalized input, framebuffer,
-and all deterministic UI scenarios are covered by the passing automated suite.
+An interactive PTY-backed Windows smoke run was completed on 2026-09-05 using the release binary.
+Verified manually: no-argument startup, file opening, keyboard insertion, dirty-quit protection,
+undo, Command Palette filtering/activation, vertical split, Explorer toggle, Output toggle, clean
+exit, and terminal restoration. The process exited with code 0 and restored the terminal modes.
+
+Mouse selection, system clipboard, resize events, diagnostic fallback, and Git actions were not
+available for direct PTY interaction in this session; their deterministic framebuffer/backend and
+trust-gating scenarios remain covered by the automated suite. These items still require a native
+Windows Terminal pass before release sign-off.

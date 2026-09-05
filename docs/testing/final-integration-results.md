@@ -10,6 +10,5 @@ manual formatter transactions, project replacement effects, command palette rout
 abstraction, and session recovery.
 
 The release binary was launched without arguments in the current environment and exited 0 through the
-safe headless startup path. Interactive Windows Terminal smoke and resident-memory/idle-CPU/10 MiB
-latency measurements remain unavailable in this headless execution environment and are recorded as
-such in the smoke/performance documents.
+safe headless startup path. A PTY-backed smoke run and idle memory/CPU samples are recorded in the
+smoke/performance documents; native 10 MiB typing-latency profiling remains outstanding.

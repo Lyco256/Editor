@@ -27,10 +27,11 @@ Implemented in the integration pass:
 
 Still release-blocking or environment-blocked:
 
-1. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
-   open/close measurements because this environment cannot provide an interactive Windows Terminal.
-   `docs/testing/final-smoke.md` records the same limitation. The master requirement requires user
-   approval before treating those missing measurements as an exception.
+1. `docs/testing/performance.md` now records release size, idle working-set/private memory, idle CPU,
+   and repeated redirected startup/close measurements. Native 10 MiB typing latency and repeated
+   open/close of a 10 MiB document remain unavailable; `docs/testing/final-smoke.md` records the
+   PTY smoke scope. The master requirement requires user approval before treating those missing
+   measurements as an exception.
 2. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
    been compiled; the release binary and staging package script are verified.
 3. The root-level headless acceptance suite now covers the fake-server initialize/request/response
