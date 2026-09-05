@@ -108,7 +108,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use editor_types::{LanguageServerStatus, RequestId};
+    use editor_types::{InputEvent, LanguageServerStatus, RequestId};
 
     use super::AppState;
     use crate::app::{
