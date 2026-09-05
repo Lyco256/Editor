@@ -527,6 +527,8 @@ fn frame_for_state(
         palette: state.palette.clone(),
         focus: if state.palette_visible {
             ShellFocus::CommandPalette
+        } else if state.explorer_focus {
+            ShellFocus::Explorer
         } else {
             ShellFocus::Editor
         },

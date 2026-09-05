@@ -8,8 +8,8 @@ The active `TextBuffer` is retained in root state so character input, smart pair
 undo/redo, and dirty tracking survive frame renders. Control-Q and Control-C exit only when the
 buffer is clean; dirty quits surface a warning. `session_state` and `restore_session` bridge the
 active editor (including selections and unsaved text) to the versioned, atomic recovery format.
-Ctrl+B/Ctrl+J toggle the Explorer and Output panel, while Ctrl+P opens a keyboard-driven command
-palette whose commands route back through the root transition path.
+Ctrl+B/Ctrl+J toggle the Explorer and Output panel, Ctrl+Shift+E focuses the Explorer, and Ctrl+P
+opens a keyboard-driven command palette whose commands route back through the root transition path.
 VS Code keybindings loaded through the resolved settings layer are matched before editor editing,
 including simple `when` predicates (`editorTextFocus`, selection/dirty state, language id, and
 platform) and two-stroke chords; matching commands dispatch through the same transition path.
@@ -27,8 +27,10 @@ Trusting a file workspace discovers a conventional language server on `PATH`; it
 events update the visible `LanguageServerStatus` without allowing untrusted process execution.
 Left-click and drag input is translated from screen cells to logical buffer selections with bounded
 layout offsets, keeping mouse selection in the same state machine as keyboard editing.
-Mouse clicks on the tab strip switch tabs, directory rows toggle asynchronous Explorer expansion,
-file rows open tabs, and drag gestures adjust an active split ratio with bounded 10–90% limits.
+Explorer focus supports Up/Down navigation, Left/Right expand/collapse, and Enter activation;
+Escape returns focus to the editor. Mouse clicks on the tab strip switch tabs, directory rows toggle
+asynchronous Explorer expansion, file rows open tabs, and drag gestures adjust an active split ratio
+with bounded 10–90% limits.
 Workspace roots and Explorer entries are retained in root state; `OpenPath` and `AddWorkspaceRoot`
 actions refresh the projection without letting views perform filesystem I/O.
 `apply_editor_action`, `apply_language_action`, and `apply_git_action` are typed adapters for the

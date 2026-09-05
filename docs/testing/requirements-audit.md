@@ -82,9 +82,10 @@ Remaining product-integration gaps no longer include static VSIX archive discove
 now scans both unpacked extension directories and `.vsix` archives, extracts archives through the
 path-safe compatibility boundary into an OS cache, and loads supported themes/snippets/language
 configuration without executing extension code.
-Explorer directory rows now expand/collapse through a background refresh. The workspace UI
-requirement is satisfied by model-driven tree rendering, Quick Open keyboard/mouse selection, and
-root file-operation commands; context-menu behavior is outside the initial release scope. Language
+Explorer directory rows now expand/collapse through a background refresh, and Ctrl+Shift+E enables
+keyboard focus with Up/Down navigation, Left/Right expansion, Enter activation, and Escape return
+to the editor. The workspace UI requirement is satisfied by model-driven tree rendering, Quick Open
+keyboard/mouse selection, and root file-operation commands; context-menu behavior is outside the initial release scope. Language
 configuration now drives line/block comments, word selection, bracket/surrounding pairs,
 indentation regexes, and safe on-enter append/remove actions. Folding is syntax-driven as required;
 VS Code folding-marker-specific overrides and complex `when` expressions are intentionally not part

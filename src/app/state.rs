@@ -61,6 +61,8 @@ pub struct AppState {
     pub active_text: String,
     pub active_dirty: bool,
     pub explorer_visible: bool,
+    pub(crate) explorer_focus: bool,
+    pub(crate) explorer_cursor: usize,
     pub bottom_panel_visible: bool,
     pub(crate) bottom_panel_view: BottomPanelView,
     pub palette_visible: bool,
@@ -850,6 +852,8 @@ impl Default for AppState {
             active_text: String::new(),
             active_dirty: false,
             explorer_visible: true,
+            explorer_focus: false,
+            explorer_cursor: 0,
             bottom_panel_visible: false,
             bottom_panel_view: BottomPanelView::Output,
             palette_visible: false,
@@ -3926,6 +3930,62 @@ impl AppState {
             if let Some(mode) = self.input_mode.clone() {
                 return self.apply_input_mode(mode, key);
             }
+            if key.code == KeyCode::Character('e')
+                && key.modifiers.contains(Modifier::Control)
+                && key.modifiers.contains(Modifier::Shift)
+            {
+                if self.explorer_visible {
+                    self.focus_explorer();
+                }
+                return None;
+            }
+            if self.explorer_focus {
+                match key.code {
+                    KeyCode::Escape => {
+                        self.blur_explorer();
+                        return None;
+                    }
+                    KeyCode::Up => {
+                        self.explorer_cursor = self.explorer_cursor.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        if !self.explorer_entries.is_empty() {
+                            self.explorer_cursor = (self.explorer_cursor + 1)
+                                .min(self.explorer_entries.len().saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Left => {
+                        if let Some(entry) = self.explorer_entries.get(self.explorer_cursor) {
+                            if entry.is_directory && self.explorer_expanded.remove(&entry.path) {
+                                return self
+                                    .explorer_refresh_transition()
+                                    .effects
+                                    .into_iter()
+                                    .next();
+                            }
+                        }
+                    }
+                    KeyCode::Right => {
+                        if let Some(entry) = self.explorer_entries.get(self.explorer_cursor) {
+                            if entry.is_directory
+                                && self.explorer_expanded.insert(entry.path.clone())
+                            {
+                                return self
+                                    .explorer_refresh_transition()
+                                    .effects
+                                    .into_iter()
+                                    .next();
+                            }
+                        }
+                    }
+                    KeyCode::Enter => return self.explorer_activate_cursor(),
+                    _ => {}
+                }
+                let mut entries = std::mem::take(&mut self.explorer_entries);
+                self.mark_explorer_cursor(&mut entries);
+                self.explorer_entries = entries;
+                return None;
+            }
             if !self.palette_visible {
                 if let Some(command) = self.configured_chord_command(key) {
                     return self.apply_command(&command);
@@ -4083,6 +4143,8 @@ impl AppState {
                 {
                     let index = usize::from(mouse.position.row.saturating_sub(3));
                     if let Some(entry) = self.explorer_entries.get(index).cloned() {
+                        self.explorer_cursor = index;
+                        self.focus_explorer();
                         if entry.is_directory {
                             if self.explorer_expanded.contains(&entry.path) {
                                 self.explorer_expanded.remove(&entry.path);
@@ -4095,6 +4157,7 @@ impl AppState {
                                 .into_iter()
                                 .next();
                         }
+                        self.blur_explorer();
                         let _ = self.open_tab(entry.path);
                         return None;
                     }
@@ -4876,7 +4939,58 @@ impl AppState {
                 }),
             }
         }
+        self.mark_explorer_cursor(&mut entries);
         self.explorer_entries = entries;
+    }
+
+    fn mark_explorer_cursor(&self, entries: &mut [ExplorerProjection]) {
+        if !self.explorer_focus {
+            return;
+        }
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.active = index == self.explorer_cursor;
+        }
+    }
+
+    fn focus_explorer(&mut self) {
+        if self.explorer_entries.is_empty() {
+            self.explorer_cursor = 0;
+        } else {
+            self.explorer_cursor = self.explorer_cursor.min(self.explorer_entries.len() - 1);
+        }
+        self.explorer_focus = true;
+        let mut entries = std::mem::take(&mut self.explorer_entries);
+        self.mark_explorer_cursor(&mut entries);
+        self.explorer_entries = entries;
+    }
+
+    fn blur_explorer(&mut self) {
+        self.explorer_focus = false;
+        let active_path = self.active_path.clone();
+        for entry in &mut self.explorer_entries {
+            entry.active = active_path.as_ref() == Some(&entry.path);
+        }
+    }
+
+    fn explorer_activate_cursor(&mut self) -> Option<Effect> {
+        let entry = self.explorer_entries.get(self.explorer_cursor)?.clone();
+        if entry.is_directory {
+            if self.explorer_expanded.contains(&entry.path) {
+                self.explorer_expanded.remove(&entry.path);
+            } else {
+                self.explorer_expanded.insert(entry.path);
+            }
+            Some(
+                self.explorer_refresh_transition()
+                    .effects
+                    .into_iter()
+                    .next()?,
+            )
+        } else {
+            self.blur_explorer();
+            let _ = self.open_tab(entry.path);
+            None
+        }
     }
 
     fn explorer_refresh_transition(&mut self) -> Transition {
@@ -5061,6 +5175,9 @@ impl AppState {
                         is_directory: entry.is_directory,
                     })
                     .collect();
+                let mut projected = std::mem::take(&mut self.explorer_entries);
+                self.mark_explorer_cursor(&mut projected);
+                self.explorer_entries = projected;
             }
             Event::ExplorerUpdated { .. } => {}
             Event::ClipboardWritten { request, cut } => {
@@ -6531,6 +6648,60 @@ mod tests {
                     if expanded.iter().any(|path| workspace_core::path_eq(path, &source))
             )
         }));
+    }
+
+    #[test]
+    fn explorer_keyboard_focus_navigates_and_activates_entries() {
+        use super::ExplorerProjection;
+        use editor_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let directory = tempfile::tempdir().expect("workspace");
+        let first = directory.path().join("src");
+        let second = directory.path().join("main.rs");
+        std::fs::create_dir_all(&first).expect("source directory");
+        std::fs::write(&second, "fn main() {}\n").expect("source file");
+        let mut state = AppState {
+            explorer_entries: vec![
+                ExplorerProjection {
+                    path: first.clone(),
+                    depth: 0,
+                    label: "src".to_owned(),
+                    active: false,
+                    expanded: false,
+                    is_directory: true,
+                },
+                ExplorerProjection {
+                    path: second.clone(),
+                    depth: 1,
+                    label: "main.rs".to_owned(),
+                    active: false,
+                    expanded: false,
+                    is_directory: false,
+                },
+            ],
+            ..AppState::default()
+        };
+        let key = |code| {
+            Action::Input(InputEvent::Key(KeyEvent {
+                code,
+                modifiers: Modifiers::default(),
+                repeat: false,
+            }))
+        };
+        let _ = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('e'),
+            modifiers: Modifiers::from_modifiers([
+                editor_types::Modifier::Control,
+                editor_types::Modifier::Shift,
+            ]),
+            repeat: false,
+        })));
+        assert!(state.explorer_focus);
+        let _ = state.apply_action(key(KeyCode::Down));
+        assert_eq!(state.explorer_cursor, 1);
+        let _ = state.apply_action(key(KeyCode::Enter));
+        assert_eq!(state.active_path.as_ref(), Some(&second));
+        assert!(!state.explorer_focus);
     }
 
     #[test]
