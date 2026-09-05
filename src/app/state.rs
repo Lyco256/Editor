@@ -64,6 +64,10 @@ pub struct AppState {
     pub(crate) format_on_paste: bool,
     pub(crate) tab_width: usize,
     pub(crate) insert_spaces: bool,
+    workspace_tab_width: usize,
+    workspace_insert_spaces: bool,
+    pub(crate) document_trim_trailing_whitespace: Option<bool>,
+    pub(crate) document_insert_final_newline: Option<bool>,
     pub(crate) show_line_numbers: bool,
     pub(crate) external_formatter: Option<ProcessSpec>,
     latest_explorer_request: Option<RequestId>,
@@ -529,6 +533,7 @@ fn workspace_line_endings_to_config(
 }
 
 impl Default for AppState {
+    #[allow(clippy::too_many_lines)]
     fn default() -> Self {
         Self {
             running: true,
@@ -621,6 +626,10 @@ impl Default for AppState {
             format_on_paste: false,
             tab_width: 4,
             insert_spaces: true,
+            workspace_tab_width: 4,
+            workspace_insert_spaces: true,
+            document_trim_trailing_whitespace: None,
+            document_insert_final_newline: None,
             show_line_numbers: true,
             external_formatter: None,
             latest_explorer_request: None,
@@ -731,11 +740,17 @@ impl AppState {
         self.format_on_paste = settings.format_on_paste;
         self.tab_width = usize::from(settings.tab_size.max(1));
         self.insert_spaces = settings.insert_spaces;
+        self.workspace_tab_width = self.tab_width;
+        self.workspace_insert_spaces = self.insert_spaces;
         self.show_line_numbers = settings.line_numbers;
         let threshold = usize::try_from(settings.large_file_threshold).unwrap_or(usize::MAX);
         self.buffer.set_large_file_threshold(threshold);
         for tab in &mut self.tabs {
             tab.buffer.set_large_file_threshold(threshold);
+        }
+        if let Some(path) = self.active_path.clone() {
+            let document_settings = self.load_editorconfig(&path);
+            self.apply_editorconfig_settings(&document_settings);
         }
     }
 
@@ -1551,18 +1566,23 @@ impl AppState {
             self.buffer = TextBuffer::default();
             return;
         }
-        match workspace_core::load_text_document(
-            &path,
-            &workspace_core::DocumentLoadOptions::default(),
-        ) {
+        let document_settings = self.load_editorconfig(&path);
+        let mut load_options = workspace_core::DocumentLoadOptions::default();
+        if let Some(charset) = document_settings.charset.clone() {
+            load_options.fallback_encoding = config_encoding_to_workspace(&charset);
+        }
+        match workspace_core::load_text_document(&path, &load_options) {
             Ok(document) => {
+                let line_endings = document_settings
+                    .end_of_line
+                    .map_or(document.line_endings, config_line_endings_to_workspace);
                 self.active_path = Some(document.path);
                 self.tabs = vec![TabState {
                     path: self.active_path.clone(),
                     buffer: TextBuffer::new(&document.text),
                     encoding: document.encoding,
                     with_bom: document.had_bom,
-                    line_endings: document.line_endings,
+                    line_endings,
                 }];
                 self.active_tab = 0;
                 self.workspace_roots = self
@@ -1576,6 +1596,7 @@ impl AppState {
                 self.active_text = document.text;
                 self.active_dirty = false;
                 self.buffer = TextBuffer::new(&self.active_text);
+                self.apply_editorconfig_settings(&document_settings);
             }
             Err(error) => self.output.push(OutputMessage {
                 subsystem: "workspace".to_owned(),
@@ -1596,23 +1617,29 @@ impl AppState {
         path: impl AsRef<Path>,
     ) -> Result<(), workspace_core::DocumentOpenError> {
         let path = path.as_ref().to_path_buf();
-        let document = workspace_core::load_text_document(
-            &path,
-            &workspace_core::DocumentLoadOptions::default(),
-        )?;
+        let document_settings = self.load_editorconfig(&path);
+        let mut load_options = workspace_core::DocumentLoadOptions::default();
+        if let Some(charset) = document_settings.charset.clone() {
+            load_options.fallback_encoding = config_encoding_to_workspace(&charset);
+        }
+        let document = workspace_core::load_text_document(&path, &load_options)?;
+        let line_endings = document_settings
+            .end_of_line
+            .map_or(document.line_endings, config_line_endings_to_workspace);
         self.sync_active_tab();
         self.tabs.push(TabState {
             path: Some(document.path.clone()),
             buffer: TextBuffer::new(&document.text),
             encoding: document.encoding,
             with_bom: document.had_bom,
-            line_endings: document.line_endings,
+            line_endings,
         });
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.active_path = Some(document.path);
         self.active_text = document.text;
         self.active_dirty = false;
         self.buffer = self.tabs[self.active_tab].buffer.clone();
+        self.apply_editorconfig_settings(&document_settings);
         self.refresh_explorer_entries();
         Ok(())
     }
@@ -1637,6 +1664,107 @@ impl AppState {
         self.active_path = tab.path;
         self.buffer = tab.buffer;
         self.sync_buffer_projection();
+        if let Some(path) = self.active_path.clone() {
+            let settings = self.load_editorconfig(&path);
+            self.apply_editorconfig_settings(&settings);
+        } else {
+            self.apply_editorconfig_settings(&config_core::DocumentSettings::default());
+        }
+    }
+
+    fn load_editorconfig(&mut self, path: &Path) -> config_core::DocumentSettings {
+        match config_core::load_editorconfig(path) {
+            Ok(settings) => {
+                for warning in &settings.warnings {
+                    self.output.push(OutputMessage {
+                        subsystem: "editorconfig".to_owned(),
+                        operation: "parse".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: format!(
+                            "{}:{} invalid {}={}",
+                            warning.path.display(),
+                            warning.line,
+                            warning.property,
+                            warning.value
+                        ),
+                    });
+                }
+                settings
+            }
+            Err(error) => {
+                self.output.push(OutputMessage {
+                    subsystem: "editorconfig".to_owned(),
+                    operation: "load".to_owned(),
+                    level: OutputLevel::Warning,
+                    message: error.to_string(),
+                });
+                config_core::DocumentSettings::default()
+            }
+        }
+    }
+
+    fn apply_editorconfig_settings(&mut self, settings: &config_core::DocumentSettings) {
+        self.tab_width = self.workspace_tab_width;
+        self.insert_spaces = self.workspace_insert_spaces;
+        self.document_trim_trailing_whitespace = settings.trim_trailing_whitespace;
+        self.document_insert_final_newline = settings.insert_final_newline;
+        if let Some(style) = settings.indent_style {
+            self.insert_spaces = matches!(style, config_core::editorconfig::IndentStyle::Space);
+        }
+        if let Some(config_core::editorconfig::IndentSize::Width(width)) = settings.indent_size {
+            self.tab_width = usize::from(width.max(1));
+        }
+        if let Some(width) = settings.tab_width {
+            self.tab_width = usize::from(width.max(1));
+        }
+        if let Some(line_endings) = settings.end_of_line {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.line_endings = config_line_endings_to_workspace(line_endings);
+            }
+        }
+    }
+
+    /// Applies document-scoped `EditorConfig` newline/whitespace rules before a save.
+    ///
+    /// The normalization is recorded in the buffer as one transaction so the saved snapshot
+    /// always corresponds to the bytes written to disk and undo remains available.
+    fn normalize_document_for_save(&mut self) {
+        let trim = self.document_trim_trailing_whitespace == Some(true);
+        let final_newline = self.document_insert_final_newline;
+        if !trim && final_newline.is_none() {
+            return;
+        }
+        let original = self.active_text.clone();
+        let mut normalized = original.clone();
+        if trim {
+            normalized = normalized
+                .split('\n')
+                .map(|line| line.trim_end_matches([' ', '\t', '\r']))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        if final_newline == Some(true) {
+            if !normalized.is_empty() && !normalized.ends_with('\n') {
+                normalized.push('\n');
+            }
+        } else if final_newline == Some(false) {
+            while normalized.ends_with('\n') {
+                normalized.pop();
+            }
+        }
+        if normalized == original {
+            return;
+        }
+        let range = editor_types::TextRange {
+            start: CharacterOffset(0),
+            end: CharacterOffset(self.buffer.len_chars()),
+        };
+        if let Ok(transaction) = Transaction::new(vec![Edit::replace(range, normalized)]) {
+            if self.buffer.apply_transaction(transaction).is_ok() {
+                self.sync_buffer_projection();
+                self.deferred_effects.push(self.syntax_effect());
+            }
+        }
     }
 
     fn sync_active_tab(&mut self) {
@@ -1901,12 +2029,21 @@ impl AppState {
                         self.active_path = tab.path;
                         self.buffer = tab.buffer;
                         self.sync_buffer_projection();
+                        if let Some(path) = self.active_path.clone() {
+                            let settings = self.load_editorconfig(&path);
+                            self.apply_editorconfig_settings(&settings);
+                        } else {
+                            self.apply_editorconfig_settings(
+                                &config_core::DocumentSettings::default(),
+                            );
+                        }
                     } else {
                         self.tabs[0] = TabState::untitled();
                         self.active_tab = 0;
                         self.active_path = None;
                         self.buffer = TextBuffer::default();
                         self.sync_buffer_projection();
+                        self.apply_editorconfig_settings(&config_core::DocumentSettings::default());
                     }
                 }
                 Transition {
@@ -1914,17 +2051,20 @@ impl AppState {
                     ..Transition::default()
                 }
             }
-            Action::SaveAs(path) => Transition {
-                effects: vec![Effect::SaveDocumentAs {
-                    path,
-                    text: self.active_text.clone(),
-                    encoding: self.active_tab_state().encoding.clone(),
-                    with_bom: self.active_tab_state().with_bom,
-                    line_endings: self.active_tab_state().line_endings,
-                }],
-                render: true,
-                ..Transition::default()
-            },
+            Action::SaveAs(path) => {
+                self.normalize_document_for_save();
+                Transition {
+                    effects: vec![Effect::SaveDocumentAs {
+                        path,
+                        text: self.active_text.clone(),
+                        encoding: self.active_tab_state().encoding.clone(),
+                        with_bom: self.active_tab_state().with_bom,
+                        line_endings: self.active_tab_state().line_endings,
+                    }],
+                    render: true,
+                    ..Transition::default()
+                }
+            }
             Action::SplitPane {
                 axis,
                 ratio_percent,
@@ -2472,6 +2612,7 @@ impl AppState {
 
     fn queue_save_after_format(&mut self) {
         if let Some(path) = self.active_path.clone() {
+            self.normalize_document_for_save();
             let (encoding, with_bom, line_endings) = {
                 let tab = self.active_tab_state();
                 (tab.encoding.clone(), tab.with_bom, tab.line_endings)
@@ -2506,6 +2647,7 @@ impl AppState {
                     }
                 }
                 if let Some(path) = self.active_path.clone() {
+                    self.normalize_document_for_save();
                     return Some(Effect::SaveDocument {
                         path,
                         text: self.active_text.clone(),
@@ -3114,19 +3256,7 @@ impl AppState {
                     if self.buffer.apply_transaction(transaction).is_ok() {
                         self.sync_buffer_projection();
                         if pending.save_after {
-                            if let Some(path) = self.active_path.clone() {
-                                let (encoding, with_bom, line_endings) = {
-                                    let tab = self.active_tab_state();
-                                    (tab.encoding.clone(), tab.with_bom, tab.line_endings)
-                                };
-                                self.deferred_effects.push(Effect::SaveDocument {
-                                    path,
-                                    text: self.active_text.clone(),
-                                    encoding,
-                                    with_bom,
-                                    line_endings,
-                                });
-                            }
+                            self.queue_save_after_format();
                         }
                     }
                 }
@@ -3135,19 +3265,7 @@ impl AppState {
                 let pending = self.pending_format.remove(&request);
                 self.output.push(message);
                 if pending.is_some_and(|pending| pending.save_after) {
-                    if let Some(path) = self.active_path.clone() {
-                        let (encoding, with_bom, line_endings) = {
-                            let tab = self.active_tab_state();
-                            (tab.encoding.clone(), tab.with_bom, tab.line_endings)
-                        };
-                        self.deferred_effects.push(Effect::SaveDocument {
-                            path,
-                            text: self.active_text.clone(),
-                            encoding,
-                            with_bom,
-                            line_endings,
-                        });
-                    }
+                    self.queue_save_after_format();
                 }
             }
             Event::SyntaxUpdated { update, .. } => {
@@ -3623,6 +3741,57 @@ mod tests {
             state.buffer.large_file_threshold(),
             usize::try_from(settings.large_file_threshold).unwrap_or(usize::MAX)
         );
+    }
+
+    #[test]
+    fn editorconfig_document_settings_override_workspace_indentation_and_eol() {
+        let directory = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            directory.path().join(".editorconfig"),
+            "root = true\n[*.rs]\nindent_style = tab\nindent_size = 8\nend_of_line = crlf\n",
+        )
+        .expect("editorconfig");
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "fn main() {}\n").expect("source");
+        let mut state = AppState::default();
+        state.open_startup_path(&path);
+        assert_eq!(state.tab_width, 8);
+        assert!(!state.insert_spaces);
+        assert_eq!(
+            state.active_tab_state().line_endings,
+            workspace_core::LineEndings::Crlf
+        );
+    }
+
+    #[test]
+    fn editorconfig_save_rules_normalize_trailing_whitespace_and_final_newline() {
+        let directory = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            directory.path().join(".editorconfig"),
+            "root = true\n[*]\ntrim_trailing_whitespace = true\ninsert_final_newline = false\n",
+        )
+        .expect("editorconfig");
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "placeholder\n").expect("source");
+        let mut state = AppState::default();
+        state.open_startup_path(&path);
+        let range = editor_types::TextRange {
+            start: editor_types::CharacterOffset(0),
+            end: editor_types::CharacterOffset(state.buffer.len_chars()),
+        };
+        let transaction = editor_core::Transaction::new(vec![editor_core::Edit::replace(
+            range,
+            "fn main() {  }   \n",
+        )])
+        .expect("valid replacement");
+        state.buffer.apply_transaction(transaction).expect("edit");
+        state.sync_buffer_projection();
+        let transition =
+            state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.save")));
+        let Some(Effect::SaveDocument { text, .. }) = transition.effects.first() else {
+            panic!("save effect expected");
+        };
+        assert_eq!(text, "fn main() {  }");
     }
 
     #[test]
