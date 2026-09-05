@@ -46,9 +46,10 @@ Still release-blocking or environment-blocked:
 
 3. LSP server-originated requests are surfaced by `lsp-client` but the root bootstrap currently
    ignores `ClientEvent::ServerRequest`. The required server-requested `workspace/applyEdit` path
-   therefore remains unimplemented; only client-originated rename/code-action workspace edits are
-   applied today. This is a functional release blocker until root policy, safe edit application, and
-   the JSON-RPC response path are wired and covered by an integration test.
+   therefore remains unimplemented; only client-originated rename/code-action edits targeting the
+   active document are applied today (cross-document edits remain preview-only). This is a
+   functional release blocker until root policy, safe multi-document edit application, and the
+   JSON-RPC response path are wired and covered by an integration test.
 
 4. Several protocol capabilities are available in the standalone `lsp-client` API but are not
    exposed through root actions yet: completion resolve, prepare-rename negotiation,

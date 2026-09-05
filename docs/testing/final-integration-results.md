@@ -16,8 +16,9 @@ are recorded in the smoke/performance documents; native 10 MiB typing-latency an
 open/close profiling remain outstanding.
 
 The LSP client exposes server-originated requests, but root bootstrap does not yet handle
-`workspace/applyEdit`; server-requested workspace edits remain a release-blocking implementation
-gap in addition to the native profiling and promotion gates.
+`workspace/applyEdit`; only active-document edits from client-originated rename/code-action results
+are applied (cross-document edits remain preview-only). Server-requested workspace edits remain a
+release-blocking implementation gap in addition to the native profiling and promotion gates.
 
 The standalone LSP client also has protocol methods that are not yet reachable from root actions
 (completion resolve, prepare rename, declaration/implementation navigation, and range formatting),
