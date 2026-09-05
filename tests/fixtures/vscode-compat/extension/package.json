@@ -1,0 +1,48 @@
+{
+  "name": "static-compat-fixture",
+  "displayName": "Static Compat Fixture",
+  "version": "1.0.0",
+  "main": "./out/extension.js",
+  "activationEvents": ["onLanguage:toy"],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Fixture Theme",
+        "path": "./themes/editor-dark.json",
+        "uiTheme": "vs-dark"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "toy",
+        "path": "./snippets/toy.code-snippets"
+      }
+    ],
+    "languages": [
+      {
+        "id": "toy",
+        "aliases": ["Toy"],
+        "extensions": [".toy"],
+        "filenames": ["Toyfile"],
+        "mimetypes": ["text/toy"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "toy",
+        "scopeName": "source.toy",
+        "path": "./syntaxes/toy.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "extension.runSomething",
+        "title": "Run"
+      }
+    ],
+    "unsupportedContribution": {
+      "enabled": true
+    }
+  }
+}
