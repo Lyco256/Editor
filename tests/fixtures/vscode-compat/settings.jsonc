@@ -1,0 +1,10 @@
+{
+  // fixture settings
+  "editor.lineNumbers": true,
+  "editor.tabSize": 2,
+  "editor.insertSpaces": false,
+  "editor.wordWrap": "on",
+  "search.exclude": {
+    "**/target/**": true
+  }
+}
