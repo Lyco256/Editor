@@ -4296,11 +4296,11 @@ mod tests {
         let directory = tempfile::tempdir().expect("workspace");
         std::fs::write(
             directory.path().join(".editorconfig"),
-            "root = true\n[*]\ntrim_trailing_whitespace = true\ninsert_final_newline = false\n",
+            "root = true\n[*]\ntrim_trailing_whitespace = true\ninsert_final_newline = false\nend_of_line = crlf\n",
         )
         .expect("editorconfig");
         let path = directory.path().join("main.rs");
-        std::fs::write(&path, "placeholder\n").expect("source");
+        std::fs::write(&path, "placeholder\r\n").expect("source");
         let mut state = AppState::default();
         state.open_startup_path(&path);
         let range = editor_types::TextRange {
@@ -4309,7 +4309,7 @@ mod tests {
         };
         let transaction = editor_core::Transaction::new(vec![editor_core::Edit::replace(
             range,
-            "fn main() {  }   \n",
+            "fn main() {  }   \r\n",
         )])
         .expect("valid replacement");
         state.buffer.apply_transaction(transaction).expect("edit");
