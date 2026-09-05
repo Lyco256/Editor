@@ -1,4 +1,4 @@
-# Requirements audit (2026-09-05)
+# Requirements audit (2026-09-06)
 
 `devenv` is the current integration branch (the verified state is the tip of `devenv`); it is not yet promoted to `main`
 because release gates remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
@@ -40,6 +40,10 @@ Implemented in the integration pass:
   editing, while configuration failures remain visible as compatibility output;
 - root headless acceptance coverage for create, rename, move, and delete confirmation workflows;
 - Windows installer (`build/editor.iss`) and packaging script (`build/package.ps1`).
+- canonical percent-encoded `file:///` URIs for LSP paths containing spaces or non-ASCII text;
+- recursive directory WorkspaceEdit rename/delete with rollback journaling;
+- runtime VSIX archive discovery for static themes, snippets, and language configuration;
+- language-configured block-comment toggling through the command palette and Ctrl+Shift+/.
 
 Release-gate status and evidence:
 
