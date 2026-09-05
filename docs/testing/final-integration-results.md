@@ -20,3 +20,7 @@ atomic-save worker, open-tab refresh, and a typed JSON-RPC response. Multi-docum
 dirty-buffer rejection are covered by deterministic tests. Root commands also expose completion
 resolve, prepare rename, declaration/implementation navigation, range formatting, and
 syntax-aware structural selection expansion.
+
+Trusted language-server requests now reuse the persistent client session when available. Root
+queues workspace-folder, didOpen, didChange, didSave, and didClose notifications; deterministic
+state coverage verifies the lifecycle notifications are emitted.
