@@ -10,3 +10,5 @@ typed event. `RefreshExplorer` carries workspace roots to a background filesyste
 adapter; cut is acknowledged before its deletion transaction is committed.
 `SaveDocumentAs` uses the same atomic workspace writer and metadata while reporting a distinct completion event
 so a failed Save As cannot retarget or dirty the active tab.
+`RefreshSyntax` and `SearchWorkspace` keep parser/search work outside the state transition path;
+search sessions can be cancelled with a typed effect.

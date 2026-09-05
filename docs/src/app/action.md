@@ -9,3 +9,5 @@ transition layer performs the corresponding model update and reports errors as o
 explicit and keep them in the same state transition path as tab changes.
 `SaveAs` and `CloseTab` are explicit root actions; close refuses dirty buffers and Save As does not
 change the active path until the asynchronous atomic write reports success.
+`QuickOpen`, `StartSearch`, and `CancelSearch` route workspace UI intent without allowing views to
+perform filesystem I/O.

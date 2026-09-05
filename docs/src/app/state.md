@@ -29,3 +29,5 @@ Clipboard copy/cut/paste use typed effects; cut deletes only after a successful 
 applies returned text as one undoable transaction. `editor.format` uses the authorized external
 formatter fallback when configured and rejects stale results before applying a transaction.
 Unit tests cover editing, dirty protection, blocked and authorized paths, plus clean input shutdown.
+Workspace Quick Open and streaming project search are routed through typed root actions/effects,
+and syntax refreshes are scheduled after document-version changes.

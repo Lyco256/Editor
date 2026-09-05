@@ -12,3 +12,5 @@ work. Diagnostics are projected into the editor markers, status counts, and Prob
 The recovery-enabled interactive variant persists an atomic session checkpoint after each
 action so unexpected termination can restore unsaved buffers. Headless tests cover enter, frame
 production, editing, quit, cleanup, and split/session round trips.
+Deferred effects emitted while applying asynchronous events are dispatched by the runtime, allowing
+format-on-save/paste and other service chains to remain outside the UI update path.

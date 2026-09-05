@@ -6,9 +6,9 @@ use std::{
     io::IsTerminal,
     path::PathBuf,
     process::{Command, ExitCode, Stdio},
-    sync::Arc,
     sync::atomic::{AtomicBool, Ordering},
     sync::mpsc::{self, Receiver, Sender},
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -170,6 +170,7 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
             state.open_startup_path(path);
         }
     }
+    state.schedule_syntax_refresh();
     match run_interactive_with_state_and_recovery(
         backend,
         dispatcher,
@@ -197,11 +198,12 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
     }
 }
 
-#[derive(Debug)]
 struct ServiceDispatcher {
     events: Receiver<Event>,
     sender: Sender<Event>,
     shutdown: Arc<AtomicBool>,
+    syntax: Arc<Mutex<syntax_engine::SyntaxEngine>>,
+    searches: Arc<Mutex<std::collections::HashMap<u64, workspace_core::SearchCancellation>>>,
 }
 
 impl Default for ServiceDispatcher {
@@ -211,6 +213,8 @@ impl Default for ServiceDispatcher {
             events,
             sender,
             shutdown: Arc::new(AtomicBool::new(false)),
+            syntax: Arc::new(Mutex::new(syntax_engine::SyntaxEngine::default())),
+            searches: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -267,6 +271,43 @@ impl EffectDispatcher for ServiceDispatcher {
                 });
                 return;
             }
+            if let Effect::RefreshSyntax {
+                request,
+                document,
+                version,
+                path,
+                text,
+                large_file,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                let syntax = self.syntax.clone();
+                thread::spawn(move || {
+                    let descriptor = editor_core::DocumentDescriptor {
+                        id: document,
+                        version,
+                        large_file_mode: large_file,
+                    };
+                    let update = match syntax.lock() {
+                        Ok(mut engine) => engine.open_document(
+                            syntax_engine::OpenDocument {
+                                descriptor,
+                                path: path.as_deref(),
+                                language_override: None,
+                                text: &text,
+                            },
+                            None,
+                        ),
+                        Err(_) => syntax_engine::SyntaxUpdate {
+                            status: syntax_engine::SyntaxStatus::Cancelled,
+                            snapshot: syntax_engine::SyntaxSnapshot::default(),
+                            changed_ranges: Vec::new(),
+                        },
+                    };
+                    let _ = sender.send(Event::SyntaxUpdated { request, update });
+                });
+                return;
+            }
             if let Effect::RefreshExplorer { request, roots } = effect.clone() {
                 let sender = self.sender.clone();
                 thread::spawn(move || {
@@ -305,6 +346,79 @@ impl EffectDispatcher for ServiceDispatcher {
                     );
                     let _ = sender.send(event);
                 });
+                return;
+            }
+            if let Effect::SearchWorkspace {
+                session_id,
+                options,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                let searches = self.searches.clone();
+                thread::spawn(move || match workspace_core::search_workspace(options) {
+                    Ok(session) => {
+                        if let Ok(mut active) = searches.lock() {
+                            active.insert(session_id, session.cancellation());
+                        }
+                        while let Some(event) = session.recv() {
+                            match event {
+                                workspace_core::SearchEvent::Match(hit) => {
+                                    let _ = sender.send(Event::SearchResult {
+                                        session_id,
+                                        result: app_ui::workspace::SearchResult {
+                                            path: hit.path,
+                                            line_number: hit.line_number,
+                                            line_text: hit.line_text,
+                                            matched_text: hit.matched_text,
+                                        },
+                                    });
+                                }
+                                workspace_core::SearchEvent::Finished { .. } => {
+                                    let _ = sender.send(Event::SearchFinished { session_id });
+                                    break;
+                                }
+                                workspace_core::SearchEvent::Cancelled => {
+                                    let _ = sender.send(Event::SearchCancelled { session_id });
+                                    break;
+                                }
+                                workspace_core::SearchEvent::Error(message) => {
+                                    let _ = sender.send(Event::SearchFailed {
+                                        session_id,
+                                        message: editor_types::OutputMessage {
+                                            subsystem: "workspace".to_owned(),
+                                            operation: "search".to_owned(),
+                                            level: editor_types::OutputLevel::Error,
+                                            message,
+                                        },
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                        if let Ok(mut active) = searches.lock() {
+                            active.remove(&session_id);
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Event::SearchFailed {
+                            session_id,
+                            message: editor_types::OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "search".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        });
+                    }
+                });
+                return;
+            }
+            if let Effect::CancelSearch { session_id } = effect.clone() {
+                if let Ok(active) = self.searches.lock() {
+                    if let Some(cancellation) = active.get(&session_id) {
+                        cancellation.cancel();
+                    }
+                }
                 return;
             }
             if let Effect::ClipboardWrite { request, text, cut } = effect.clone() {

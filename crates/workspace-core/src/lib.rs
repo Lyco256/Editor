@@ -27,9 +27,9 @@ pub use path::{
     canonicalize_path, lexical_normalize_path, path_eq, workspace_identity_key,
 };
 pub use search::{
-    ReplacementEdit, ReplacementPlan, ReplacementReport, SearchBackendPreference, SearchError,
-    SearchEvent, SearchHit, SearchOptions, SearchSession, apply_replacement_plan,
-    collect_search_results, plan_replacements, search_workspace,
+    ReplacementEdit, ReplacementPlan, ReplacementReport, SearchBackendPreference,
+    SearchCancellation, SearchError, SearchEvent, SearchHit, SearchOptions, SearchSession,
+    apply_replacement_plan, collect_search_results, plan_replacements, search_workspace,
 };
 pub use workspace::{
     RecentWorkspaceEntry, RecentWorkspaceStore, TrustState, TrustStore, TrustStoreEntry,

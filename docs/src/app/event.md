@@ -8,3 +8,5 @@ carry text only to the pending paste transaction, and successful writes acknowle
 Language diagnostic notifications are converted from negotiated LSP positions into editor ranges
 before being stored in root state; malformed ranges are ignored safely.
 `DocumentSavedAs` changes the active tab path only after the workspace adapter confirms success.
+Syntax updates are accepted only for the active document/version, while search results are filtered
+by session id before entering the pure workspace UI model.

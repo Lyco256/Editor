@@ -57,6 +57,29 @@ pub enum Event {
         request: RequestId,
         message: OutputMessage,
     },
+    SyntaxUpdated {
+        request: RequestId,
+        update: syntax_engine::SyntaxUpdate,
+    },
+    SearchStarted {
+        session_id: u64,
+        query: String,
+        options: app_ui::workspace::SearchOptionsView,
+    },
+    SearchResult {
+        session_id: u64,
+        result: app_ui::workspace::SearchResult,
+    },
+    SearchFinished {
+        session_id: u64,
+    },
+    SearchCancelled {
+        session_id: u64,
+    },
+    SearchFailed {
+        session_id: u64,
+        message: OutputMessage,
+    },
     EffectCompleted(RequestId),
     EffectFailed {
         request: RequestId,

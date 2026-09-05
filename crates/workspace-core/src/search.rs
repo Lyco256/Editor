@@ -92,6 +92,15 @@ pub struct SearchSession {
     cancel: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchCancellation(Arc<AtomicBool>);
+
+impl SearchCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplacementEdit {
     pub range: Range<usize>,
@@ -214,6 +223,11 @@ pub fn collect_search_results(session: &SearchSession) -> Result<Vec<SearchHit>,
 }
 
 impl SearchSession {
+    #[must_use]
+    pub fn cancellation(&self) -> SearchCancellation {
+        SearchCancellation(Arc::clone(&self.cancel))
+    }
+
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
     }

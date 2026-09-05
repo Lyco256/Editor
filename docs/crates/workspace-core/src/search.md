@@ -13,6 +13,8 @@ Important types:
 Invariants:
 
 - Search results stream through a bounded 256-event channel (backpressure) and can be cancelled.
+- `SearchCancellation` is a cloneable cancellation capability for the root dispatcher; the UI
+  never receives the worker's receiver directly.
 - Literal, regex, case-sensitive, case-insensitive, whole-word, include, and exclude options are
   supported in both backends.
 - Replacement plans group edits per file before any write occurs.

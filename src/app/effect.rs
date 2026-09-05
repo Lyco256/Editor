@@ -63,6 +63,21 @@ pub enum Effect {
         request: RequestId,
         plan: workspace_core::ReplacementPlan,
     },
+    SearchWorkspace {
+        session_id: u64,
+        options: workspace_core::SearchOptions,
+    },
+    CancelSearch {
+        session_id: u64,
+    },
+    RefreshSyntax {
+        request: RequestId,
+        document: editor_types::DocumentId,
+        version: u64,
+        path: Option<PathBuf>,
+        text: String,
+        large_file: bool,
+    },
     Render,
 }
 

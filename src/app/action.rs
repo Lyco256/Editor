@@ -22,6 +22,12 @@ pub enum Action {
     SetSplitRatio(u16),
     AddWorkspaceRoot(PathBuf),
     ApplyReplacementPlan(workspace_core::ReplacementPlan),
+    QuickOpen(app_ui::workspace::QuickOpenAction),
+    StartSearch {
+        query: String,
+        options: app_ui::workspace::SearchOptionsView,
+    },
+    CancelSearch(u64),
     RequestEffect(Effect),
     Quit,
 }

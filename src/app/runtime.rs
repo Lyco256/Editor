@@ -129,6 +129,9 @@ where
     }
 
     fn run_entered(&mut self) -> Result<(), RuntimeError> {
+        for effect in self.state.take_deferred_effects() {
+            self.dispatcher.dispatch(effect);
+        }
         self.render()?;
         while self.state.running {
             let Some(action) = self.input.next_action() else {
@@ -144,6 +147,9 @@ where
             self.persist_checkpoint();
             for event in self.dispatcher.poll_events() {
                 self.state.apply_event(event);
+                for effect in self.state.take_deferred_effects() {
+                    self.dispatcher.dispatch(effect);
+                }
             }
             if transition.render {
                 self.render()?;
@@ -221,24 +227,46 @@ fn frame_for_state(
             }
         })
         .collect::<Vec<_>>();
+    let syntax_error_markers = state
+        .syntax_snapshot
+        .error_regions
+        .iter()
+        .copied()
+        .map(|range| app_ui::editor::MarkerSpan {
+            range,
+            kind: app_ui::editor::MarkerKind::Error,
+        })
+        .collect::<Vec<_>>();
+    let mut language_markers = diagnostic_markers.clone();
+    language_markers.extend(syntax_error_markers);
+    let mut folds = editor_core::FoldSet::default();
+    let fold_regions = state
+        .syntax_snapshot
+        .folds
+        .iter()
+        .filter_map(|range| {
+            let start = buffer.offset_to_position(range.start).ok()?.line;
+            let end = buffer.offset_to_position(range.end).ok()?.line;
+            editor_core::FoldRegion::new(start, end).ok()
+        })
+        .collect::<Vec<_>>();
+    folds.set_regions(fold_regions);
     let status = EditorStatusData {
         file_name: file_name.clone(),
         dirty: state.active_dirty,
-        encoding: state
-            .tabs
-            .get(state.active_tab)
-            .map(|tab| tab.encoding.canonical_name().to_ascii_lowercase())
-            .unwrap_or_else(|| "utf-8".to_owned()),
+        encoding: state.tabs.get(state.active_tab).map_or_else(
+            || "utf-8".to_owned(),
+            |tab| tab.encoding.canonical_name().to_ascii_lowercase(),
+        ),
         line_ending: state
             .tabs
             .get(state.active_tab)
-            .map(|tab| match tab.line_endings {
+            .map_or("lf", |tab| match tab.line_endings {
                 workspace_core::LineEndings::None => "none",
                 workspace_core::LineEndings::Lf => "lf",
                 workspace_core::LineEndings::Crlf => "crlf",
                 workspace_core::LineEndings::Mixed => "mixed",
             })
-            .unwrap_or("lf")
             .to_owned(),
         branch: state
             .git_status
@@ -261,7 +289,7 @@ fn frame_for_state(
         selections: buffer.selections().clone(),
         folds: editor_core::FoldSet::default(),
         markers: SemanticMarkerSet {
-            language: diagnostic_markers.clone(),
+            language: language_markers.clone(),
             ..SemanticMarkerSet::default()
         },
         search_matches: Vec::new(),
@@ -334,9 +362,9 @@ fn frame_for_state(
                 snapshot: tab.buffer.snapshot(),
                 viewport: app_ui::editor::TextViewport::default(),
                 selections: tab.buffer.selections().clone(),
-                folds: editor_core::FoldSet::default(),
+                folds: folds.clone(),
                 markers: SemanticMarkerSet {
-                    language: diagnostic_markers,
+                    language: language_markers,
                     ..SemanticMarkerSet::default()
                 },
                 search_matches: Vec::new(),

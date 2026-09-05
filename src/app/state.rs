@@ -9,8 +9,8 @@ use std::{
 use app_ui::widgets::{CommandEntry, CommandPaletteState};
 use editor_core::{PairConfig, TextBuffer};
 use editor_types::{
-    CharacterOffset, GitStatusSummary, InputEvent, KeyCode, LanguageServerStatus, LogicalPosition,
-    Modifier, MouseAction, MouseButton, OutputLevel, OutputMessage, RequestId,
+    CharacterOffset, DocumentId, GitStatusSummary, InputEvent, KeyCode, LanguageServerStatus,
+    LogicalPosition, Modifier, MouseAction, MouseButton, OutputLevel, OutputMessage, RequestId,
 };
 
 use super::{
@@ -28,6 +28,9 @@ pub struct AppState {
     pub language_server: LanguageServerStatus,
     pub git_status: Option<GitStatusSummary>,
     pub diagnostics: Vec<editor_types::Diagnostic>,
+    pub(crate) workspace_ui: app_ui::workspace::WorkspaceUiState,
+    pub(crate) syntax_snapshot: syntax_engine::SyntaxSnapshot,
+    pub(crate) document_id: DocumentId,
     pub output: Vec<OutputMessage>,
     pub active_path: Option<PathBuf>,
     pub workspace_roots: Vec<PathBuf>,
@@ -45,7 +48,10 @@ pub struct AppState {
     pub(crate) split_secondary_tab: Option<usize>,
     pending_processes: HashMap<RequestId, super::effect::ExternalProcessKind>,
     pending_clipboard: HashMap<RequestId, PendingClipboard>,
-    pending_format: HashMap<RequestId, u64>,
+    pending_format: HashMap<RequestId, PendingFormat>,
+    deferred_effects: Vec<Effect>,
+    pub(crate) format_on_save: bool,
+    pub(crate) format_on_paste: bool,
     pub(crate) external_formatter: Option<ProcessSpec>,
     latest_explorer_request: Option<RequestId>,
     mouse_anchor: Option<CharacterOffset>,
@@ -94,6 +100,12 @@ enum PendingClipboard {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingFormat {
+    version: u64,
+    save_after: bool,
+}
+
 fn config_encoding_to_workspace(value: &config_core::EncodingKind) -> workspace_core::EncodingKind {
     match value {
         config_core::EncodingKind::Utf8 => workspace_core::EncodingKind::Utf8,
@@ -117,7 +129,7 @@ fn workspace_encoding_to_config(value: &workspace_core::EncodingKind) -> config_
 }
 
 fn config_line_endings_to_workspace(
-    value: &config_core::LineEndings,
+    value: config_core::LineEndings,
 ) -> workspace_core::LineEndings {
     match value {
         config_core::LineEndings::None => workspace_core::LineEndings::None,
@@ -148,6 +160,9 @@ impl Default for AppState {
             language_server: LanguageServerStatus::Stopped,
             git_status: None,
             diagnostics: Vec::new(),
+            workspace_ui: app_ui::workspace::WorkspaceUiState::default(),
+            syntax_snapshot: syntax_engine::SyntaxSnapshot::default(),
+            document_id: DocumentId(1),
             output: Vec::new(),
             active_path: None,
             workspace_roots: Vec::new(),
@@ -179,6 +194,9 @@ impl Default for AppState {
             pending_processes: HashMap::new(),
             pending_clipboard: HashMap::new(),
             pending_format: HashMap::new(),
+            deferred_effects: Vec::new(),
+            format_on_save: false,
+            format_on_paste: false,
             external_formatter: None,
             latest_explorer_request: None,
             mouse_anchor: None,
@@ -270,6 +288,26 @@ impl AppState {
     /// The caller must still trust-gate execution through the root policy.
     pub fn set_external_formatter(&mut self, spec: Option<ProcessSpec>) {
         self.external_formatter = spec;
+    }
+
+    /// Enables formatting after successful paste transactions when a trusted formatter exists.
+    pub fn set_format_on_paste(&mut self, enabled: bool) {
+        self.format_on_paste = enabled;
+    }
+
+    /// Enables formatting before saves when a trusted formatter exists.
+    pub fn set_format_on_save(&mut self, enabled: bool) {
+        self.format_on_save = enabled;
+    }
+
+    /// Takes effects scheduled by asynchronous event application.
+    pub(crate) fn take_deferred_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.deferred_effects)
+    }
+
+    /// Queues a syntax refresh for the currently active document after startup or restore.
+    pub(crate) fn schedule_syntax_refresh(&mut self) {
+        self.deferred_effects.push(self.syntax_effect());
     }
 
     /// Installs the persisted trust store before startup paths are opened.
@@ -387,6 +425,68 @@ impl AppState {
                 },
             },
         }))
+    }
+
+    /// Routes workspace UI actions through the root workspace/search services.
+    pub fn apply_workspace_action(
+        &mut self,
+        action: app_ui::workspace::QuickOpenAction,
+    ) -> Transition {
+        let opened = self.workspace_ui.quick_open.apply_action(action);
+        if let Some((disposition, path)) = opened {
+            match disposition {
+                app_ui::workspace::QuickOpenDisposition::CurrentEditor => {
+                    return self.apply_action(Action::OpenPath(path));
+                }
+                app_ui::workspace::QuickOpenDisposition::OpenToSide => {
+                    if let Err(error) = self.open_tab(path) {
+                        self.output.push(OutputMessage {
+                            subsystem: "workspace".to_owned(),
+                            operation: "quick-open".to_owned(),
+                            level: OutputLevel::Error,
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Transition {
+            render: true,
+            ..Transition::default()
+        }
+    }
+
+    /// Starts cancellable project search and streams results through typed events.
+    pub fn start_workspace_search(
+        &mut self,
+        query: impl Into<String>,
+        options: app_ui::workspace::SearchOptionsView,
+    ) -> Transition {
+        let query = query.into();
+        let session_id = self.frame_number.saturating_add(1);
+        let core_options = workspace_core::SearchOptions {
+            roots: self.workspace_roots.clone(),
+            pattern: query.clone(),
+            literal: options.literal,
+            case_sensitive: options.case_sensitive,
+            whole_word: options.whole_word,
+            max_results: options.max_results,
+            ..workspace_core::SearchOptions::default()
+        };
+        self.workspace_ui
+            .apply_event(app_ui::workspace::WorkspaceModelEvent::SearchStarted {
+                session_id,
+                query: query.clone(),
+                options,
+            });
+        Transition {
+            effects: vec![Effect::SearchWorkspace {
+                session_id,
+                options: core_options,
+            }],
+            render: true,
+            ..Transition::default()
+        }
     }
 
     /// Serializes all open documents into the crash-safe session schema. The caller owns the
@@ -528,7 +628,9 @@ impl AppState {
                             editor
                                 .original_line_ending
                                 .as_ref()
-                                .map_or(document.line_endings, config_line_endings_to_workspace),
+                                .map_or(document.line_endings, |value| {
+                                    config_line_endings_to_workspace(*value)
+                                }),
                         ),
                         Err(_) => (
                             Some(path.clone()),
@@ -538,10 +640,12 @@ impl AppState {
                                 config_encoding_to_workspace,
                             ),
                             editor.original_bom,
-                            editor.original_line_ending.as_ref().map_or(
-                                workspace_core::LineEndings::Lf,
-                                config_line_endings_to_workspace,
-                            ),
+                            editor
+                                .original_line_ending
+                                .as_ref()
+                                .map_or(workspace_core::LineEndings::Lf, |value| {
+                                    config_line_endings_to_workspace(*value)
+                                }),
                         ),
                     }
                 } else {
@@ -553,10 +657,12 @@ impl AppState {
                             config_encoding_to_workspace,
                         ),
                         editor.original_bom,
-                        editor.original_line_ending.as_ref().map_or(
-                            workspace_core::LineEndings::Lf,
-                            config_line_endings_to_workspace,
-                        ),
+                        editor
+                            .original_line_ending
+                            .as_ref()
+                            .map_or(workspace_core::LineEndings::Lf, |value| {
+                                config_line_endings_to_workspace(*value)
+                            }),
                     )
                 };
             let text = editor.unsaved_text.as_deref().unwrap_or(&disk_text);
@@ -804,6 +910,28 @@ impl AppState {
     #[must_use]
     #[allow(clippy::too_many_lines, clippy::needless_return)]
     pub fn apply_action(&mut self, action: Action) -> Transition {
+        let before_version = self.buffer.snapshot().version();
+        let mut transition = self.apply_action_inner(action);
+        if self.buffer.snapshot().version() != before_version {
+            transition.effects.push(self.syntax_effect());
+        }
+        transition
+    }
+
+    fn syntax_effect(&self) -> Effect {
+        let request = RequestId(self.frame_number.saturating_add(1));
+        Effect::RefreshSyntax {
+            request,
+            document: self.document_id,
+            version: self.buffer.snapshot().version(),
+            path: self.active_path.clone(),
+            text: self.active_text.clone(),
+            large_file: self.buffer.is_large_file(),
+        }
+    }
+
+    #[allow(clippy::too_many_lines, clippy::needless_return)]
+    fn apply_action_inner(&mut self, action: Action) -> Transition {
         match action {
             Action::Quit => {
                 if self.active_dirty {
@@ -997,6 +1125,13 @@ impl AppState {
                 render: true,
                 ..Transition::default()
             },
+            Action::QuickOpen(action) => self.apply_workspace_action(action),
+            Action::StartSearch { query, options } => self.start_workspace_search(query, options),
+            Action::CancelSearch(session_id) => Transition {
+                effects: vec![Effect::CancelSearch { session_id }],
+                render: true,
+                ..Transition::default()
+            },
             Action::RequestEffect(effect)
                 if effect.requires_trusted_workspace() && !self.workspace_trusted =>
             {
@@ -1012,6 +1147,9 @@ impl AppState {
                     | Effect::ClipboardRead { .. }
                     | Effect::FormatDocument { .. }
                     | Effect::ApplyReplacementPlan { .. }
+                    | Effect::RefreshSyntax { .. }
+                    | Effect::SearchWorkspace { .. }
+                    | Effect::CancelSearch { .. }
                     | Effect::Render => {
                         unreachable!("unguarded effect")
                     }
@@ -1038,6 +1176,9 @@ impl AppState {
                     | Effect::ClipboardRead { .. }
                     | Effect::FormatDocument { .. }
                     | Effect::ApplyReplacementPlan { .. }
+                    | Effect::RefreshSyntax { .. }
+                    | Effect::SearchWorkspace { .. }
+                    | Effect::CancelSearch { .. }
                     | Effect::Render => {}
                 }
                 Transition {
@@ -1291,6 +1432,28 @@ impl AppState {
         self.buffer.apply_transaction(transaction).map(|_| ())
     }
 
+    fn start_format(&mut self, save_after: bool) -> Option<Effect> {
+        if !self.workspace_trusted {
+            return None;
+        }
+        let spec = self.external_formatter.clone()?;
+        let request = RequestId(self.frame_number.saturating_add(1));
+        let version = self.buffer.snapshot().version();
+        self.pending_format.insert(
+            request,
+            PendingFormat {
+                version,
+                save_after,
+            },
+        );
+        Some(Effect::FormatDocument {
+            request,
+            text: self.active_text.clone(),
+            spec,
+            timeout_ms: 5_000,
+        })
+    }
+
     #[allow(clippy::too_many_lines, clippy::needless_return)]
     fn apply_command(&mut self, command: &str) -> Option<Effect> {
         match command {
@@ -1302,6 +1465,11 @@ impl AppState {
             }
             "editor.quit" if !self.active_dirty => self.running = false,
             "editor.save" if self.active_dirty => {
+                if self.format_on_save {
+                    if let Some(effect) = self.start_format(true) {
+                        return Some(effect);
+                    }
+                }
                 if let Some(path) = self.active_path.clone() {
                     return Some(Effect::SaveDocument {
                         path,
@@ -1370,7 +1538,10 @@ impl AppState {
                     self.sync_buffer_projection();
                     return None;
                 }
-                let Some(spec) = self.external_formatter.clone() else {
+                if let Some(effect) = self.start_format(false) {
+                    return Some(effect);
+                }
+                let Some(_spec) = self.external_formatter.clone() else {
                     self.output.push(OutputMessage {
                         subsystem: "editor".to_owned(),
                         operation: "format".to_owned(),
@@ -1381,15 +1552,7 @@ impl AppState {
                     self.sync_buffer_projection();
                     return None;
                 };
-                let request = RequestId(self.frame_number.saturating_add(1));
-                let version = self.buffer.snapshot().version();
-                self.pending_format.insert(request, version);
-                return Some(Effect::FormatDocument {
-                    request,
-                    text: self.active_text.clone(),
-                    spec,
-                    timeout_ms: 5_000,
-                });
+                return None;
             }
             "workbench.splitVertical" => {
                 self.split_axis = Some(app_ui::shell::SplitAxis::Vertical);
@@ -1556,6 +1719,19 @@ impl AppState {
             Event::ExplorerUpdated { request, entries }
                 if self.latest_explorer_request == Some(request) =>
             {
+                let candidates = entries
+                    .iter()
+                    .filter(|entry| entry.path.is_file())
+                    .enumerate()
+                    .map(
+                        |(recent_rank, entry)| app_ui::workspace::QuickOpenCandidate {
+                            label: entry.path.display().to_string(),
+                            path: entry.path.clone(),
+                            recent_rank,
+                        },
+                    )
+                    .collect();
+                self.workspace_ui.quick_open.set_candidates(candidates);
                 self.explorer_entries = entries
                     .into_iter()
                     .map(|entry| ExplorerProjection {
@@ -1613,6 +1789,11 @@ impl AppState {
                     {
                         if self.buffer.apply_transaction(transaction).is_ok() {
                             self.sync_buffer_projection();
+                            if self.format_on_paste {
+                                if let Some(effect) = self.start_format(false) {
+                                    self.deferred_effects.push(effect);
+                                }
+                            }
                         }
                     }
                 }
@@ -1625,10 +1806,10 @@ impl AppState {
                 request,
                 replacement,
             } => {
-                let Some(version) = self.pending_format.remove(&request) else {
+                let Some(pending) = self.pending_format.remove(&request) else {
                     return;
                 };
-                if self.buffer.snapshot().version() != version {
+                if self.buffer.snapshot().version() != pending.version {
                     self.output.push(OutputMessage {
                         subsystem: "editor".to_owned(),
                         operation: "format".to_owned(),
@@ -1649,11 +1830,80 @@ impl AppState {
                 {
                     if self.buffer.apply_transaction(transaction).is_ok() {
                         self.sync_buffer_projection();
+                        if pending.save_after {
+                            if let Some(path) = self.active_path.clone() {
+                                let (encoding, with_bom, line_endings) = {
+                                    let tab = self.active_tab_state();
+                                    (tab.encoding.clone(), tab.with_bom, tab.line_endings)
+                                };
+                                self.deferred_effects.push(Effect::SaveDocument {
+                                    path,
+                                    text: self.active_text.clone(),
+                                    encoding,
+                                    with_bom,
+                                    line_endings,
+                                });
+                            }
+                        }
                     }
                 }
             }
             Event::DocumentFormatFailed { request, message } => {
-                self.pending_format.remove(&request);
+                let pending = self.pending_format.remove(&request);
+                self.output.push(message);
+                if pending.is_some_and(|pending| pending.save_after) {
+                    if let Some(path) = self.active_path.clone() {
+                        let (encoding, with_bom, line_endings) = {
+                            let tab = self.active_tab_state();
+                            (tab.encoding.clone(), tab.with_bom, tab.line_endings)
+                        };
+                        self.deferred_effects.push(Effect::SaveDocument {
+                            path,
+                            text: self.active_text.clone(),
+                            encoding,
+                            with_bom,
+                            line_endings,
+                        });
+                    }
+                }
+            }
+            Event::SyntaxUpdated { update, .. } => {
+                let Some(ticket) = update.snapshot.ticket else {
+                    return;
+                };
+                if ticket.document == self.document_id
+                    && ticket.version == self.buffer.snapshot().version()
+                {
+                    self.syntax_snapshot = update.snapshot;
+                }
+            }
+            Event::SearchStarted {
+                session_id,
+                query,
+                options,
+            } => self.workspace_ui.apply_event(
+                app_ui::workspace::WorkspaceModelEvent::SearchStarted {
+                    session_id,
+                    query,
+                    options,
+                },
+            ),
+            Event::SearchResult { session_id, result } => self.workspace_ui.apply_event(
+                app_ui::workspace::WorkspaceModelEvent::SearchResult { session_id, result },
+            ),
+            Event::SearchFinished { session_id } => self
+                .workspace_ui
+                .apply_event(app_ui::workspace::WorkspaceModelEvent::SearchFinished { session_id }),
+            Event::SearchCancelled { session_id } => self.workspace_ui.apply_event(
+                app_ui::workspace::WorkspaceModelEvent::SearchCancelled { session_id },
+            ),
+            Event::SearchFailed {
+                session_id,
+                message,
+            } => {
+                self.workspace_ui.apply_event(
+                    app_ui::workspace::WorkspaceModelEvent::SearchCancelled { session_id },
+                );
                 self.output.push(message);
             }
             Event::LanguageDiagnostics { params, .. } => {
@@ -1747,7 +1997,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use editor_types::{InputEvent, LanguageServerStatus, RequestId};
+    use editor_types::{InputEvent, KeyCode, KeyEvent, LanguageServerStatus, RequestId};
 
     use super::AppState;
     use crate::app::{
@@ -1974,6 +2224,119 @@ mod tests {
         assert_eq!(state.active_text, "typed");
         let _ = state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.undo")));
         assert_eq!(state.active_text, "");
+    }
+
+    #[test]
+    fn format_on_paste_schedules_formatter_after_clipboard_transaction() {
+        let mut state = AppState {
+            workspace_trusted: true,
+            format_on_paste: true,
+            ..AppState::default()
+        };
+        state.set_external_formatter(Some(ProcessSpec {
+            executable: "formatter".to_owned(),
+            arguments: Vec::new(),
+        }));
+        let transition =
+            state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.paste")));
+        let Effect::ClipboardRead { request } = transition.effects[0].clone() else {
+            panic!("paste should request clipboard read");
+        };
+        state.apply_event(Event::ClipboardRead {
+            request,
+            text: "typed".to_owned(),
+        });
+        assert!(matches!(
+            state.take_deferred_effects().first(),
+            Some(Effect::FormatDocument { .. })
+        ));
+    }
+
+    #[test]
+    fn format_on_save_saves_formatted_transaction() {
+        let mut state = AppState {
+            active_path: Some(std::path::PathBuf::from("file.txt")),
+            buffer: TextBuffer::new("before"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        let _ = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('!'),
+            modifiers: editor_types::Modifiers::default(),
+            repeat: false,
+        })));
+        state.workspace_trusted = true;
+        state.format_on_save = true;
+        state.set_external_formatter(Some(ProcessSpec {
+            executable: "formatter".to_owned(),
+            arguments: Vec::new(),
+        }));
+        let transition =
+            state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.save")));
+        let Effect::FormatDocument { request, .. } = transition.effects[0].clone() else {
+            panic!("save should format first");
+        };
+        state.apply_event(Event::DocumentFormatted {
+            request,
+            replacement: "after".to_owned(),
+        });
+        assert!(matches!(
+            state.take_deferred_effects().first(),
+            Some(Effect::SaveDocument { .. })
+        ));
+    }
+
+    #[test]
+    fn text_edits_schedule_versioned_syntax_refresh() {
+        use editor_types::{KeyCode, KeyEvent};
+        let mut state = AppState {
+            active_path: Some(std::path::PathBuf::from("main.rs")),
+            buffer: TextBuffer::new("fn main() {}"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        let transition = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('x'),
+            modifiers: editor_types::Modifiers::default(),
+            repeat: false,
+        })));
+        assert!(matches!(
+            transition.effects.last(),
+            Some(Effect::RefreshSyntax {
+                version: 1,
+                large_file: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn workspace_search_events_update_only_the_active_session() {
+        let mut state = AppState::default();
+        let transition =
+            state.start_workspace_search("needle", app_ui::workspace::SearchOptionsView::default());
+        let Effect::SearchWorkspace { session_id, .. } = transition.effects[0].clone() else {
+            panic!("search effect");
+        };
+        state.apply_event(Event::SearchResult {
+            session_id,
+            result: app_ui::workspace::SearchResult {
+                path: std::path::PathBuf::from("a.txt"),
+                line_number: 1,
+                line_text: "needle".to_owned(),
+                matched_text: "needle".to_owned(),
+            },
+        });
+        state.apply_event(Event::SearchResult {
+            session_id: session_id.saturating_sub(1),
+            result: app_ui::workspace::SearchResult {
+                path: std::path::PathBuf::from("stale.txt"),
+                line_number: 1,
+                line_text: "needle".to_owned(),
+                matched_text: "needle".to_owned(),
+            },
+        });
+        assert_eq!(state.workspace_ui.search.results.len(), 1);
     }
 
     #[test]
