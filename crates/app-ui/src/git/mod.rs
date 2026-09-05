@@ -1597,6 +1597,7 @@ mod tests {
     fn fixture(name: &str) -> String {
         fs::read_to_string(repo_root().join("tests/fixtures/app-ui/git").join(name))
             .expect("fixture should exist")
+            .replace("\r\n", "\n")
     }
 
     fn snapshot(name: &str) -> String {
