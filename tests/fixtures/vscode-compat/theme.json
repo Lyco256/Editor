@@ -1,0 +1,9 @@
+{
+  "name": "Fixture Dark",
+  "type": "dark",
+  "colors": {
+    "editor.foreground": "#d4d4d4",
+    "editor.background": "#1e1e1e",
+    "editor.selectionBackground": "#264f78"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "Loop": {
+    "prefix": "loop",
+    "body": "for (let ${1:item} of ${2:items}) {\n  $0\n}"
+  }
+}

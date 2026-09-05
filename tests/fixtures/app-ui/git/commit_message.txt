@@ -1,0 +1,2 @@
+Implement source control UI
+Handle staged and unstaged changes

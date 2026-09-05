@@ -1,0 +1,13 @@
+trust=untrusted
+recent=/workspace/beta
+recent=/workspace/alpha
+root=alpha|/workspace/alpha|trusted
+node=alpha|/workspace/alpha/src|dir|expanded
+node=alpha|/workspace/alpha/src/main.rs|file|dirty
+node=alpha|/workspace/alpha/src/lib.rs|file
+node=alpha|/workspace/alpha/README.md|file
+root=beta|/workspace/beta|untrusted
+node=beta|/workspace/beta/docs|dir|expanded
+node=beta|/workspace/beta/docs/guide.md|file
+node=beta|/workspace/beta/logs|dir
+node=beta|/workspace/beta/logs/app.log|file

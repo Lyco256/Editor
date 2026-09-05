@@ -1,0 +1,18 @@
+[package]
+name = "vcs-git"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+editor-types = { path = "../editor-types" }
+workspace-core = { path = "../workspace-core" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,8 @@
+/target/
+**/*.rs.bk
+*.swp
+*.tmp
+/.idea/
+/.vscode/*.log
+/test-results/
+/.worktrees/

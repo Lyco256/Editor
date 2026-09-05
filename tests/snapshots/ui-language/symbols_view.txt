@@ -1,0 +1,3 @@
+ S|y|m|b|o|l|s
+ s|t|r|u|c|t| |D|o|c|u|m|e|n|t
+>f|n| |r|e|n|d|e|r

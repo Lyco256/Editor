@@ -1,0 +1,70 @@
+[package]
+name = "editor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "UNLICENSED"
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/editor-types",
+    "crates/editor-core",
+    "crates/terminal-backend",
+    "crates/config-core",
+    "crates/workspace-core",
+    "crates/syntax-engine",
+    "crates/lsp-client",
+    "crates/vcs-git",
+    "crates/vscode-compat",
+    "crates/app-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "UNLICENSED"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }
+rstest = "0.26"
+proptest = "1.7"
+insta = "1.43"
+tempfile = "3.21"
+
+[dependencies]
+app-ui = { path = "crates/app-ui" }
+config-core = { path = "crates/config-core" }
+editor-core = { path = "crates/editor-core" }
+editor-types = { path = "crates/editor-types" }
+lsp-client = { path = "crates/lsp-client" }
+syntax-engine = { path = "crates/syntax-engine" }
+terminal-backend = { path = "crates/terminal-backend" }
+thiserror.workspace = true
+tokio.workspace = true
+vcs-git = { path = "crates/vcs-git" }
+vscode-compat = { path = "crates/vscode-compat" }
+workspace-core = { path = "crates/workspace-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[lints]
+workspace = true

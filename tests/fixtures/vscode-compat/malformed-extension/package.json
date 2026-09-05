@@ -1,0 +1,8 @@
+{
+  "name": "broken",
+  "contributes": {
+    "themes": [
+      { "label": "Missing Path" }
+    ]
+  }
+}

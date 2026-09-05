@@ -1,0 +1,364 @@
+//! Event-driven runtime with one authoritative state mutation path.
+
+use std::collections::VecDeque;
+
+use app_ui::{
+    editor::{EditorStatusData, EditorViewportState, SemanticMarkerSet},
+    frame::empty_frame,
+    shell::{
+        BottomPanelState, ExplorerState, PaneNode, PanelEntry, ShellFocus, ShellState, TabEntry,
+    },
+    widgets::CommandPaletteState,
+};
+use editor_core::TextBuffer;
+use editor_types::{OutputLevel, StyleRole};
+use terminal_backend::{Framebuffer, InputReader, TerminalAdapter};
+use thiserror::Error;
+
+use super::{action::Action, effect::Effect, state::AppState};
+
+pub trait ActionSource {
+    fn next_action(&mut self) -> Option<Action>;
+}
+
+pub trait EffectDispatcher {
+    fn dispatch(&mut self, effect: Effect);
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RuntimeError {
+    #[error("could not enter terminal: {0}")]
+    Enter(String),
+    #[error("could not render terminal frame: {0}")]
+    Render(String),
+    #[error("could not restore terminal: {0}")]
+    Restore(String),
+    #[error("could not read terminal input: {0}")]
+    Input(String),
+    #[error("runtime failed ({runtime}); terminal restore also failed ({restore})")]
+    RestoreAfterFailure { runtime: String, restore: String },
+}
+
+/// A terminal that owns both presentation and normalized input capabilities.
+pub trait InteractiveTerminal: TerminalAdapter + InputReader {}
+
+impl<T> InteractiveTerminal for T where T: TerminalAdapter + InputReader {}
+
+pub struct AppRuntime<T, I, D> {
+    terminal: T,
+    input: I,
+    dispatcher: D,
+    state: AppState,
+    size: (u16, u16),
+}
+
+impl<T, I, D> AppRuntime<T, I, D>
+where
+    T: TerminalAdapter,
+    I: ActionSource,
+    D: EffectDispatcher,
+{
+    #[must_use]
+    pub fn new(terminal: T, input: I, dispatcher: D, size: (u16, u16)) -> Self {
+        Self::with_state(terminal, input, dispatcher, size, AppState::default())
+    }
+
+    #[must_use]
+    pub fn with_state(
+        terminal: T,
+        input: I,
+        dispatcher: D,
+        size: (u16, u16),
+        state: AppState,
+    ) -> Self {
+        Self {
+            terminal,
+            input,
+            dispatcher,
+            state,
+            size,
+        }
+    }
+
+    /// Runs until input ends or the state accepts a quit action.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed lifecycle error when terminal entry, rendering, or restoration fails.
+    pub fn run(mut self) -> Result<AppState, RuntimeError> {
+        self.terminal
+            .enter()
+            .map_err(|error| RuntimeError::Enter(error.to_string()))?;
+
+        let runtime_result = self.run_entered();
+        let restore_result = self.terminal.restore().map_err(|error| error.to_string());
+
+        match (runtime_result, restore_result) {
+            (Ok(()), Ok(())) => Ok(self.state),
+            (Ok(()), Err(restore)) => Err(RuntimeError::Restore(restore)),
+            (Err(runtime), Ok(())) => Err(runtime),
+            (Err(runtime), Err(restore)) => Err(RuntimeError::RestoreAfterFailure {
+                runtime: runtime.to_string(),
+                restore,
+            }),
+        }
+    }
+
+    fn run_entered(&mut self) -> Result<(), RuntimeError> {
+        self.render()?;
+        while self.state.running {
+            let Some(action) = self.input.next_action() else {
+                break;
+            };
+            let transition = self.state.apply_action(action);
+            for event in transition.events {
+                self.state.apply_event(event);
+            }
+            for effect in transition.effects {
+                self.dispatcher.dispatch(effect);
+            }
+            if transition.render {
+                self.render()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn render(&mut self) -> Result<(), RuntimeError> {
+        let frame = frame_for_state(&self.state, self.size, self.terminal.capabilities());
+        self.terminal
+            .render(&frame)
+            .map_err(|error| RuntimeError::Render(error.to_string()))?;
+        self.state.frame_number += 1;
+        Ok(())
+    }
+}
+
+fn frame_for_state(
+    state: &AppState,
+    size: (u16, u16),
+    capabilities: editor_types::TerminalCapabilities,
+) -> Framebuffer {
+    let mut frame = empty_frame(size.0, size.1);
+    let buffer = TextBuffer::new(&state.active_text);
+    let file_name = state
+        .active_path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map_or_else(
+            || "Welcome".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+    let status = EditorStatusData {
+        file_name: file_name.clone(),
+        dirty: state.active_dirty,
+        language_server: format!("{:?}", state.language_server),
+        trust: if state.workspace_trusted {
+            "trusted"
+        } else {
+            "untrusted"
+        }
+        .to_owned(),
+        ..EditorStatusData::default()
+    };
+    let viewport = EditorViewportState {
+        title: file_name,
+        snapshot: buffer.snapshot(),
+        viewport: app_ui::editor::TextViewport::default(),
+        selections: buffer.selections().clone(),
+        folds: editor_core::FoldSet::default(),
+        markers: SemanticMarkerSet::default(),
+        search_matches: Vec::new(),
+        bracket_matches: Vec::new(),
+        status: status.clone(),
+        show_line_numbers: true,
+        tab_width: 4,
+    };
+    let roots = state
+        .active_path
+        .as_ref()
+        .filter(|path| path.is_dir())
+        .map(|path| vec![path.display().to_string()])
+        .unwrap_or_default();
+    let entries = state
+        .active_path
+        .as_ref()
+        .filter(|path| path.is_file())
+        .map(|path| {
+            vec![app_ui::shell::ExplorerEntry {
+                depth: 0,
+                label: path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+                active: true,
+                expanded: false,
+            }]
+        })
+        .unwrap_or_default();
+    let output_entries = state
+        .output
+        .iter()
+        .map(|message| PanelEntry {
+            label: message.message.clone(),
+            detail: Some(message.operation.clone()),
+            level: match message.level {
+                OutputLevel::Error => StyleRole::Error,
+                OutputLevel::Warning => StyleRole::Warning,
+                OutputLevel::Information | OutputLevel::Trace => StyleRole::Information,
+            },
+        })
+        .collect();
+    let shell = ShellState {
+        explorer: ExplorerState {
+            roots,
+            entries,
+            visible: true,
+        },
+        tabs: vec![TabEntry {
+            title: viewport.title.clone(),
+            dirty: state.active_dirty,
+            active: true,
+            closeable: true,
+        }],
+        root: PaneNode::leaf(viewport),
+        bottom: BottomPanelState {
+            title: "Output".to_owned(),
+            entries: output_entries,
+            visible: !state.output.is_empty(),
+        },
+        palette: CommandPaletteState::default(),
+        focus: ShellFocus::Editor,
+        status,
+    };
+    shell.render(
+        &mut frame,
+        app_ui::widgets::Rect::new(0, 0, size.0, size.1),
+        capabilities,
+    );
+    frame
+}
+
+/// Runs the production event loop with one terminal adapter for rendering and input.
+///
+/// The loop blocks in the terminal adapter when idle; it does not poll at a fixed cadence.
+///
+/// # Errors
+///
+/// Returns a typed lifecycle error when entering, reading, rendering, or restoring the terminal
+/// fails.
+pub fn run_interactive<T, D>(
+    terminal: T,
+    dispatcher: D,
+    size: (u16, u16),
+) -> Result<AppState, RuntimeError>
+where
+    T: InteractiveTerminal,
+    D: EffectDispatcher,
+{
+    run_interactive_with_state(terminal, dispatcher, size, AppState::default())
+}
+
+/// Interactive runtime variant used by startup paths that have already loaded a document or
+/// workspace model.
+///
+/// # Errors
+///
+/// Returns a typed lifecycle error when entering, reading, rendering, or restoring the terminal
+/// fails.
+pub fn run_interactive_with_state<T, D>(
+    mut terminal: T,
+    dispatcher: D,
+    size: (u16, u16),
+    state: AppState,
+) -> Result<AppState, RuntimeError>
+where
+    T: InteractiveTerminal,
+    D: EffectDispatcher,
+{
+    terminal
+        .enter()
+        .map_err(|error| RuntimeError::Enter(error.to_string()))?;
+    let mut runtime =
+        AppRuntime::with_state(terminal, InteractiveActionSource, dispatcher, size, state);
+    let runtime_result = runtime.run_entered_interactive();
+    let restore_result = runtime
+        .terminal
+        .restore()
+        .map_err(|error| error.to_string());
+    match (runtime_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(runtime.state),
+        (Ok(()), Err(restore)) => Err(RuntimeError::Restore(restore)),
+        (Err(runtime), Ok(())) => Err(runtime),
+        (Err(runtime), Err(restore)) => Err(RuntimeError::RestoreAfterFailure {
+            runtime: runtime.to_string(),
+            restore,
+        }),
+    }
+}
+
+struct InteractiveActionSource;
+
+impl ActionSource for InteractiveActionSource {
+    fn next_action(&mut self) -> Option<Action> {
+        None
+    }
+}
+
+impl<T, D> AppRuntime<T, InteractiveActionSource, D>
+where
+    T: InteractiveTerminal,
+    D: EffectDispatcher,
+{
+    fn run_entered_interactive(&mut self) -> Result<(), RuntimeError> {
+        self.render()?;
+        while self.state.running {
+            let input = self
+                .terminal
+                .read_input()
+                .map_err(|error| RuntimeError::Input(error.to_string()))?;
+            let transition = self.state.apply_action(Action::Input(input));
+            for event in transition.events {
+                self.state.apply_event(event);
+            }
+            for effect in transition.effects {
+                self.dispatcher.dispatch(effect);
+            }
+            if transition.render {
+                self.render()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct QueueActionSource {
+    actions: VecDeque<Action>,
+}
+
+impl QueueActionSource {
+    #[must_use]
+    pub fn new(actions: impl IntoIterator<Item = Action>) -> Self {
+        Self {
+            actions: actions.into_iter().collect(),
+        }
+    }
+}
+
+impl ActionSource for QueueActionSource {
+    fn next_action(&mut self) -> Option<Action> {
+        self.actions.pop_front()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RecordingDispatcher {
+    pub effects: Vec<Effect>,
+}
+
+impl EffectDispatcher for RecordingDispatcher {
+    fn dispatch(&mut self, effect: Effect) {
+        self.effects.push(effect);
+    }
+}

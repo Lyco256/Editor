@@ -1,0 +1,27 @@
+[package]
+name = "lsp-client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+config-core = { path = "../config-core" }
+editor-core = { path = "../editor-core" }
+editor-types = { path = "../editor-types" }
+serde.workspace = true
+serde_json = "1.0"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
+
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lsp_client_fake_server"
+path = "../../tests/fixtures/lsp-client/fake_lsp_server.rs"
