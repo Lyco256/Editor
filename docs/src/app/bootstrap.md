@@ -27,4 +27,7 @@ confirmation-bound discard effects invoke the typed `vcs-git` APIs with patch da
 return `EffectCompleted` or structured failure output.
 After a path is selected it loads the workspace `.vscode/settings.json` as a JSONC data layer;
 resolved format, indentation, line-number, and large-file settings are applied to root state, while
-malformed settings remain visible as warning output.
+malformed settings remain visible as warning output. A workspace-local
+`.vscode/language-configuration.json`, when present, is parsed through the static compatibility
+boundary and its bracket pairs are applied to smart editing; parse failures and unsupported fields
+are surfaced as typed output instead of enabling unsafe defaults silently.

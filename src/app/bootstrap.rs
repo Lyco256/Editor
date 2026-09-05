@@ -176,6 +176,7 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
         }
     }
     apply_workspace_settings(&mut state);
+    apply_workspace_language_configuration(&mut state);
     state.schedule_syntax_refresh();
     match run_interactive_with_state_and_recovery(
         backend,
@@ -205,7 +206,7 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
 }
 
 fn apply_workspace_settings(state: &mut AppState) {
-    let Some(root) = state.workspace_roots.first() else {
+    let Some(root) = state.workspace_roots.first().cloned() else {
         return;
     };
     let path = root.join(".vscode").join("settings.json");
@@ -257,6 +258,95 @@ fn apply_workspace_settings(state: &mut AppState) {
             level: editor_types::OutputLevel::Warning,
             message: format!("{}: {}", issue.path.display(), issue.message),
         });
+    }
+}
+
+fn apply_workspace_language_configuration(state: &mut AppState) {
+    let Some(root) = state.workspace_roots.first().cloned() else {
+        return;
+    };
+    let path = root.join(".vscode").join("language-configuration.json");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            apply_extension_language_configuration(state, &root);
+            return;
+        }
+        Err(error) => {
+            state.output.push(editor_types::OutputMessage {
+                subsystem: "vscode-compat".to_owned(),
+                operation: "language-configuration".to_owned(),
+                level: editor_types::OutputLevel::Warning,
+                message: format!("{}: {error}", path.display()),
+            });
+            return;
+        }
+    };
+    match vscode_compat::load_language_configuration_json(&path, &contents) {
+        Ok((configuration, warnings)) => {
+            state.set_language_configuration(Some(&configuration));
+            for warning in warnings {
+                state.output.push(editor_types::OutputMessage {
+                    subsystem: "vscode-compat".to_owned(),
+                    operation: "language-configuration".to_owned(),
+                    level: editor_types::OutputLevel::Warning,
+                    message: format!("{}: {}", path.display(), warning.message),
+                });
+            }
+        }
+        Err(error) => state.output.push(editor_types::OutputMessage {
+            subsystem: "vscode-compat".to_owned(),
+            operation: "language-configuration".to_owned(),
+            level: editor_types::OutputLevel::Error,
+            message: format!("{}: {error}", path.display()),
+        }),
+    }
+}
+
+fn apply_extension_language_configuration(state: &mut AppState, root: &Path) {
+    let Some(language_id) = state
+        .active_path
+        .as_ref()
+        .and_then(syntax_engine::SyntaxLanguage::from_path)
+        .map(|language| language.name().to_owned())
+    else {
+        return;
+    };
+    let extension_root = root.join(".vscode").join("extensions");
+    let Ok(entries) = std::fs::read_dir(extension_root) else {
+        return;
+    };
+    let mut directories = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    directories.sort();
+    for directory in directories {
+        let Ok(package) = vscode_compat::load_static_extension_directory(&directory) else {
+            continue;
+        };
+        let Some(language) = package.languages.iter().find(|language| {
+            language.id.eq_ignore_ascii_case(&language_id)
+                || language
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(&language_id))
+        }) else {
+            continue;
+        };
+        if let Some(configuration) = language.configuration.as_ref() {
+            state.set_language_configuration(Some(configuration));
+            for warning in package.warnings {
+                state.output.push(editor_types::OutputMessage {
+                    subsystem: "vscode-compat".to_owned(),
+                    operation: "extension".to_owned(),
+                    level: editor_types::OutputLevel::Warning,
+                    message: warning.message,
+                });
+            }
+            return;
+        }
     }
 }
 
@@ -1540,11 +1630,10 @@ impl EffectDispatcher for ServiceDispatcher {
                             let status = client.status(&root, None).await?;
                             let diff_files = client
                                 .diff(&root, vcs_git::DiffTarget::WorkingTree, &[], None)
-                                .await
-                                .unwrap_or_default();
-                            let branches = client.branches(&root, None).await.unwrap_or_default();
-                            let stashes = client.stash_list(&root, None).await.unwrap_or_default();
-                            let history = client.log(&root, 50, None).await.unwrap_or_default();
+                                .await?;
+                            let branches = client.branches(&root, None).await?;
+                            let stashes = client.stash_list(&root, None).await?;
+                            let history = client.log(&root, 50, None).await?;
                             Ok::<_, vcs_git::GitError>((
                                 status, diff_files, branches, stashes, history,
                             ))
@@ -1831,7 +1920,10 @@ impl EffectDispatcher for ServiceDispatcher {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{StartupRequest, apply_lsp_workspace_edit, apply_workspace_settings};
+    use super::{
+        StartupRequest, apply_lsp_workspace_edit, apply_workspace_language_configuration,
+        apply_workspace_settings,
+    };
 
     #[test]
     fn parses_file_and_directory_as_one_positional_path() {
@@ -1864,6 +1956,24 @@ mod tests {
         apply_workspace_settings(&mut state);
         assert!(state.format_on_save);
         assert_eq!(state.tab_width, 2);
+    }
+
+    #[test]
+    fn workspace_language_configuration_is_applied_to_smart_editing() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let vscode = directory.path().join(".vscode");
+        std::fs::create_dir_all(&vscode).expect("settings directory");
+        std::fs::write(
+            vscode.join("language-configuration.json"),
+            r#"{"brackets":[["<",">"]],"autoClosingPairs":[["<",">"]]}"#,
+        )
+        .expect("language configuration");
+        let mut state = super::AppState::default();
+        state.workspace_roots.push(directory.path().to_path_buf());
+        apply_workspace_language_configuration(&mut state);
+        assert_eq!(state.pair_config.len(), 1);
+        assert_eq!(state.pair_config[0].open, "<");
+        assert_eq!(state.pair_config[0].close, ">");
     }
 
     #[test]

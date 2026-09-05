@@ -30,11 +30,18 @@ Implemented in the integration pass:
   including dirty-buffer deletion protection and Explorer refresh;
 - direct terminal paste now participates in format-on-paste precedence and remains undoable;
 - root `FindInDocument`/`ReplaceInDocument` actions now expose in-file search and undoable
-  replace-all semantics through editor-core;
+  replace-all semantics through editor-core, with keyboard prompts and typed invalid-expression
+  errors;
+- root keyboard prompts now provide Quick Open, project search, and find/replace entry points;
+  resolved VS Code keybindings dispatch through the same command path;
+- persistent LSP `didChange` notifications now send the smallest changed range derivable from the
+  previous/current snapshots;
+- workspace-local and static-extension language configuration bracket pairs are applied to smart
+  editing, while configuration failures remain visible as compatibility output;
 - root headless acceptance coverage for create, rename, move, and delete confirmation workflows;
 - Windows installer (`build/editor.iss`) and packaging script (`build/package.ps1`).
 
-Still release-blocking or environment-blocked:
+Release-gate status and evidence:
 
 1. `docs/testing/performance.md` now records release size, idle working-set/private memory, idle CPU,
    repeated redirected startup/close measurements, a process-level five-iteration Windows Terminal
@@ -67,7 +74,9 @@ Still release-blocking or environment-blocked:
 7. Revoking Workspace Trust now stops persistent language-server sessions and rejects late server
    workspace edits, with deterministic root-state coverage.
 
-Accordingly, the repository is integrated and test-clean, but the product goal is not marked
-complete until directory resource-operation semantics are implemented or explicitly scoped out,
-the remaining performance/smoke evidence is supplied, and the identical verified state is promoted
-to `main`.
+Remaining product-integration gaps include applying imported VS Code themes/snippets and static
+VSIX contributions in the runtime (the compatibility parser and safety checks are present), and
+full Explorer/list hit-testing beyond the root file-opening path. Directory resource-operation
+semantics remain explicitly rejected and must be implemented or explicitly scoped out. The product
+goal is not marked complete until the performance/smoke evidence is supplied, the current release
+measurements are synchronized here, and the identical verified state is promoted to `main`.

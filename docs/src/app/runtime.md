@@ -14,8 +14,12 @@ The recovery-enabled interactive variant persists an atomic session checkpoint a
 action so unexpected termination can restore unsaved buffers. Search, Git, and interactive
 language-result panels are blitted from pure renderers after shell layout computation. Headless tests cover enter, frame
 production, editing, quit, cleanup, and split/session round trips.
-Deferred effects emitted while applying asynchronous events are dispatched by the runtime, allowing
-format-on-save/paste and other service chains to remain outside the UI update path.
+Deferred effects emitted while applying actions or asynchronous events are dispatched by the runtime,
+allowing format-on-save/paste, workspace search, and other service chains to remain outside the UI
+update path.
 The same deferred-effect dispatch applies to responses for persistent language-server requests.
 Filesystem operation prompts are projected into the Output panel with explicit Command Palette
 confirm/cancel actions; only a confirmed plan reaches the background dispatcher.
+Quick Open and find/search/replace prompts are rendered as small overlays above the shell and are
+driven by normalized keyboard/mouse input; their resulting root actions dispatch deferred effects
+through this runtime.

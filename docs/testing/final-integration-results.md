@@ -26,7 +26,13 @@ queues workspace-folder, didOpen, didChange, didSave, and didClose notifications
 state coverage verifies the lifecycle notifications are emitted. Directory resource operations
 remain explicitly rejected and are still outside the complete WorkspaceEdit surface.
 In-document FindInDocument/ReplaceInDocument actions now expose editor-core search and undoable
-replace-all behavior through root state.
+replace-all behavior through root state, with keyboard prompt entry and typed invalid-expression
+errors. Quick Open and project search also have keyboard prompt entry, and resolved VS Code
+keybindings dispatch through root commands.
+
+LSP didChange notifications now carry the smallest changed range derivable from the old/current
+snapshots. Workspace-local and static-extension language configuration bracket pairs are applied
+to smart editing when available.
 
 File resource WorkspaceEdit operations (create/rename/delete) are now applied with trusted-root
 validation and rollback on operation failure. Directory resource operations remain explicitly

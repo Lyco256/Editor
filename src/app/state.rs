@@ -39,6 +39,9 @@ pub struct AppState {
     pub(crate) lsp_results: HashMap<String, serde_json::Value>,
     pub(crate) find_query: String,
     pub(crate) find_matches: Vec<TextRange>,
+    pub(crate) pair_config: Vec<PairConfig>,
+    pub(crate) indent_style: editor_core::IndentStyle,
+    pub(crate) keybindings: Vec<config_core::Keybinding>,
     pub(crate) last_language_method: Option<String>,
     pub(crate) syntax_snapshot: syntax_engine::SyntaxSnapshot,
     pub(crate) document_id: DocumentId,
@@ -52,6 +55,8 @@ pub struct AppState {
     pub bottom_panel_visible: bool,
     pub(crate) bottom_panel_view: BottomPanelView,
     pub palette_visible: bool,
+    pub(crate) input_mode: Option<InputMode>,
+    pub(crate) input_buffer: String,
     pub(crate) palette: CommandPaletteState,
     pub(crate) tabs: Vec<TabState>,
     pub(crate) active_tab: usize,
@@ -92,7 +97,17 @@ pub(crate) enum BottomPanelView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InputMode {
+    QuickOpen,
+    ProjectSearch,
+    Find,
+    ReplaceQuery,
+    ReplaceReplacement { query: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplorerProjection {
+    pub path: PathBuf,
     pub depth: u8,
     pub label: String,
     pub active: bool,
@@ -145,6 +160,53 @@ fn panel_glyphs(text: &str) -> Vec<app_ui::language::Glyph> {
 
 fn panel_row(text: impl AsRef<str>) -> app_ui::language::PanelRow {
     app_ui::language::PanelRow::new(panel_glyphs(text.as_ref()))
+}
+
+fn keybinding_matches(binding: &config_core::Keybinding, key: &editor_types::KeyEvent) -> bool {
+    let mut modifiers = Vec::new();
+    let mut key_name = None;
+    for part in binding.key.split('+') {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers.push(Modifier::Control),
+            "alt" | "option" => modifiers.push(Modifier::Alt),
+            "shift" => modifiers.push(Modifier::Shift),
+            "cmd" | "command" | "meta" | "win" => modifiers.push(Modifier::Meta),
+            name => key_name = Some(name.to_owned()),
+        }
+    }
+    let Some(key_name) = key_name else {
+        return false;
+    };
+    if key.modifiers != editor_types::Modifiers::from_modifiers(modifiers) {
+        return false;
+    }
+    match (&key.code, key_name.as_str()) {
+        (KeyCode::Character(actual), name) => {
+            name.chars()
+                .next()
+                .is_some_and(|expected| actual.eq_ignore_ascii_case(&expected))
+                && name.chars().count() == 1
+        }
+        (KeyCode::Enter, "enter" | "return")
+        | (KeyCode::Escape, "escape" | "esc")
+        | (KeyCode::Backspace, "backspace")
+        | (KeyCode::Delete, "delete")
+        | (KeyCode::Tab, "tab")
+        | (KeyCode::Up, "up")
+        | (KeyCode::Down, "down")
+        | (KeyCode::Left, "left")
+        | (KeyCode::Right, "right")
+        | (KeyCode::Home, "home")
+        | (KeyCode::End, "end")
+        | (KeyCode::PageUp, "pageup")
+        | (KeyCode::PageDown, "pagedown") => true,
+        (KeyCode::Function(actual), name) => {
+            name.strip_prefix('f')
+                .and_then(|value| value.parse::<u8>().ok())
+                == Some(*actual)
+        }
+        _ => false,
+    }
 }
 
 fn json_label(value: &serde_json::Value) -> String {
@@ -721,6 +783,9 @@ impl Default for AppState {
             lsp_results: HashMap::new(),
             find_query: String::new(),
             find_matches: Vec::new(),
+            pair_config: PairConfig::common_defaults(),
+            indent_style: editor_core::IndentStyle::Spaces(4),
+            keybindings: Vec::new(),
             last_language_method: None,
             syntax_snapshot: syntax_engine::SyntaxSnapshot::default(),
             document_id: DocumentId(1),
@@ -734,6 +799,8 @@ impl Default for AppState {
             bottom_panel_visible: false,
             bottom_panel_view: BottomPanelView::Output,
             palette_visible: false,
+            input_mode: None,
+            input_buffer: String::new(),
             palette: CommandPaletteState::new(vec![
                 CommandEntry::available("editor.save", "Save"),
                 CommandEntry::available("editor.undo", "Undo"),
@@ -743,6 +810,8 @@ impl Default for AppState {
                 CommandEntry::available("editor.paste", "Paste"),
                 CommandEntry::available("editor.find", "Find in Document"),
                 CommandEntry::available("editor.replace", "Replace in Document"),
+                CommandEntry::available("workbench.quickOpen", "Quick Open"),
+                CommandEntry::available("workspace.search", "Search Workspace"),
                 CommandEntry::available("editor.expandSelection", "Expand Selection"),
                 CommandEntry::available("editor.format", "Format Document"),
                 CommandEntry::available("editor.reopenUtf8", "Reopen with UTF-8"),
@@ -950,12 +1019,46 @@ impl AppState {
         self.format_on_save = enabled;
     }
 
+    /// Applies static VS Code language configuration data to smart editing behavior.
+    ///
+    /// Empty or malformed pair entries are ignored by the compatibility parser before this
+    /// boundary. If no usable pairs are supplied, the editor keeps its safe common defaults.
+    pub fn set_language_configuration(
+        &mut self,
+        configuration: Option<&vscode_compat::LanguageConfiguration>,
+    ) {
+        let Some(configuration) = configuration else {
+            self.pair_config = PairConfig::common_defaults();
+            return;
+        };
+        let source = if configuration.auto_closing_pairs.is_empty() {
+            &configuration.brackets
+        } else {
+            &configuration.auto_closing_pairs
+        };
+        let pairs = source
+            .iter()
+            .filter_map(|pair| PairConfig::new(&pair.open, &pair.close).ok())
+            .collect::<Vec<_>>();
+        self.pair_config = if pairs.is_empty() {
+            PairConfig::common_defaults()
+        } else {
+            pairs
+        };
+    }
+
     /// Applies the resolved settings snapshot to root behavior and every open buffer.
     pub fn apply_settings(&mut self, settings: &config_core::EditorSettings) {
         self.format_on_save = settings.format_on_save;
         self.format_on_paste = settings.format_on_paste;
         self.tab_width = usize::from(settings.tab_size.max(1));
         self.insert_spaces = settings.insert_spaces;
+        self.indent_style = if self.insert_spaces {
+            editor_core::IndentStyle::Spaces(self.tab_width)
+        } else {
+            editor_core::IndentStyle::Tabs
+        };
+        self.keybindings.clone_from(&settings.keybindings);
         self.workspace_tab_width = self.tab_width;
         self.workspace_insert_spaces = self.insert_spaces;
         self.show_line_numbers = settings.line_numbers;
@@ -1768,15 +1871,46 @@ impl AppState {
             return;
         }
         let old_buffer = TextBuffer::new(&previous_text);
-        let old_end = old_buffer
-            .offset_to_position(CharacterOffset(old_buffer.len_chars()))
-            .unwrap_or_default();
-        let old_lsp_end = lsp_client::PositionMapper::new(
-            &lsp_client::TextSnapshot::new(previous_text),
-            self.lsp_position_encoding,
-        )
-        .to_lsp(old_end)
-        .unwrap_or_default();
+        let old_len = old_buffer.len_chars();
+        let current_len = current.chars().count();
+        let prefix = previous_text
+            .chars()
+            .zip(current.chars())
+            .take_while(|(old, new)| old == new)
+            .count();
+        let suffix_limit = old_len
+            .saturating_sub(prefix)
+            .min(current_len.saturating_sub(prefix));
+        let suffix = previous_text
+            .chars()
+            .rev()
+            .zip(current.chars().rev())
+            .take(suffix_limit)
+            .take_while(|(old, new)| old == new)
+            .count();
+        let old_end = old_len.saturating_sub(suffix);
+        let current_end = current_len.saturating_sub(suffix);
+        let byte_index = |text: &str, offset: usize| {
+            text.char_indices()
+                .nth(offset)
+                .map_or(text.len(), |(byte, _)| byte)
+        };
+        let replacement =
+            current[byte_index(&current, prefix)..byte_index(&current, current_end)].to_owned();
+        let Ok(old_start) = old_buffer.offset_to_position(CharacterOffset(prefix)) else {
+            return;
+        };
+        let Ok(old_end) = old_buffer.offset_to_position(CharacterOffset(old_end)) else {
+            return;
+        };
+        let snapshot = lsp_client::TextSnapshot::new(previous_text);
+        let mapper = lsp_client::PositionMapper::new(&snapshot, self.lsp_position_encoding);
+        let Some(old_lsp_start) = mapper.to_lsp(old_start).ok() else {
+            return;
+        };
+        let Some(old_lsp_end) = mapper.to_lsp(old_end).ok() else {
+            return;
+        };
         self.queue_lsp_notification(
             "textDocument/didChange",
             serde_json::json!({
@@ -1786,10 +1920,10 @@ impl AppState {
                 },
                 "contentChanges": [{
                     "range": {
-                        "start": {"line": 0, "character": 0},
+                        "start": {"line": old_lsp_start.line, "character": old_lsp_start.character},
                         "end": {"line": old_lsp_end.line, "character": old_lsp_end.character}
                     },
-                    "text": current,
+                    "text": replacement,
                 }]
             }),
         );
@@ -2069,6 +2203,167 @@ impl AppState {
             render: true,
             ..Transition::default()
         }
+    }
+
+    fn update_find_matches(
+        &mut self,
+        query: &str,
+        options: editor_core::FindOptions,
+    ) -> editor_core::Result<usize> {
+        let matches = self.buffer.find(query, options)?;
+        self.find_matches = matches.into_iter().map(|matched| matched.range).collect();
+        Ok(self.find_matches.len())
+    }
+
+    fn configured_command_for_key(&self, key: &editor_types::KeyEvent) -> Option<String> {
+        self.keybindings
+            .iter()
+            .rev()
+            .find(|binding| keybinding_matches(binding, key))
+            .map(|binding| binding.command.clone())
+    }
+
+    fn begin_input_mode(&mut self, mode: InputMode) {
+        self.input_buffer.clear();
+        if matches!(mode, InputMode::QuickOpen) {
+            self.workspace_ui.quick_open.set_query("");
+        }
+        self.input_mode = Some(mode);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn apply_input_mode(
+        &mut self,
+        mode: InputMode,
+        key: &editor_types::KeyEvent,
+    ) -> Option<Effect> {
+        if key.code == KeyCode::Escape {
+            self.input_mode = None;
+            self.input_buffer.clear();
+            return None;
+        }
+        match mode {
+            InputMode::QuickOpen => match key.code {
+                KeyCode::Character(ch)
+                    if !key.modifiers.contains(Modifier::Control)
+                        && !key.modifiers.contains(Modifier::Alt)
+                        && !key.modifiers.contains(Modifier::Meta) =>
+                {
+                    self.input_buffer.push(ch);
+                    self.workspace_ui.quick_open.set_query(&self.input_buffer);
+                }
+                KeyCode::Backspace => {
+                    self.input_buffer.pop();
+                    self.workspace_ui.quick_open.set_query(&self.input_buffer);
+                }
+                KeyCode::Up => {
+                    let _ = self
+                        .apply_workspace_action(app_ui::workspace::QuickOpenAction::SelectPrevious);
+                }
+                KeyCode::Down => {
+                    let _ =
+                        self.apply_workspace_action(app_ui::workspace::QuickOpenAction::SelectNext);
+                }
+                KeyCode::Enter => {
+                    let action = if key.modifiers.contains(Modifier::Control) {
+                        app_ui::workspace::QuickOpenAction::OpenToSide
+                    } else {
+                        app_ui::workspace::QuickOpenAction::OpenCurrent
+                    };
+                    let transition = self.apply_workspace_action(action);
+                    self.deferred_effects.extend(transition.effects);
+                    self.input_mode = None;
+                    self.input_buffer.clear();
+                }
+                _ => {}
+            },
+            InputMode::ProjectSearch
+            | InputMode::Find
+            | InputMode::ReplaceQuery
+            | InputMode::ReplaceReplacement { .. } => {
+                if let KeyCode::Character(ch) = key.code {
+                    if !key.modifiers.contains(Modifier::Control)
+                        && !key.modifiers.contains(Modifier::Alt)
+                        && !key.modifiers.contains(Modifier::Meta)
+                    {
+                        self.input_buffer.push(ch);
+                        return None;
+                    }
+                }
+                if key.code == KeyCode::Backspace {
+                    self.input_buffer.pop();
+                    return None;
+                }
+                if key.code != KeyCode::Enter {
+                    return None;
+                }
+                match mode {
+                    InputMode::ProjectSearch => {
+                        if self.input_buffer.trim().is_empty() {
+                            self.output.push(OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "search".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "search query must not be empty".to_owned(),
+                            });
+                        } else {
+                            let transition = self.start_workspace_search(
+                                self.input_buffer.clone(),
+                                app_ui::workspace::SearchOptionsView::default(),
+                            );
+                            self.deferred_effects.extend(transition.effects);
+                        }
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
+                    InputMode::Find => {
+                        let query = self.input_buffer.clone();
+                        if query.is_empty() {
+                            self.output.push(OutputMessage {
+                                subsystem: "editor".to_owned(),
+                                operation: "find".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "find query must not be empty".to_owned(),
+                            });
+                        } else {
+                            let transition = self.apply_action_inner(Action::FindInDocument {
+                                query,
+                                options: editor_core::FindOptions::default(),
+                            });
+                            self.deferred_effects.extend(transition.effects);
+                        }
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
+                    InputMode::ReplaceQuery => {
+                        if self.input_buffer.is_empty() {
+                            self.output.push(OutputMessage {
+                                subsystem: "editor".to_owned(),
+                                operation: "replace".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "replace query must not be empty".to_owned(),
+                            });
+                        } else {
+                            let query = self.input_buffer.clone();
+                            self.input_mode = Some(InputMode::ReplaceReplacement { query });
+                            self.input_buffer.clear();
+                        }
+                    }
+                    InputMode::ReplaceReplacement { query } => {
+                        let transition = self.apply_action_inner(Action::ReplaceInDocument {
+                            query,
+                            replacement: self.input_buffer.clone(),
+                            options: editor_core::FindOptions::default(),
+                        });
+                        self.deferred_effects.extend(transition.effects);
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
+                    InputMode::QuickOpen => {}
+                }
+            }
+        }
+        None
     }
 
     /// Serializes all open documents into the crash-safe session schema. The caller owns the
@@ -2524,6 +2819,11 @@ impl AppState {
         if let Some(width) = settings.tab_width {
             self.tab_width = usize::from(width.max(1));
         }
+        self.indent_style = if self.insert_spaces {
+            editor_core::IndentStyle::Spaces(self.tab_width)
+        } else {
+            editor_core::IndentStyle::Tabs
+        };
         if let Some(line_endings) = settings.end_of_line {
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                 tab.line_endings = config_line_endings_to_workspace(line_endings);
@@ -2980,19 +3280,23 @@ impl AppState {
             Action::StartSearch { query, options } => self.start_workspace_search(query, options),
             Action::FindInDocument { query, options } => {
                 self.find_query.clone_from(&query);
-                self.find_matches = self
-                    .buffer
-                    .find(&query, options)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|matched| matched.range)
-                    .collect();
-                self.output.push(OutputMessage {
-                    subsystem: "editor".to_owned(),
-                    operation: "find".to_owned(),
-                    level: OutputLevel::Information,
-                    message: format!("{} match(es) in active document", self.find_matches.len()),
-                });
+                match self.update_find_matches(&query, options) {
+                    Ok(count) => self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "find".to_owned(),
+                        level: OutputLevel::Information,
+                        message: format!("{count} match(es) in active document"),
+                    }),
+                    Err(error) => {
+                        self.find_matches.clear();
+                        self.output.push(OutputMessage {
+                            subsystem: "editor".to_owned(),
+                            operation: "find".to_owned(),
+                            level: OutputLevel::Error,
+                            message: format!("could not search active document: {error}"),
+                        });
+                    }
+                }
                 Transition {
                     render: true,
                     ..Transition::default()
@@ -3009,7 +3313,6 @@ impl AppState {
                         self.find_matches.clear();
                         if applied.changed {
                             self.sync_buffer_projection();
-                            self.deferred_effects.push(self.syntax_effect());
                         }
                         self.output.push(OutputMessage {
                             subsystem: "editor".to_owned(),
@@ -3153,8 +3456,9 @@ impl AppState {
                 }
             }
             Action::Input(input) => {
-                self.apply_input(input);
+                let effect = self.apply_input(input);
                 Transition {
+                    effects: effect.into_iter().collect(),
                     render: true,
                     ..Transition::default()
                 }
@@ -3175,22 +3479,51 @@ impl AppState {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    fn apply_input(&mut self, input: InputEvent) {
+    fn apply_input(&mut self, input: InputEvent) -> Option<Effect> {
         if let InputEvent::Key(ref key) = input {
+            if let Some(mode) = self.input_mode.clone() {
+                return self.apply_input_mode(mode, key);
+            }
+            if !self.palette_visible {
+                if let Some(command) = self.configured_command_for_key(key) {
+                    return self.apply_command(&command);
+                }
+            }
+            if key.code == KeyCode::Character('f')
+                && key.modifiers.contains(Modifier::Control)
+                && key.modifiers.contains(Modifier::Shift)
+            {
+                self.begin_input_mode(InputMode::ProjectSearch);
+                self.bottom_panel_view = BottomPanelView::Search;
+                self.bottom_panel_visible = true;
+                return None;
+            }
+            if key.code == KeyCode::Character('f') && key.modifiers.contains(Modifier::Control) {
+                self.begin_input_mode(InputMode::Find);
+                return None;
+            }
+            if key.code == KeyCode::Character('h') && key.modifiers.contains(Modifier::Control) {
+                self.begin_input_mode(InputMode::ReplaceQuery);
+                return None;
+            }
+            if key.code == KeyCode::Character('o') && key.modifiers.contains(Modifier::Control) {
+                self.begin_input_mode(InputMode::QuickOpen);
+                return None;
+            }
             if key.code == KeyCode::Character('p') && key.modifiers.contains(Modifier::Control) {
                 self.palette_visible = !self.palette_visible;
                 if !self.palette_visible {
                     self.palette.clear_query();
                 }
-                return;
+                return None;
             }
             if key.code == KeyCode::Character('b') && key.modifiers.contains(Modifier::Control) {
                 self.explorer_visible = !self.explorer_visible;
-                return;
+                return None;
             }
             if key.code == KeyCode::Character('j') && key.modifiers.contains(Modifier::Control) {
                 self.bottom_panel_visible = !self.bottom_panel_visible;
-                return;
+                return None;
             }
             if self.palette_visible {
                 match key.code {
@@ -3204,9 +3537,9 @@ impl AppState {
                     KeyCode::Down => self.palette.move_selection(1),
                     KeyCode::Enter => {
                         if let Some(command) = self.palette.activate_selected() {
-                            let _ = self.apply_command(command.as_str());
                             self.palette_visible = false;
                             self.palette.clear_query();
+                            return self.apply_command(command.as_str());
                         }
                     }
                     KeyCode::Escape => {
@@ -3215,7 +3548,7 @@ impl AppState {
                     }
                     _ => {}
                 }
-                return;
+                return None;
             }
         }
         let before_version = self.buffer.snapshot().version();
@@ -3224,7 +3557,7 @@ impl AppState {
         let result = match input {
             InputEvent::Paste(text) => self
                 .buffer
-                .smart_insert(&text, &PairConfig::common_defaults())
+                .smart_insert(&text, &self.pair_config)
                 .map(|_| ()),
             InputEvent::Key(key) => match key.code {
                 KeyCode::Character(character)
@@ -3233,15 +3566,12 @@ impl AppState {
                         && !key.modifiers.contains(Modifier::Meta) =>
                 {
                     self.buffer
-                        .smart_insert(&character.to_string(), &PairConfig::common_defaults())
+                        .smart_insert(&character.to_string(), &self.pair_config)
                         .map(|_| ())
                 }
                 KeyCode::Enter => self
                     .buffer
-                    .smart_enter(
-                        &PairConfig::common_defaults(),
-                        editor_core::IndentStyle::Spaces(4),
-                    )
+                    .smart_enter(&self.pair_config, self.indent_style)
                     .map(|_| ()),
                 KeyCode::Backspace => self.buffer.smart_backspace().map(|_| ()),
                 KeyCode::Delete => self.delete_forward(),
@@ -3268,12 +3598,37 @@ impl AppState {
                 _ => Ok(()),
             },
             InputEvent::Mouse(mouse) => {
+                if matches!(self.input_mode, Some(InputMode::QuickOpen))
+                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
+                {
+                    let index = usize::from(mouse.position.row.saturating_sub(3));
+                    let _ = self.apply_workspace_action(
+                        app_ui::workspace::QuickOpenAction::MousePick(index),
+                    );
+                    return None;
+                }
+                if self.input_mode.is_none()
+                    && self.explorer_visible
+                    && mouse.position.column < 24
+                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
+                    && mouse.position.row >= 3
+                {
+                    let index = usize::from(mouse.position.row.saturating_sub(3));
+                    if let Some(path) = self
+                        .explorer_entries
+                        .get(index)
+                        .map(|entry| entry.path.clone())
+                    {
+                        let _ = self.open_tab(path);
+                        return None;
+                    }
+                }
                 if mouse.position.row == 0
                     && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
                 {
                     let index = usize::from(mouse.position.column / 20);
                     self.switch_tab(index);
-                    return;
+                    return None;
                 }
                 if matches!(mouse.action, MouseAction::Drag(MouseButton::Left)) {
                     if let Some(axis) = self.split_axis {
@@ -3296,7 +3651,7 @@ impl AppState {
                                 .unwrap_or(50)
                                 .clamp(10, 90))
                                 as u16;
-                            return;
+                            return None;
                         }
                     }
                 }
@@ -3346,6 +3701,7 @@ impl AppState {
             }
         }
         self.sync_buffer_projection();
+        None
     }
 
     fn delete_forward(&mut self) -> editor_core::Result<()> {
@@ -3635,30 +3991,14 @@ impl AppState {
             "editor.expandSelection" => {
                 let _ = self.apply_editor_action(app_ui::editor::EditorAction::ExpandSelection);
             }
-            "editor.find" => {
-                if self.find_query.is_empty() {
-                    self.output.push(OutputMessage {
-                        subsystem: "editor".to_owned(),
-                        operation: "find".to_owned(),
-                        level: OutputLevel::Information,
-                        message: "provide a query with FindInDocument".to_owned(),
-                    });
-                } else {
-                    self.find_matches = self
-                        .buffer
-                        .find(&self.find_query, editor_core::FindOptions::default())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|matched| matched.range)
-                        .collect();
-                }
+            "editor.find" => self.begin_input_mode(InputMode::Find),
+            "editor.replace" => self.begin_input_mode(InputMode::ReplaceQuery),
+            "workbench.quickOpen" => self.begin_input_mode(InputMode::QuickOpen),
+            "workspace.search" => {
+                self.begin_input_mode(InputMode::ProjectSearch);
+                self.bottom_panel_view = BottomPanelView::Search;
+                self.bottom_panel_visible = true;
             }
-            "editor.replace" => self.output.push(OutputMessage {
-                subsystem: "editor".to_owned(),
-                operation: "replace".to_owned(),
-                level: OutputLevel::Information,
-                message: "provide query and replacement with ReplaceInDocument".to_owned(),
-            }),
             "editor.format" => {
                 if !self.workspace_trusted {
                     self.output.push(OutputMessage {
@@ -4029,6 +4369,7 @@ impl AppState {
             match children {
                 Ok(children) => {
                     entries.extend(children.into_iter().map(|entry| ExplorerProjection {
+                        path: entry.path.clone(),
                         depth: u8::try_from(entry.depth).unwrap_or(u8::MAX),
                         label: entry.path.file_name().map_or_else(
                             || entry.path.display().to_string(),
@@ -4219,6 +4560,7 @@ impl AppState {
                 self.explorer_entries = entries
                     .into_iter()
                     .map(|entry| ExplorerProjection {
+                        path: entry.path.clone(),
                         depth: entry.depth,
                         label: entry.path.file_name().map_or_else(
                             || entry.path.display().to_string(),
@@ -4747,7 +5089,7 @@ impl AppState {
 mod tests {
     use editor_types::{InputEvent, KeyCode, KeyEvent, LanguageServerStatus, RequestId};
 
-    use super::{AppState, PendingFormat};
+    use super::{AppState, BottomPanelView, PendingFormat};
     use crate::app::{
         action::Action,
         effect::{Effect, ExternalProcessKind, ProcessSpec},
@@ -4854,6 +5196,50 @@ mod tests {
     }
 
     #[test]
+    fn lsp_did_change_sends_only_the_changed_range() {
+        use editor_types::{KeyCode, KeyEvent, Modifiers};
+
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "fn main() {}").expect("fixture");
+        let mut state = AppState::default();
+        state.workspace_roots.push(directory.path().to_path_buf());
+        state.open_startup_path(&path);
+        state.workspace_trusted = true;
+        state.apply_event(Event::LanguageServerReady {
+            request: RequestId(10),
+            encoding: lsp_client::protocol::PositionEncoding::Utf16,
+        });
+        let _ = state.take_deferred_effects();
+
+        let _ = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('x'),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })));
+        let change = state
+            .take_deferred_effects()
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::LspNotification { method, params, .. }
+                    if method == "textDocument/didChange" =>
+                {
+                    Some(params)
+                }
+                _ => None,
+            })
+            .expect("didChange notification");
+        assert_eq!(change["contentChanges"][0]["text"], "x");
+        assert_eq!(change["contentChanges"][0]["range"]["start"]["line"], 0);
+        assert_eq!(
+            change["contentChanges"][0]["range"]["start"]["character"],
+            0
+        );
+        assert_eq!(change["contentChanges"][0]["range"]["end"]["line"], 0);
+        assert_eq!(change["contentChanges"][0]["range"]["end"]["character"], 0);
+    }
+
+    #[test]
     fn control_q_and_control_c_exit_the_event_loop() {
         use editor_types::{KeyCode, KeyEvent, Modifiers};
 
@@ -4868,6 +5254,34 @@ mod tests {
             assert!(!state.running);
             assert!(transition.render);
         }
+    }
+
+    #[test]
+    fn configured_vscode_keybinding_dispatches_through_root_command_path() {
+        use editor_types::{KeyCode, KeyEvent, Modifiers};
+
+        let mut state = AppState::default();
+        let settings = config_core::EditorSettings {
+            keybindings: vec![config_core::Keybinding {
+                key: "ctrl+alt+p".to_owned(),
+                command: "workbench.showProblems".to_owned(),
+                when: None,
+                unknown: std::collections::BTreeMap::new(),
+            }],
+            ..config_core::EditorSettings::default()
+        };
+        state.apply_settings(&settings);
+        let transition = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('p'),
+            modifiers: Modifiers::from_modifiers([
+                editor_types::Modifier::Control,
+                editor_types::Modifier::Alt,
+            ]),
+            repeat: false,
+        })));
+        assert!(transition.render);
+        assert!(state.bottom_panel_visible);
+        assert_eq!(state.bottom_panel_view, BottomPanelView::Problems);
     }
 
     #[test]
@@ -5587,6 +6001,86 @@ mod tests {
         assert_eq!(state.active_text, "1 two 1");
         assert!(state.buffer.undo().expect("undo replacement"));
         assert_eq!(state.buffer.to_string(), "one two one");
+    }
+
+    #[test]
+    fn keyboard_find_prompt_runs_in_document_search() {
+        use editor_types::{KeyCode, KeyEvent, Modifiers};
+
+        let mut state = AppState {
+            buffer: TextBuffer::new("one two one"),
+            ..AppState::default()
+        };
+        let key = |code| {
+            Action::Input(InputEvent::Key(KeyEvent {
+                code,
+                modifiers: Modifiers::default(),
+                repeat: false,
+            }))
+        };
+        let _ = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('f'),
+            modifiers: Modifiers::from_modifiers([editor_types::Modifier::Control]),
+            repeat: false,
+        })));
+        let _ = state.apply_action(key(KeyCode::Character('o')));
+        let _ = state.apply_action(key(KeyCode::Character('n')));
+        let _ = state.apply_action(key(KeyCode::Character('e')));
+        let _ = state.apply_action(key(KeyCode::Enter));
+        assert!(state.input_mode.is_none());
+        assert_eq!(state.find_matches.len(), 2);
+    }
+
+    #[test]
+    fn keyboard_quick_open_prompt_opens_selected_candidate() {
+        use editor_types::{KeyCode, KeyEvent, Modifiers};
+
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("quick.rs");
+        std::fs::write(&path, "fn quick() {}\n").expect("fixture");
+        let mut state = AppState::default();
+        state
+            .workspace_ui
+            .quick_open
+            .set_candidates(vec![app_ui::workspace::QuickOpenCandidate {
+                path: path.clone(),
+                label: path.display().to_string(),
+                recent_rank: 0,
+            }]);
+        let ctrl_o = Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('o'),
+            modifiers: Modifiers::from_modifiers([editor_types::Modifier::Control]),
+            repeat: false,
+        }));
+        let _ = state.apply_action(ctrl_o);
+        let _ = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })));
+        assert!(state.input_mode.is_none());
+        assert_eq!(state.active_path.as_deref(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn invalid_in_document_find_surfaces_a_typed_error() {
+        let mut state = AppState {
+            buffer: TextBuffer::new("one two"),
+            ..AppState::default()
+        };
+        let _ = state.apply_action(Action::FindInDocument {
+            query: "(".to_owned(),
+            options: editor_core::FindOptions {
+                kind: editor_core::SearchKind::RegularExpression,
+                ..editor_core::FindOptions::default()
+            },
+        });
+        assert!(state.find_matches.is_empty());
+        assert!(state.output.iter().any(|message| {
+            message.operation == "find"
+                && message.level == editor_types::OutputLevel::Error
+                && message.message.contains("invalid regular expression")
+        }));
     }
 
     #[test]

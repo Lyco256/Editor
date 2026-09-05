@@ -144,6 +144,9 @@ where
             for effect in transition.effects {
                 self.dispatcher.dispatch(effect);
             }
+            for effect in self.state.take_deferred_effects() {
+                self.dispatcher.dispatch(effect);
+            }
             self.persist_checkpoint();
             for event in self.dispatcher.poll_events() {
                 self.state.apply_event(event);
@@ -567,7 +570,69 @@ fn frame_for_state(
             blit_frame(&mut frame, &panel, bottom.x, bottom.y);
         }
     }
+    if let Some(input) = input_overlay_for_state(state, size) {
+        blit_frame(&mut frame, &input, 2, 1);
+    }
     frame
+}
+
+fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebuffer> {
+    let mode = state.input_mode.as_ref()?;
+    let width = size.0.saturating_sub(4).clamp(1, 100);
+    let height = match mode {
+        super::state::InputMode::QuickOpen => size.1.saturating_sub(2).clamp(1, 16),
+        _ => 3.min(size.1.saturating_sub(1).max(1)),
+    };
+    let mut overlay = Framebuffer::new(width, height);
+    if matches!(mode, super::state::InputMode::QuickOpen) {
+        app_ui::workspace::draw_quick_open(&mut overlay, &state.workspace_ui.quick_open);
+        return Some(overlay);
+    }
+    let label = match mode {
+        super::state::InputMode::ProjectSearch => "Search workspace",
+        super::state::InputMode::Find => "Find",
+        super::state::InputMode::ReplaceQuery => "Replace query",
+        super::state::InputMode::ReplaceReplacement { .. } => "Replace with",
+        super::state::InputMode::QuickOpen => "Quick Open",
+    };
+    write_overlay_line(
+        &mut overlay,
+        0,
+        &format!("{label}: {}", state.input_buffer),
+        StyleRole::StatusBar,
+    );
+    write_overlay_line(
+        &mut overlay,
+        1,
+        "Enter=apply  Esc=cancel  Backspace=delete",
+        StyleRole::Information,
+    );
+    Some(overlay)
+}
+
+fn write_overlay_line(frame: &mut Framebuffer, row: u16, text: &str, foreground: StyleRole) {
+    let (columns, rows) = frame.size();
+    if row >= rows {
+        return;
+    }
+    for (column, character) in text.chars().enumerate() {
+        let Ok(column) = u16::try_from(column) else {
+            break;
+        };
+        if column >= columns {
+            break;
+        }
+        let _ = frame.set(
+            column,
+            row,
+            terminal_backend::Cell {
+                symbol: character.to_string(),
+                foreground,
+                background: StyleRole::Panel,
+                ..terminal_backend::Cell::default()
+            },
+        );
+    }
 }
 
 fn language_panel_for_state(state: &AppState, area: app_ui::widgets::Rect) -> Option<Framebuffer> {
@@ -650,7 +715,7 @@ fn blit_frame(destination: &mut Framebuffer, source: &Framebuffer, x: u16, y: u1
 #[cfg(test)]
 mod tests {
     use super::frame_for_state;
-    use crate::app::state::AppState;
+    use crate::app::state::{AppState, InputMode};
     use editor_types::{DocumentId, StyleRole, TextRange};
 
     #[test]
@@ -698,6 +763,21 @@ mod tests {
         let snapshot = app_ui::language::dump_framebuffer(&frame);
         assert!(snapshot.contains("C|o|m|p|l|e|t|i|o|n"));
         assert!(snapshot.contains("p|r|i|n|t|l|n|!"));
+    }
+
+    #[test]
+    fn root_frame_renders_keyboard_input_overlay() {
+        let mut state = AppState::default();
+        state.input_mode = Some(InputMode::Find);
+        state.input_buffer = "needle".to_owned();
+        let frame = frame_for_state(
+            &state,
+            (80, 24),
+            editor_types::TerminalCapabilities::default(),
+        );
+        let snapshot = app_ui::language::dump_framebuffer(&frame);
+        assert!(snapshot.contains("F|i|n|d|:| |n|e|e|d|l|e"));
+        assert!(snapshot.contains("E|n|t|e|r|=|a|p|p|l|y"));
     }
 }
 

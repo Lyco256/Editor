@@ -10,6 +10,11 @@ buffer is clean; dirty quits surface a warning. `session_state` and `restore_ses
 active editor (including selections and unsaved text) to the versioned, atomic recovery format.
 Ctrl+B/Ctrl+J toggle the Explorer and Output panel, while Ctrl+P opens a keyboard-driven command
 palette whose commands route back through the root transition path.
+Simple VS Code keybindings loaded through the resolved settings layer are matched before editor
+editing and dispatch their mapped command through the same transition path.
+Ctrl+O opens a keyboard-driven Quick Open overlay; Ctrl+Shift+F starts a project-search prompt; and
+Ctrl+F/Ctrl+H provide in-document find and replace prompts. Prompt actions remain root transitions,
+so selecting a file or starting a search cannot perform I/O from a view.
 Git Changes, Diff, Branches, Stashes, History, Commit, and Conflicts each have command-palette
 routes that select the corresponding dashboard view without giving the UI direct process access.
 Language Problems, hover, signature help, completion, code action, restart, and dismiss actions
@@ -74,11 +79,13 @@ and syntax refreshes are scheduled after document-version changes.
 Language effect requests are converted to structured LSP methods and trust-gated, with negotiated
 position encoding applied to diagnostic range conversion.
 After a trusted server becomes ready, root sends workspace folders and didOpen for every open tab;
-new tabs are opened in the session, edits, saves, and close-tab actions queue
-didChange/didSave/didClose notifications through the persistent session.
+new tabs are opened in the session, edits, saves, and close-tab actions queue incremental
+didChange/didSave/didClose notifications through the persistent session. Each didChange contains the
+smallest changed character range that can be derived from the previous and current snapshots.
 Revoking trust stops the persistent server and rejects any late server-originated workspace edit.
 Adding a new root recomputes aggregate trust; an untrusted root also stops a running server.
 Git status events populate the pure dashboard model and successful Git mutations schedule a status
 refresh.
 In-document find and replace are root actions backed by editor-core; match ranges are retained for
-overview consumers and replace-all is undoable.
+overview consumers and replace-all is undoable. Invalid search expressions are reported as typed
+editor Output errors and never silently converted to an empty result set.
