@@ -76,7 +76,10 @@ Release-gate status and evidence:
 
 Remaining product-integration gaps include applying imported VS Code themes/snippets and static
 VSIX contributions in the runtime (the compatibility parser and safety checks are present), and
-full Explorer/list hit-testing beyond the root file-opening path. Directory resource-operation
-semantics remain explicitly rejected and must be implemented or explicitly scoped out. The product
-goal is not marked complete until the performance/smoke evidence is supplied, the current release
-measurements are synchronized here, and the identical verified state is promoted to `main`.
+full Explorer/list hit-testing beyond the root file-opening path. Language configuration currently
+applies bracket pairs only; comments, word patterns, on-enter rules, and indentation rules are not
+yet wired into document behavior. VS Code keybinding `when` contexts and multi-key chords are
+parsed but not evaluated by root dispatch. Directory resource-operation semantics remain explicitly
+rejected and must be implemented or explicitly scoped out. The product goal is not marked complete
+until these product gaps are resolved or explicitly accepted, the performance/smoke evidence is
+supplied, and the identical verified state is promoted to `main`.
