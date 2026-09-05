@@ -40,6 +40,11 @@ Still release-blocking or environment-blocked:
    approval before treating those missing measurements as an exception.
 6. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
    been compiled; the release binary and staging package script are verified.
+7. The required root-level headless acceptance coverage is incomplete: `tests/headless_runtime.rs`
+   does not yet exercise Syntax output, the fake-server LSP request lifecycle, Git dashboard
+   mutations, or large-file semantic-service suppression end to end. Crate-level tests cover parts
+   of these behaviors, but they do not prove the integrated root event/effect path.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
-complete until the remaining service wiring and Windows performance/smoke evidence are supplied.
+complete until the remaining service wiring, root acceptance coverage, and Windows performance/smoke
+evidence are supplied.
