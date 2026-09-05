@@ -2,5 +2,5 @@
 
 Role: authoritative mutable application state and pure transitions. Workers never receive mutable
 access. The trust invariant blocks external effects while untrusted and records a visible warning.
-Unit tests cover both blocked and authorized paths.
-
+Control-Q and Control-C provide keyboard exits for the interactive loop. Unit tests cover blocked and
+authorized paths plus clean input shutdown.

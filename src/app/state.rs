@@ -1,6 +1,8 @@
 //! Authoritative root state and pure transition logic.
 
-use editor_types::{LanguageServerStatus, OutputLevel, OutputMessage};
+use editor_types::{
+    InputEvent, KeyCode, LanguageServerStatus, Modifier, OutputLevel, OutputMessage,
+};
 
 use super::{action::Action, effect::Effect, event::Event};
 
@@ -66,6 +68,16 @@ impl AppState {
                 effects: vec![effect],
                 ..Transition::default()
             },
+            Action::Input(InputEvent::Key(key))
+                if matches!(key.code, KeyCode::Character('c' | 'q'))
+                    && key.modifiers.contains(Modifier::Control) =>
+            {
+                self.running = false;
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
             Action::Input(_) | Action::Invoke(_) => Transition {
                 render: true,
                 ..Transition::default()
@@ -135,5 +147,22 @@ mod tests {
         let transition = state.apply_action(Action::RequestEffect(lsp_effect()));
         assert_eq!(transition.effects.len(), 1);
         assert!(transition.events.is_empty());
+    }
+
+    #[test]
+    fn control_q_and_control_c_exit_the_event_loop() {
+        use editor_types::{KeyCode, KeyEvent, Modifiers};
+
+        for key in ['q', 'c'] {
+            let mut state = AppState::default();
+            let action = Action::Input(InputEvent::Key(KeyEvent {
+                code: KeyCode::Character(key),
+                modifiers: Modifiers::from_modifiers([editor_types::Modifier::Control]),
+                repeat: false,
+            }));
+            let transition = state.apply_action(action);
+            assert!(!state.running);
+            assert!(transition.render);
+        }
     }
 }
