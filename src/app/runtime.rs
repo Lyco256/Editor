@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 
 use app_ui::frame::empty_frame;
-use terminal_backend::{Framebuffer, TerminalAdapter};
+use terminal_backend::{Framebuffer, InputReader, TerminalAdapter};
 use thiserror::Error;
 
 use super::{action::Action, effect::Effect, state::AppState};
@@ -24,9 +24,16 @@ pub enum RuntimeError {
     Render(String),
     #[error("could not restore terminal: {0}")]
     Restore(String),
+    #[error("could not read terminal input: {0}")]
+    Input(String),
     #[error("runtime failed ({runtime}); terminal restore also failed ({restore})")]
     RestoreAfterFailure { runtime: String, restore: String },
 }
+
+/// A terminal that owns both presentation and normalized input capabilities.
+pub trait InteractiveTerminal: TerminalAdapter + InputReader {}
+
+impl<T> InteractiveTerminal for T where T: TerminalAdapter + InputReader {}
 
 pub struct AppRuntime<T, I, D> {
     terminal: T,
@@ -103,6 +110,78 @@ where
             .render(&frame)
             .map_err(|error| RuntimeError::Render(error.to_string()))?;
         self.state.frame_number += 1;
+        Ok(())
+    }
+}
+
+/// Runs the production event loop with one terminal adapter for rendering and input.
+///
+/// The loop blocks in the terminal adapter when idle; it does not poll at a fixed cadence.
+///
+/// # Errors
+///
+/// Returns a typed lifecycle error when entering, reading, rendering, or restoring the terminal
+/// fails.
+pub fn run_interactive<T, D>(
+    mut terminal: T,
+    dispatcher: D,
+    size: (u16, u16),
+) -> Result<AppState, RuntimeError>
+where
+    T: InteractiveTerminal,
+    D: EffectDispatcher,
+{
+    terminal
+        .enter()
+        .map_err(|error| RuntimeError::Enter(error.to_string()))?;
+    let mut runtime = AppRuntime::new(terminal, InteractiveActionSource, dispatcher, size);
+    let runtime_result = runtime.run_entered_interactive();
+    let restore_result = runtime
+        .terminal
+        .restore()
+        .map_err(|error| error.to_string());
+    match (runtime_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(runtime.state),
+        (Ok(()), Err(restore)) => Err(RuntimeError::Restore(restore)),
+        (Err(runtime), Ok(())) => Err(runtime),
+        (Err(runtime), Err(restore)) => Err(RuntimeError::RestoreAfterFailure {
+            runtime: runtime.to_string(),
+            restore,
+        }),
+    }
+}
+
+struct InteractiveActionSource;
+
+impl ActionSource for InteractiveActionSource {
+    fn next_action(&mut self) -> Option<Action> {
+        None
+    }
+}
+
+impl<T, D> AppRuntime<T, InteractiveActionSource, D>
+where
+    T: InteractiveTerminal,
+    D: EffectDispatcher,
+{
+    fn run_entered_interactive(&mut self) -> Result<(), RuntimeError> {
+        self.render()?;
+        while self.state.running {
+            let input = self
+                .terminal
+                .read_input()
+                .map_err(|error| RuntimeError::Input(error.to_string()))?;
+            let transition = self.state.apply_action(Action::Input(input));
+            for event in transition.events {
+                self.state.apply_event(event);
+            }
+            for effect in transition.effects {
+                self.dispatcher.dispatch(effect);
+            }
+            if transition.render {
+                self.render()?;
+            }
+        }
         Ok(())
     }
 }
