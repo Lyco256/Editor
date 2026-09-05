@@ -4,4 +4,6 @@
 *.md text eol=lf
 *.sh text eol=lf
 *.ps1 text eol=crlf
+tests/snapshots/**/*.txt text eol=lf
+tests/fixtures/**/*.txt text eol=lf
 
