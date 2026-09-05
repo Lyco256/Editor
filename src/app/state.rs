@@ -813,8 +813,25 @@ impl AppState {
                     return self.apply_language_action(action);
                 }
             }
-            LanguageAction::NavigateToLocation { path, .. } => {
-                return self.apply_action(Action::OpenPath(path));
+            LanguageAction::NavigateToLocation { path, position, .. } => {
+                let already_active = self
+                    .active_path
+                    .as_deref()
+                    .is_some_and(|active| workspace_core::path_eq(active, &path));
+                let transition = if already_active {
+                    Transition::default()
+                } else {
+                    self.apply_action(Action::OpenPath(path))
+                };
+                if let Ok(offset) = self.buffer.position_to_offset(position) {
+                    let _ = self
+                        .buffer
+                        .set_selections(editor_core::SelectionSet::single(
+                            editor_core::Selection::cursor(offset),
+                        ));
+                    self.sync_buffer_projection();
+                }
+                return transition;
             }
             LanguageAction::RestartLanguageServer => {
                 if let Some(path) = self.active_path.as_ref().filter(|path| path.is_file()) {
@@ -4156,6 +4173,27 @@ mod tests {
         assert!(transition.render);
         assert!(!state.bottom_panel_visible);
         assert_eq!(state.last_language_method, None);
+    }
+
+    #[test]
+    fn language_location_navigation_reuses_active_tab_and_moves_cursor() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("location.rs");
+        std::fs::write(&path, "first\nsecond\n").expect("source");
+        let mut state = AppState::default();
+        state.open_startup_path(&path);
+        let transition =
+            state.apply_language_action(app_ui::language::LanguageAction::NavigateToLocation {
+                document: state.document_id,
+                path: path.clone(),
+                position: editor_types::LogicalPosition {
+                    line: 1,
+                    character: 2,
+                },
+            });
+        assert!(!transition.render);
+        assert_eq!(state.tab_count(), 1);
+        assert_eq!(state.buffer.selections().primary().active.0, 8);
     }
 
     #[test]
