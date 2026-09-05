@@ -4958,10 +4958,11 @@ impl AppState {
         self.explorer_entries = entries;
     }
 
-    fn mark_explorer_cursor(&self, entries: &mut [ExplorerProjection]) {
+    fn mark_explorer_cursor(&mut self, entries: &mut [ExplorerProjection]) {
         if !self.explorer_focus {
             return;
         }
+        self.explorer_cursor = self.explorer_cursor.min(entries.len().saturating_sub(1));
         for (index, entry) in entries.iter_mut().enumerate() {
             entry.active = index == self.explorer_cursor;
         }
