@@ -33,8 +33,9 @@ malformed settings remain visible as warning output. A workspace-local
 boundary and its bracket pairs are applied to smart editing; parse failures and unsupported fields
 are surfaced as typed output instead of enabling unsafe defaults silently. If the workspace file is
 absent, static language configurations from `.vscode/extensions` are considered (both unpacked
-directories and path-safe `.vsix` archives extracted into the OS cache); malformed extension
-metadata is reported as a compatibility warning rather than being silently discarded.
+directories and path-safe `.vsix` archives extracted into per-archive OS cache directories);
+malformed extension metadata is reported as a compatibility warning rather than being silently
+discarded.
 Static language contributions are matched by declared language id, filename, or extension, so
 custom file types can receive their configuration and snippets even when Tree-sitter has no
 built-in parser.

@@ -617,7 +617,11 @@ fn load_static_extension_candidate(
     if source.is_dir() {
         vscode_compat::load_static_extension_directory(source)
     } else {
-        vscode_compat::load_static_extension_vsix(source, cache_root)
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.to_string_lossy().hash(&mut hasher);
+        let archive_cache = cache_root.join(format!("{:016x}", hasher.finish()));
+        vscode_compat::load_static_extension_vsix(source, archive_cache)
     }
 }
 
