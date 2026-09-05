@@ -17,7 +17,7 @@ pub use recovery::{
 pub use settings::{
     AutoClosingPairs, EditorSettings, Keybinding, LineEndingPreference, LoadSettingsResult,
     RgbColor, SettingsError, SettingsIssue, SettingsLayer, SettingsStack, Theme, ThemeStyle,
-    WordWrap, parse_jsonc_settings,
+    WordWrap, load_settings_or_default, parse_jsonc_settings,
 };
 
 /// Settings that control the large-file safety boundary.

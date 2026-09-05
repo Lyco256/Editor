@@ -25,27 +25,19 @@ Implemented in the integration pass:
 
 Still release-blocking or environment-blocked:
 
-1. Root now projects parser highlights, bracket matches, search markers, diagnostics, and the
-   Problems/Search/Git bottom views. LSP responses populate versioned language models, but semantic
-   spans and several completion/hover/navigation overlays are not yet rendered interactively.
-2. Format-on-save/paste chaining and LSP-formatting precedence are implemented behind explicit state
-   flags, but settings/UI controls and the complete Problems/Git/LSP interaction surface remain
-   incomplete. Git hunk staging/unstaging, confirmation-bound discard, and diff/conflict file opening
-   now have root paths; some branch/stash/history navigation actions still need view-level routing.
-3. Root retains detected encoding/BOM/line-ending metadata in tabs, session records, status
-   rendering, and save effects; explicit user conversion/reopen commands are not yet wired.
-4. Search and native watcher workers use standard threads; the architecture target is Tokio-based
-   orchestration.
-5. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
+1. Search and native watcher workers use standard threads; the architecture target is Tokio-based
+   orchestration for search, watcher, and background services.
+2. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
    open/close measurements because this environment cannot provide an interactive Windows Terminal.
    `docs/testing/final-smoke.md` records the same limitation. The master requirement requires user
    approval before treating those missing measurements as an exception.
-6. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
+3. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
    been compiled; the release binary and staging package script are verified.
-7. The required root-level headless acceptance coverage is still incomplete: `tests/headless_runtime.rs`
-   now exercises Git status projection/mutation routing, while root unit coverage verifies
-   large-file edit/suppression behavior. It still does not exercise Syntax output rendering or the
-   fake-server LSP request lifecycle end to end; crate-level tests cover parts of those behaviors.
+4. The root-level headless acceptance suite now covers the fake-server initialize/request/response
+   lifecycle, semantic tokens, Git projection/mutation routing, encoding round trips, and
+   large-file suppression. Full scenario breadth is still short of the release matrix (notably
+   root-driven Syntax output, LSP cancellation/crash-restart, and complete UI routing for some
+   Git and language actions).
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining service wiring, root acceptance coverage, and Windows performance/smoke

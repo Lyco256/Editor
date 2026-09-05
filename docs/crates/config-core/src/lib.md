@@ -11,6 +11,8 @@ specialized modules. `LargeFileSettings` retains the mandatory 32 MiB default.
 Configuration is parsed as data and never executes commands. Encoding metadata and recovery state
 flow upward to application orchestration; this crate does not mutate editor buffers or workspace
 files. Expected filesystem, syntax, conversion, and persistence failures use typed errors.
+`load_settings_or_default` makes a missing `.vscode/settings.json` a clean default while surfacing
+malformed or unreadable settings as diagnosable issues.
 
 ## Dependencies and tests
 

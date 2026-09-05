@@ -11,6 +11,7 @@ use editor_core::{Edit, PairConfig, TextBuffer, Transaction};
 use editor_types::{
     CharacterOffset, DocumentId, GitStatusSummary, InputEvent, KeyCode, LanguageServerStatus,
     LogicalPosition, Modifier, MouseAction, MouseButton, OutputLevel, OutputMessage, RequestId,
+    TextRange,
 };
 
 use super::{
@@ -34,6 +35,7 @@ pub struct AppState {
     pub(crate) workspace_ui: app_ui::workspace::WorkspaceUiState,
     pub(crate) language_ui: app_ui::language::LanguageModel,
     pub(crate) lsp_results: HashMap<String, serde_json::Value>,
+    pub(crate) last_language_method: Option<String>,
     pub(crate) syntax_snapshot: syntax_engine::SyntaxSnapshot,
     pub(crate) document_id: DocumentId,
     pub output: Vec<OutputMessage>,
@@ -60,6 +62,9 @@ pub struct AppState {
     deferred_effects: Vec<Effect>,
     pub(crate) format_on_save: bool,
     pub(crate) format_on_paste: bool,
+    pub(crate) tab_width: usize,
+    pub(crate) insert_spaces: bool,
+    pub(crate) show_line_numbers: bool,
     pub(crate) external_formatter: Option<ProcessSpec>,
     latest_explorer_request: Option<RequestId>,
     mouse_anchor: Option<CharacterOffset>,
@@ -74,6 +79,7 @@ pub(crate) enum BottomPanelView {
     Problems,
     Search,
     Git,
+    Language,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,6 +405,85 @@ fn language_result_from_response(
     Some(result)
 }
 
+/// Decodes LSP semantic-token delta tuples into the versioned UI span model. Invalid or
+/// out-of-range tuples are discarded as a whole response so malformed server data cannot paint
+/// ranges onto a different document.
+fn semantic_result_from_response(
+    result: &serde_json::Value,
+    version: u64,
+    document: DocumentId,
+    text: &str,
+    encoding: lsp_client::protocol::PositionEncoding,
+) -> Option<app_ui::language::LanguageResult> {
+    use app_ui::language::{LanguageResult, SpanSet, StyledSpan, TokenStyle, Versioned};
+
+    let values = result.get("data")?.as_array()?;
+    if values.is_empty() || values.len() % 5 != 0 {
+        return None;
+    }
+    let buffer = TextBuffer::new(text);
+    let mut line = 0_u32;
+    let mut start_character = 0_u32;
+    let mut spans = Vec::with_capacity(values.len() / 5);
+    for tuple in values.chunks_exact(5) {
+        let delta_line = tuple[0]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())?;
+        let delta_start = tuple[1]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())?;
+        let length = tuple[2]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())?;
+        let token_type = tuple[3]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())?;
+        if delta_line == 0 {
+            start_character = start_character.checked_add(delta_start)?;
+        } else {
+            line = line.checked_add(delta_line)?;
+            start_character = delta_start;
+        }
+        let end_character = start_character.checked_add(length)?;
+        let start = lsp_client::protocol::lsp_position_to_editor(
+            text,
+            lsp_client::protocol::Position {
+                line,
+                character: start_character,
+            },
+            encoding,
+        )
+        .ok()
+        .and_then(|position| buffer.position_to_offset(position).ok())?;
+        let end = lsp_client::protocol::lsp_position_to_editor(
+            text,
+            lsp_client::protocol::Position {
+                line,
+                character: end_character,
+            },
+            encoding,
+        )
+        .ok()
+        .and_then(|position| buffer.position_to_offset(position).ok())?;
+        let range = TextRange::new(start, end)?;
+        let style = match token_type {
+            0 => TokenStyle::SemanticType,
+            1 => TokenStyle::SemanticFunction,
+            2 => TokenStyle::SemanticVariable,
+            _ => TokenStyle::Plain,
+        };
+        spans.push(StyledSpan { range, style });
+    }
+    Some(LanguageResult::Semantic(Versioned::new(
+        version,
+        SpanSet {
+            document,
+            version,
+            spans,
+        },
+    )))
+}
+
 fn config_encoding_to_workspace(value: &config_core::EncodingKind) -> workspace_core::EncodingKind {
     match value {
         config_core::EncodingKind::Utf8 => workspace_core::EncodingKind::Utf8,
@@ -459,6 +544,7 @@ impl Default for AppState {
             workspace_ui: app_ui::workspace::WorkspaceUiState::default(),
             language_ui: app_ui::language::LanguageModel::new(0),
             lsp_results: HashMap::new(),
+            last_language_method: None,
             syntax_snapshot: syntax_engine::SyntaxSnapshot::default(),
             document_id: DocumentId(1),
             output: Vec::new(),
@@ -479,6 +565,14 @@ impl Default for AppState {
                 CommandEntry::available("editor.cut", "Cut"),
                 CommandEntry::available("editor.paste", "Paste"),
                 CommandEntry::available("editor.format", "Format Document"),
+                CommandEntry::available("editor.reopenUtf8", "Reopen with UTF-8"),
+                CommandEntry::available("editor.reopenUtf16Le", "Reopen with UTF-16 LE"),
+                CommandEntry::available("editor.reopenUtf16Be", "Reopen with UTF-16 BE"),
+                CommandEntry::available("editor.convertUtf8", "Convert to UTF-8"),
+                CommandEntry::available("editor.convertUtf16Le", "Convert to UTF-16 LE"),
+                CommandEntry::available("editor.convertUtf16Be", "Convert to UTF-16 BE"),
+                CommandEntry::available("editor.toggleFormatOnSave", "Toggle Format on Save"),
+                CommandEntry::available("editor.toggleFormatOnPaste", "Toggle Format on Paste"),
                 CommandEntry::available("workbench.splitVertical", "Split Editor Vertical"),
                 CommandEntry::available("workbench.splitHorizontal", "Split Editor Horizontal"),
                 CommandEntry::available("workbench.closeSplit", "Close Editor Split"),
@@ -501,6 +595,9 @@ impl Default for AppState {
             deferred_effects: Vec::new(),
             format_on_save: false,
             format_on_paste: false,
+            tab_width: 4,
+            insert_spaces: true,
+            show_line_numbers: true,
             external_formatter: None,
             latest_explorer_request: None,
             mouse_anchor: None,
@@ -604,6 +701,26 @@ impl AppState {
         self.format_on_save = enabled;
     }
 
+    /// Applies the resolved settings snapshot to root behavior and every open buffer.
+    pub fn apply_settings(&mut self, settings: &config_core::EditorSettings) {
+        self.format_on_save = settings.format_on_save;
+        self.format_on_paste = settings.format_on_paste;
+        self.tab_width = usize::from(settings.tab_size.max(1));
+        self.insert_spaces = settings.insert_spaces;
+        self.show_line_numbers = settings.line_numbers;
+        let threshold = usize::try_from(settings.large_file_threshold).unwrap_or(usize::MAX);
+        self.buffer.set_large_file_threshold(threshold);
+        for tab in &mut self.tabs {
+            tab.buffer.set_large_file_threshold(threshold);
+        }
+    }
+
+    /// Exposes the immutable language view model for host integrations and deterministic tests.
+    #[must_use]
+    pub const fn language_model(&self) -> &app_ui::language::LanguageModel {
+        &self.language_ui
+    }
+
     /// Takes effects scheduled by asynchronous event application.
     pub(crate) fn take_deferred_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.deferred_effects)
@@ -697,6 +814,20 @@ impl AppState {
         request: app_ui::language::LanguageEffectRequest,
     ) -> Transition {
         use app_ui::language::LanguageEffectRequest;
+        if self.buffer.is_large_file()
+            && !matches!(request, LanguageEffectRequest::RefreshSyntax { .. })
+        {
+            self.output.push(OutputMessage {
+                subsystem: "lsp".to_owned(),
+                operation: "large-file".to_owned(),
+                level: OutputLevel::Information,
+                message: "language services are disabled for large files".to_owned(),
+            });
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        }
         let (method, params, version) = match request {
             LanguageEffectRequest::RequestCompletion {
                 version, position, ..
@@ -1487,6 +1618,77 @@ impl AppState {
         &self.tabs[self.active_tab]
     }
 
+    fn reopen_with_encoding(&mut self, encoding: &workspace_core::EncodingKind) -> Transition {
+        let Some(path) = self.active_path.clone() else {
+            self.output.push(OutputMessage {
+                subsystem: "workspace".to_owned(),
+                operation: "reopen-encoding".to_owned(),
+                level: OutputLevel::Warning,
+                message: "an active file is required to reopen with another encoding".to_owned(),
+            });
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        };
+        if self.active_dirty {
+            self.output.push(OutputMessage {
+                subsystem: "workspace".to_owned(),
+                operation: "reopen-encoding".to_owned(),
+                level: OutputLevel::Warning,
+                message: "save or discard unsaved changes before reopening with another encoding"
+                    .to_owned(),
+            });
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        }
+        match workspace_core::load_text_document_with_encoding(
+            &path,
+            encoding,
+            workspace_core::DecodePolicy::Strict,
+        ) {
+            Ok(document) => {
+                self.sync_active_tab();
+                self.tabs[self.active_tab] = TabState {
+                    path: Some(document.path.clone()),
+                    buffer: TextBuffer::new(&document.text),
+                    encoding: document.encoding,
+                    with_bom: document.had_bom,
+                    line_endings: document.line_endings,
+                };
+                self.active_path = Some(document.path);
+                self.buffer = self.tabs[self.active_tab].buffer.clone();
+                self.active_text = document.text;
+                self.active_dirty = false;
+                self.language_ui.set_document_version(0);
+                self.syntax_snapshot = syntax_engine::SyntaxSnapshot::default();
+                self.sync_buffer_projection();
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "reopen-encoding".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!("reopened as {}", encoding.canonical_name()),
+                });
+            }
+            Err(error) => self.output.push(OutputMessage {
+                subsystem: "workspace".to_owned(),
+                operation: "reopen-encoding".to_owned(),
+                level: OutputLevel::Error,
+                message: format!(
+                    "could not reopen {} as {}: {error}",
+                    path.display(),
+                    encoding.canonical_name()
+                ),
+            }),
+        }
+        Transition {
+            render: true,
+            ..Transition::default()
+        }
+    }
+
     fn refresh_workspace_trust(&mut self) {
         if let Some(root) = self.workspace_roots.first() {
             self.workspace_trusted = self
@@ -1613,6 +1815,30 @@ impl AppState {
                     self.open_startup_path(path);
                 }
                 self.explorer_refresh_transition()
+            }
+            Action::ReopenWithEncoding(encoding) => self.reopen_with_encoding(&encoding),
+            Action::SetEncoding { encoding, with_bom } => {
+                self.sync_active_tab();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.encoding = encoding;
+                    tab.with_bom = with_bom;
+                }
+                self.buffer.mark_recovered_dirty();
+                self.sync_buffer_projection();
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "encoding".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!(
+                        "next save uses {}{}",
+                        self.active_tab_state().encoding.canonical_name(),
+                        if with_bom { " with BOM" } else { "" }
+                    ),
+                });
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
             }
             Action::SwitchTab(index) => {
                 self.switch_tab(index);
@@ -2332,6 +2558,51 @@ impl AppState {
                 };
                 return None;
             }
+            "editor.reopenUtf8" => {
+                let _ = self.reopen_with_encoding(&workspace_core::EncodingKind::Utf8);
+            }
+            "editor.reopenUtf16Le" => {
+                let _ = self.reopen_with_encoding(&workspace_core::EncodingKind::Utf16Le);
+            }
+            "editor.reopenUtf16Be" => {
+                let _ = self.reopen_with_encoding(&workspace_core::EncodingKind::Utf16Be);
+            }
+            "editor.convertUtf8" => {
+                self.apply_action_inner(Action::SetEncoding {
+                    encoding: workspace_core::EncodingKind::Utf8,
+                    with_bom: false,
+                });
+            }
+            "editor.convertUtf16Le" => {
+                self.apply_action_inner(Action::SetEncoding {
+                    encoding: workspace_core::EncodingKind::Utf16Le,
+                    with_bom: true,
+                });
+            }
+            "editor.convertUtf16Be" => {
+                self.apply_action_inner(Action::SetEncoding {
+                    encoding: workspace_core::EncodingKind::Utf16Be,
+                    with_bom: true,
+                });
+            }
+            "editor.toggleFormatOnSave" => {
+                self.format_on_save = !self.format_on_save;
+                self.output.push(OutputMessage {
+                    subsystem: "settings".to_owned(),
+                    operation: "format-on-save".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!("format on save: {}", self.format_on_save),
+                });
+            }
+            "editor.toggleFormatOnPaste" => {
+                self.format_on_paste = !self.format_on_paste;
+                self.output.push(OutputMessage {
+                    subsystem: "settings".to_owned(),
+                    operation: "format-on-paste".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!("format on paste: {}", self.format_on_paste),
+                });
+            }
             "workbench.splitVertical" => {
                 self.split_axis = Some(app_ui::shell::SplitAxis::Vertical);
                 self.split_ratio_percent = 50;
@@ -2736,13 +3007,34 @@ impl AppState {
                 if version == self.buffer.snapshot().version() {
                     let status_name = method.clone();
                     self.lsp_results.insert(method.clone(), result.clone());
+                    self.last_language_method = Some(method.clone());
                     if method == "textDocument/formatting" {
                         self.apply_lsp_format_result(request, &result);
+                    }
+                    if method == "textDocument/semanticTokens/full"
+                        && let Some(language_result) = semantic_result_from_response(
+                            &result,
+                            version,
+                            self.document_id,
+                            self.buffer.snapshot().text(),
+                            self.lsp_position_encoding,
+                        )
+                    {
+                        let _ = self.language_ui.apply_result(language_result);
                     }
                     if let Some(language_result) =
                         language_result_from_response(&method, &result, version, self.document_id)
                     {
                         let _ = self.language_ui.apply_result(language_result);
+                    }
+                    if !matches!(
+                        method.as_str(),
+                        "textDocument/semanticTokens/full"
+                            | "textDocument/diagnostic"
+                            | "textDocument/publishDiagnostics"
+                    ) {
+                        self.bottom_panel_view = BottomPanelView::Language;
+                        self.bottom_panel_visible = true;
                     }
                     self.language_server = LanguageServerStatus::Running { name: status_name };
                 }
@@ -3012,6 +3304,33 @@ mod tests {
     }
 
     #[test]
+    fn large_file_language_requests_are_rejected_before_dispatch() {
+        let mut state = AppState {
+            buffer: TextBuffer::with_large_file_threshold("1234", 4),
+            workspace_trusted: true,
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        let transition = state.apply_language_effect_request(
+            app_ui::language::LanguageEffectRequest::RequestCompletion {
+                document: state.document_id,
+                version: state.buffer.snapshot().version(),
+                position: editor_types::LogicalPosition {
+                    line: 0,
+                    character: 0,
+                },
+            },
+        );
+        assert!(transition.effects.is_empty());
+        assert!(
+            state
+                .output
+                .iter()
+                .any(|message| message.operation == "large-file")
+        );
+    }
+
+    #[test]
     fn dirty_quit_is_blocked_and_surfaces_a_warning() {
         use editor_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
 
@@ -3055,6 +3374,29 @@ mod tests {
         let _ = state.apply_action(key(KeyCode::Enter));
         assert!(!state.running);
         assert!(!state.palette_visible);
+    }
+
+    #[test]
+    fn workspace_settings_enable_formatting_and_configure_viewport() {
+        let mut state = AppState::default();
+        let settings = config_core::EditorSettings {
+            format_on_save: true,
+            format_on_paste: true,
+            tab_size: 2,
+            insert_spaces: false,
+            line_numbers: false,
+            ..config_core::EditorSettings::default()
+        };
+        state.apply_settings(&settings);
+        assert!(state.format_on_save);
+        assert!(state.format_on_paste);
+        assert_eq!(state.tab_width, 2);
+        assert!(!state.insert_spaces);
+        assert!(!state.show_line_numbers);
+        assert_eq!(
+            state.buffer.large_file_threshold(),
+            usize::try_from(settings.large_file_threshold).unwrap_or(usize::MAX)
+        );
     }
 
     #[test]
@@ -3354,6 +3696,76 @@ mod tests {
             .expect("completion view should be populated");
         assert_eq!(completion.list.rows.len(), 2);
         assert_eq!(completion.list.selected, Some(0));
+    }
+
+    #[test]
+    fn semantic_token_delta_response_updates_versioned_spans() {
+        let mut state = AppState {
+            buffer: TextBuffer::new("hello\n"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        let version = state.buffer.snapshot().version();
+        state.apply_event(Event::LspResponse {
+            request: RequestId(11),
+            version,
+            method: String::from("textDocument/semanticTokens/full"),
+            result: serde_json::json!({"data": [0, 0, 5, 1, 0]}),
+        });
+        let semantic = state
+            .language_ui
+            .semantic
+            .current()
+            .expect("semantic spans should be populated");
+        assert_eq!(semantic.spans.len(), 1);
+        assert_eq!(semantic.spans[0].range.start.0, 0);
+        assert_eq!(semantic.spans[0].range.end.0, 5);
+        assert_eq!(
+            state.last_language_method.as_deref(),
+            Some("textDocument/semanticTokens/full")
+        );
+    }
+
+    #[test]
+    fn explicit_encoding_reopen_and_conversion_are_safe_and_saveable() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("encoded.txt");
+        let bytes = workspace_core::encode_text_document(
+            "日本語\r\n",
+            &workspace_core::EncodingKind::Utf16Be,
+            true,
+            workspace_core::DecodePolicy::Strict,
+        )
+        .expect("encode fixture");
+        std::fs::write(&path, bytes).expect("write fixture");
+        let mut state = AppState::default();
+        state.open_startup_path(&path);
+        assert_eq!(state.active_text, "日本語\r\n");
+        let reopen = state.apply_action(Action::ReopenWithEncoding(
+            workspace_core::EncodingKind::Utf16Be,
+        ));
+        assert!(reopen.render);
+        assert_eq!(
+            state.active_tab_state().encoding,
+            workspace_core::EncodingKind::Utf16Be
+        );
+        assert!(!state.active_dirty);
+
+        let convert = state.apply_action(Action::SetEncoding {
+            encoding: workspace_core::EncodingKind::Utf8,
+            with_bom: true,
+        });
+        assert!(convert.render);
+        assert!(state.active_dirty);
+        let save = state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.save")));
+        assert!(matches!(
+            save.effects.first(),
+            Some(Effect::SaveDocument {
+                encoding: workspace_core::EncodingKind::Utf8,
+                with_bom: true,
+                ..
+            })
+        ));
     }
 
     #[test]

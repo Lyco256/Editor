@@ -27,6 +27,11 @@ symbol, and formatting models.
 Git diff/conflict navigation resolves repository-relative paths through the root tab-opening path,
 so the dashboard never performs filesystem access itself. Large-file mode remains editable while
 syntax refresh effects carry an explicit suppression flag and no semantic LSP request is emitted.
+Semantic-token delta streams are decoded with the negotiated UTF-8/UTF-16 position encoding,
+versioned, and retained as UI spans; malformed tuples are rejected without changing the document.
+The last interactive language result selects a rendered language panel through the root state.
+`language_model` exposes that immutable versioned view to host integrations without granting any
+worker or view direct process access.
 `open_tab`, `SwitchTab`, and the session serializer retain each open buffer, detected encoding/BOM/
 line-ending metadata, and active-tab index,
 including an optional horizontal/vertical split, split ratio, and secondary tab. Session restore

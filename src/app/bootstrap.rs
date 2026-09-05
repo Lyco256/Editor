@@ -170,6 +170,7 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
             state.open_startup_path(path);
         }
     }
+    apply_workspace_settings(&mut state);
     state.schedule_syntax_refresh();
     match run_interactive_with_state_and_recovery(
         backend,
@@ -195,6 +196,114 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
             eprintln!("Editor runtime failed: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn apply_workspace_settings(state: &mut AppState) {
+    let Some(root) = state.workspace_roots.first() else {
+        return;
+    };
+    let path = root.join(".vscode").join("settings.json");
+    let loaded = match std::fs::read_to_string(&path) {
+        Ok(contents) => match vscode_compat::load_vscode_settings_jsonc(&contents) {
+            Ok(parsed) => config_core::LoadSettingsResult {
+                layer: vscode_settings_layer(parsed.layer),
+                issues: parsed
+                    .warnings
+                    .into_iter()
+                    .map(|warning| config_core::SettingsIssue {
+                        path: path.clone(),
+                        message: warning.message,
+                    })
+                    .collect(),
+            },
+            Err(error) => config_core::LoadSettingsResult {
+                layer: config_core::SettingsLayer::default(),
+                issues: vec![config_core::SettingsIssue {
+                    path: path.clone(),
+                    message: error.to_string(),
+                }],
+            },
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            config_core::LoadSettingsResult {
+                layer: config_core::SettingsLayer::default(),
+                issues: Vec::new(),
+            }
+        }
+        Err(error) => config_core::LoadSettingsResult {
+            layer: config_core::SettingsLayer::default(),
+            issues: vec![config_core::SettingsIssue {
+                path: path.clone(),
+                message: error.to_string(),
+            }],
+        },
+    };
+    let settings = config_core::SettingsStack {
+        workspace: loaded.layer,
+        ..config_core::SettingsStack::default()
+    }
+    .resolve();
+    state.apply_settings(&settings);
+    for issue in loaded.issues {
+        state.output.push(editor_types::OutputMessage {
+            subsystem: "settings".to_owned(),
+            operation: "load".to_owned(),
+            level: editor_types::OutputLevel::Warning,
+            message: format!("{}: {}", issue.path.display(), issue.message),
+        });
+    }
+}
+
+fn vscode_settings_layer(layer: vscode_compat::SettingsLayer) -> config_core::SettingsLayer {
+    config_core::SettingsLayer {
+        line_numbers: layer.line_numbers,
+        tab_size: layer.tab_size,
+        insert_spaces: layer.insert_spaces,
+        word_wrap: layer.word_wrap.map(|value| match value {
+            vscode_compat::WordWrap::Off => config_core::WordWrap::Off,
+            vscode_compat::WordWrap::On => config_core::WordWrap::On,
+            vscode_compat::WordWrap::WordWrapColumn => config_core::WordWrap::WordWrapColumn,
+            vscode_compat::WordWrap::Bounded => config_core::WordWrap::Bounded,
+        }),
+        auto_closing_pairs: layer.auto_closing_pairs.map(|value| match value {
+            vscode_compat::AutoClosingPairs::Never => config_core::AutoClosingPairs::Never,
+            vscode_compat::AutoClosingPairs::LanguageDefined => {
+                config_core::AutoClosingPairs::LanguageDefined
+            }
+            vscode_compat::AutoClosingPairs::BeforeWhitespace => {
+                config_core::AutoClosingPairs::BeforeWhitespace
+            }
+            vscode_compat::AutoClosingPairs::Always => config_core::AutoClosingPairs::Always,
+        }),
+        format_on_save: layer.format_on_save,
+        format_on_paste: layer.format_on_paste,
+        theme: layer.theme,
+        search_excludes: layer.search_excludes,
+        files_excludes: layer.files_excludes,
+        large_file_threshold: layer.large_file_threshold,
+        encoding_fallback: layer.encoding_fallback,
+        line_ending: layer.line_ending.map(|value| match value {
+            vscode_compat::LineEndingPreference::Preserve => {
+                config_core::LineEndingPreference::Preserve
+            }
+            vscode_compat::LineEndingPreference::Lf => config_core::LineEndingPreference::Lf,
+            vscode_compat::LineEndingPreference::Crlf => config_core::LineEndingPreference::Crlf,
+        }),
+        language_server_commands: layer.language_server_commands,
+        external_formatter_commands: layer.external_formatter_commands,
+        keybindings: layer.keybindings.map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| config_core::Keybinding {
+                    key: entry.key,
+                    command: entry.command,
+                    when: entry.when,
+                    unknown: entry.unknown,
+                })
+                .collect()
+        }),
+        unknown: layer.unknown,
     }
 }
 
@@ -1012,7 +1121,7 @@ impl EffectDispatcher for ServiceDispatcher {
 mod tests {
     use std::ffi::OsString;
 
-    use super::StartupRequest;
+    use super::{StartupRequest, apply_workspace_settings};
 
     #[test]
     fn parses_file_and_directory_as_one_positional_path() {
@@ -1028,5 +1137,22 @@ mod tests {
     fn rejects_unknown_options_and_multiple_paths() {
         assert!(StartupRequest::from_args([OsString::from("--version")]).is_err());
         assert!(StartupRequest::from_args([OsString::from("a"), OsString::from("b")]).is_err());
+    }
+
+    #[test]
+    fn workspace_jsonc_settings_are_loaded_into_root_state() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let vscode = directory.path().join(".vscode");
+        std::fs::create_dir_all(&vscode).expect("settings directory");
+        std::fs::write(
+            vscode.join("settings.json"),
+            "{\"editor.formatOnSave\": true, \"editor.tabSize\": 2}",
+        )
+        .expect("settings file");
+        let mut state = super::AppState::default();
+        state.workspace_roots.push(directory.path().to_path_buf());
+        apply_workspace_settings(&mut state);
+        assert!(state.format_on_save);
+        assert_eq!(state.tab_width, 2);
     }
 }

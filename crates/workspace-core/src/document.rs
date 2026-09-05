@@ -237,6 +237,35 @@ pub fn decode_text_document(
     })
 }
 
+/// Decodes bytes using an explicitly selected encoding instead of the automatic detection order.
+/// A matching BOM is consumed and retained in the returned metadata so callers can safely
+/// implement an explicit "reopen with encoding" action.
+pub fn decode_text_document_with_encoding(
+    bytes: &[u8],
+    encoding: &EncodingKind,
+    policy: DecodePolicy,
+) -> Result<DecodedText, EncodingError> {
+    let (payload, had_bom) = match encoding {
+        EncodingKind::Utf8 if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) => (&bytes[3..], true),
+        EncodingKind::Utf16Le if bytes.starts_with(&[0xFF, 0xFE]) => (&bytes[2..], true),
+        EncodingKind::Utf16Be if bytes.starts_with(&[0xFE, 0xFF]) => (&bytes[2..], true),
+        _ => (bytes, false),
+    };
+    let (text, had_replacements) = decode_as(payload, encoding)?;
+    if had_replacements && policy == DecodePolicy::Strict {
+        return Err(EncodingError::MalformedInput {
+            encoding: encoding.canonical_name().to_owned(),
+        });
+    }
+    Ok(DecodedText {
+        line_endings: inspect_line_endings(&text),
+        text,
+        encoding: encoding.clone(),
+        had_bom,
+        had_replacements,
+    })
+}
+
 pub fn encode_text_document(
     text: &str,
     encoding: &EncodingKind,
@@ -303,6 +332,24 @@ pub fn load_text_document(
         had_bom: decoded.had_bom,
         line_endings: decoded.line_endings,
         large_file: is_large_file(path, &options.large_file_settings),
+    })
+}
+
+/// Loads a document with an explicit encoding selected by the user.
+pub fn load_text_document_with_encoding(
+    path: &Path,
+    encoding: &EncodingKind,
+    policy: DecodePolicy,
+) -> Result<TextDocument, DocumentError> {
+    let bytes = std::fs::read(path)?;
+    let decoded = decode_text_document_with_encoding(&bytes, encoding, policy)?;
+    Ok(TextDocument {
+        path: path.to_path_buf(),
+        text: decoded.text,
+        encoding: decoded.encoding,
+        had_bom: decoded.had_bom,
+        line_endings: decoded.line_endings,
+        large_file: is_large_file(path, &LargeFileSettings::default()),
     })
 }
 

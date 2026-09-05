@@ -18,3 +18,6 @@ matches and supports cancellation through a cloneable service handle. Structured
 use a bounded current-thread Tokio runtime and never concatenate shell commands. Git hunk and
 confirmation-bound discard effects invoke the typed `vcs-git` APIs with patch data on stdin and
 return `EffectCompleted` or structured failure output.
+After a path is selected it loads the workspace `.vscode/settings.json` as a JSONC data layer;
+resolved format, indentation, line-number, and large-file settings are applied to root state, while
+malformed settings remain visible as warning output.

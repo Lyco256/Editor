@@ -9,6 +9,8 @@ Important types:
 - `DecodedText` carries decoded text plus the metadata needed for faithful save.
 - `DocumentLoadOptions` and `DocumentSaveOptions` keep the open/save behavior explicit.
 - `TextDocument` is the loaded document snapshot the rest of the crate uses.
+- `decode_text_document_with_encoding` and `load_text_document_with_encoding` provide an explicit,
+  BOM-aware codec path for user-requested reopen/conversion operations.
 
 Invariants:
 

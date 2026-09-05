@@ -251,12 +251,37 @@ fn frame_for_state(
         })
         .collect::<Vec<_>>();
     folds.set_regions(fold_regions);
-    let syntax_spans = state
-        .syntax_snapshot
-        .highlights
-        .iter()
-        .map(|span| (span.range, span.role))
-        .collect::<Vec<_>>();
+    let mut syntax_spans = state
+        .language_ui
+        .semantic
+        .current()
+        .map(|span_set| {
+            span_set
+                .spans
+                .iter()
+                .map(|span| {
+                    let role = match span.style {
+                        app_ui::language::TokenStyle::SemanticType
+                        | app_ui::language::TokenStyle::SemanticFunction
+                        | app_ui::language::TokenStyle::SemanticVariable => StyleRole::SemanticType,
+                        app_ui::language::TokenStyle::SyntaxKeyword => StyleRole::SyntaxKeyword,
+                        app_ui::language::TokenStyle::SyntaxString => StyleRole::SyntaxString,
+                        app_ui::language::TokenStyle::SyntaxComment => StyleRole::SyntaxComment,
+                        app_ui::language::TokenStyle::Plain => StyleRole::EditorText,
+                    };
+                    (span.range, role)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    syntax_spans.extend(
+        state
+            .syntax_snapshot
+            .highlights
+            .iter()
+            .map(|span| (span.range, span.role))
+            .collect::<Vec<_>>(),
+    );
     let bracket_matches = state
         .syntax_snapshot
         .pairs
@@ -315,6 +340,12 @@ fn frame_for_state(
         }
         .to_owned(),
         diagnostics: diagnostic_counts,
+        indent_style: if state.insert_spaces {
+            String::from("spaces")
+        } else {
+            String::from("tabs")
+        },
+        indent_size: u8::try_from(state.tab_width).unwrap_or(u8::MAX),
         ..EditorStatusData::default()
     };
     let viewport = EditorViewportState {
@@ -331,8 +362,8 @@ fn frame_for_state(
         search_matches,
         bracket_matches,
         status: status.clone(),
-        show_line_numbers: true,
-        tab_width: 4,
+        show_line_numbers: state.show_line_numbers,
+        tab_width: state.tab_width,
     };
     let roots = state
         .workspace_roots
@@ -407,8 +438,8 @@ fn frame_for_state(
                 search_matches: Vec::new(),
                 bracket_matches: Vec::new(),
                 status: status.clone(),
-                show_line_numbers: true,
-                tab_width: 4,
+                show_line_numbers: state.show_line_numbers,
+                tab_width: state.tab_width,
             }
         });
     let root = match (state.split_axis, second_viewport) {
@@ -451,6 +482,7 @@ fn frame_for_state(
                 super::state::BottomPanelView::Problems => "Problems",
                 super::state::BottomPanelView::Search => "Search",
                 super::state::BottomPanelView::Git => "Source Control",
+                super::state::BottomPanelView::Language => "Language",
             }
             .to_owned(),
             entries: output_entries,
@@ -501,12 +533,73 @@ fn frame_for_state(
                 );
                 panel
             }),
+            super::state::BottomPanelView::Language => language_panel_for_state(state, bottom),
         };
         if let Some(panel) = panel {
             blit_frame(&mut frame, &panel, bottom.x, bottom.y);
         }
     }
     frame
+}
+
+fn language_panel_for_state(state: &AppState, area: app_ui::widgets::Rect) -> Option<Framebuffer> {
+    let width = area.width;
+    let height = area.height;
+    match state.last_language_method.as_deref()? {
+        "textDocument/completion" => state
+            .language_ui
+            .completion
+            .current()
+            .map(|view| app_ui::language::render_completion_view(view, width, height)),
+        "textDocument/hover" => state
+            .language_ui
+            .hover
+            .current()
+            .map(|view| app_ui::language::render_hover_view(view, width, height)),
+        "textDocument/signatureHelp" => state
+            .language_ui
+            .signature
+            .current()
+            .map(|view| app_ui::language::render_signature_view(view, width, height)),
+        "textDocument/definition" | "textDocument/declaration" | "textDocument/implementation" => {
+            state
+                .language_ui
+                .go_to
+                .current()
+                .map(|view| app_ui::language::render_location_chooser(view, width, height))
+        }
+        "textDocument/references" => state
+            .language_ui
+            .references
+            .current()
+            .map(|view| app_ui::language::render_location_chooser(view, width, height)),
+        "textDocument/rename" => state
+            .language_ui
+            .rename
+            .current()
+            .map(|view| app_ui::language::render_rename_preview(view, width, height)),
+        "textDocument/codeAction" => state
+            .language_ui
+            .code_actions
+            .current()
+            .map(|view| app_ui::language::render_code_actions(view, width, height)),
+        "textDocument/inlayHint" => state
+            .language_ui
+            .inlay_hints
+            .current()
+            .map(|view| app_ui::language::render_inlay_hints(view, width, height)),
+        "textDocument/documentSymbol" | "workspace/symbol" => state
+            .language_ui
+            .symbols
+            .current()
+            .map(|view| app_ui::language::render_symbols(view, width, height)),
+        "textDocument/formatting" | "textDocument/rangeFormatting" => state
+            .language_ui
+            .formatting
+            .current()
+            .map(|view| app_ui::language::render_formatting_feedback(view, width, height)),
+        _ => None,
+    }
 }
 
 fn blit_frame(destination: &mut Framebuffer, source: &Framebuffer, x: u16, y: u16) {
@@ -557,6 +650,26 @@ mod tests {
         );
         let cell = frame.get(31, 1).expect("syntax editor cell");
         assert_eq!(cell.foreground, StyleRole::SyntaxKeyword);
+    }
+
+    #[test]
+    fn root_frame_renders_interactive_language_result_panel() {
+        let mut state = AppState::default();
+        let version = state.buffer.snapshot().version();
+        state.apply_event(crate::app::event::Event::LspResponse {
+            request: editor_types::RequestId(12),
+            version,
+            method: String::from("textDocument/completion"),
+            result: serde_json::json!({"items": [{"label": "println!"}]}),
+        });
+        let frame = frame_for_state(
+            &state,
+            (100, 30),
+            editor_types::TerminalCapabilities::default(),
+        );
+        let snapshot = app_ui::language::dump_framebuffer(&frame);
+        assert!(snapshot.contains("C|o|m|p|l|e|t|i|o|n"));
+        assert!(snapshot.contains("p|r|i|n|t|l|n|!"));
     }
 }
 

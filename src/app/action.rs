@@ -11,6 +11,13 @@ pub enum Action {
     Invoke(CommandId),
     SetWorkspaceTrust(bool),
     OpenPath(PathBuf),
+    /// Reopens the active file with a user-selected codec after clean-buffer confirmation.
+    ReopenWithEncoding(workspace_core::EncodingKind),
+    /// Changes the codec used by the next save and marks the document dirty.
+    SetEncoding {
+        encoding: workspace_core::EncodingKind,
+        with_bom: bool,
+    },
     SwitchTab(usize),
     CloseTab(usize),
     SaveAs(PathBuf),

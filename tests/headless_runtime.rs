@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::path::PathBuf;
 
 use editor::app::{
     action::Action,
@@ -8,6 +9,33 @@ use editor::app::{
 };
 use editor_types::TerminalCapabilities;
 use terminal_backend::{Framebuffer, TerminalAdapter};
+
+fn fake_lsp_server_bin() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_lsp_client_fake_server") {
+        return path.into();
+    }
+    let direct =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/lsp_client_fake_server.exe");
+    if direct.is_file() {
+        return direct;
+    }
+    let deps = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/deps");
+    std::fs::read_dir(deps)
+        .expect("workspace test dependencies should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("lsp_client_fake_server-")
+                        && std::path::Path::new(name)
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+                })
+        })
+        .expect("fake LSP server binary should be built for workspace acceptance tests")
+}
 
 #[derive(Debug, Default)]
 struct FakeTerminal {
@@ -127,6 +155,7 @@ fn startup_file_is_loaded_without_launching_external_effects() {
 
     let mut state = editor::app::state::AppState::default();
     state.open_startup_path(&path);
+    state.workspace_trusted = true;
     assert_eq!(state.active_path.as_deref(), Some(path.as_path()));
     assert_eq!(state.active_text, "fn main() {}\n");
     assert!(state.output.is_empty());
@@ -287,6 +316,111 @@ fn git_status_projection_routes_dashboard_mutations_through_root_effects() {
         state.git_status,
         Some(editor_types::GitStatusSummary::default())
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn root_lsp_effect_and_response_lifecycle_updates_language_views() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let path = directory.path().join("main.rs");
+    std::fs::write(&path, "complete").expect("fixture");
+    let mut state = editor::app::state::AppState::default();
+    state.open_startup_path(&path);
+    state.workspace_trusted = true;
+    let version = 0;
+    let command = {
+        let mut command = lsp_client::CommandSpec::new(fake_lsp_server_bin());
+        command.args = vec!["lsp".to_owned(), "normal".to_owned(), "utf8".to_owned()];
+        command
+    };
+    let client = lsp_client::LspClient::spawn(command)
+        .await
+        .expect("fake LSP should spawn");
+    let initialized = client
+        .initialize(lsp_client::InitializeParams {
+            position_encodings: vec![lsp_client::PositionEncoding::Utf8],
+            ..lsp_client::InitializeParams::default()
+        })
+        .await
+        .expect("fake LSP should initialize");
+    assert_eq!(
+        initialized.position_encoding,
+        lsp_client::PositionEncoding::Utf8
+    );
+    client
+        .initialized()
+        .await
+        .expect("initialized notification");
+    client
+        .did_open(lsp_client::DidOpenTextDocumentParams {
+            text_document: lsp_client::TextDocumentItem {
+                uri: lsp_client::DocumentUri("file:///workspace/main.rs".to_owned()),
+                language_id: "rust".to_owned(),
+                version: 1,
+                text: "complete".to_owned(),
+            },
+        })
+        .await
+        .expect("didOpen");
+
+    let root_effect = Effect::LspRequest {
+        request: editor_types::RequestId(22),
+        version,
+        spec: editor::app::effect::ProcessSpec {
+            executable: fake_lsp_server_bin().display().to_string(),
+            arguments: vec!["lsp".to_owned(), "normal".to_owned(), "utf8".to_owned()],
+        },
+        method: "textDocument/completion".to_owned(),
+        params: serde_json::json!({}),
+    };
+    let transition = state.apply_action(Action::RequestEffect(root_effect));
+    assert!(matches!(
+        transition.effects.first(),
+        Some(Effect::LspRequest { .. })
+    ));
+
+    let completion = client
+        .completion(serde_json::json!({
+            "textDocument": {"uri": "file:///workspace/main.rs"},
+            "position": {"line": 0, "character": 0}
+        }))
+        .await
+        .expect("completion response");
+    state.apply_event(Event::LspResponse {
+        request: editor_types::RequestId(23),
+        version,
+        method: "textDocument/completion".to_owned(),
+        result: completion,
+    });
+    assert_eq!(
+        state
+            .language_model()
+            .completion
+            .current()
+            .map(|view| view.list.rows.len()),
+        Some(1)
+    );
+
+    let semantic = client
+        .semantic_tokens(serde_json::json!({
+            "textDocument": {"uri": "file:///workspace/main.rs"}
+        }))
+        .await
+        .expect("semantic token response");
+    state.apply_event(Event::LspResponse {
+        request: editor_types::RequestId(24),
+        version,
+        method: "textDocument/semanticTokens/full".to_owned(),
+        result: semantic,
+    });
+    assert_eq!(
+        state
+            .language_model()
+            .semantic
+            .current()
+            .map(|spans| spans.spans.len()),
+        Some(1)
+    );
+    client.shutdown().await.expect("fake LSP should shut down");
 }
 
 #[test]

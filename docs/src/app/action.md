@@ -5,6 +5,8 @@ I/O. Input adapters create them; `AppState` consumes them. Trust changes and eff
 explicit so policy tests can observe authorization decisions.
 `OpenPath` and `AddWorkspaceRoot` make file/workspace navigation explicit root actions; the
 transition layer performs the corresponding model update and reports errors as output messages.
+`ReopenWithEncoding` uses an explicit BOM-aware codec after refusing to replace dirty text, while
+`SetEncoding` changes the next-save codec and marks the buffer dirty so conversion cannot be lost.
 `SplitPane`, `CloseSplit`, and `SetSplitRatio` make horizontal/vertical editor layout changes
 explicit and keep them in the same state transition path as tab changes.
 `SaveAs` and `CloseTab` are explicit root actions; close refuses dirty buffers and Save As does not

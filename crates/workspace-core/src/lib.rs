@@ -14,7 +14,8 @@ pub use config_core::LargeFileSettings;
 pub use document::{
     DecodePolicy, DecodedText, DocumentEncodingError, DocumentLoadOptions, DocumentOpenError,
     DocumentSaveOptions, EncodingKind, LineEndings, SaveOutcome, TextDocument,
-    decode_text_document, encode_text_document, inspect_line_endings, load_text_document,
+    decode_text_document, decode_text_document_with_encoding, encode_text_document,
+    inspect_line_endings, load_text_document, load_text_document_with_encoding,
     normalize_line_endings, save_text_document,
 };
 pub use filesystem::{
