@@ -9,6 +9,7 @@ use editor::app::{
     effect::Effect,
     event::Event,
     runtime::{AppRuntime, EffectDispatcher, QueueActionSource, RecordingDispatcher},
+    state::AppState,
 };
 use editor_types::TerminalCapabilities;
 use terminal_backend::{Framebuffer, TerminalAdapter};
@@ -256,6 +257,24 @@ fn startup_file_is_loaded_without_launching_external_effects() {
     assert_eq!(state.active_path.as_deref(), Some(path.as_path()));
     assert_eq!(state.active_text, "fn main() {}\n");
     assert!(state.output.is_empty());
+}
+
+#[test]
+fn startup_directory_becomes_a_workspace_without_opening_a_file_tab() {
+    let directory = tempfile::tempdir().expect("temporary directory is available");
+    std::fs::write(directory.path().join("README.md"), "# workspace\n").expect("workspace file");
+    let mut state = AppState::default();
+    state.open_startup_path(directory.path());
+    assert_eq!(state.workspace_roots, vec![directory.path().to_path_buf()]);
+    assert_eq!(state.active_path.as_deref(), Some(directory.path()));
+    assert_eq!(state.active_text, "");
+    assert_eq!(state.session_state().editors.len(), 1);
+    assert!(state.explorer_entries.iter().any(|entry| {
+        entry
+            .path
+            .file_name()
+            .is_some_and(|name| name == "README.md")
+    }));
 }
 
 #[test]
