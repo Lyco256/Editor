@@ -17,6 +17,8 @@ perform filesystem I/O.
 `RequestFileOperation` creates a typed create/rename/move/delete confirmation prompt;
 `ConfirmFileOperation` is the only action that emits the corresponding background filesystem
 effect, while `CancelFileOperation` drops the pending plan.
+`FindInDocument` and `ReplaceInDocument` expose editor-core in-file search/replace semantics;
+replace-all is one undoable transaction and invalid expressions surface typed output.
 `RequestFileOperation` creates a typed create/rename/move/delete confirmation prompt;
 `ConfirmFileOperation` is the only action that emits the corresponding background filesystem
 effect, while `CancelFileOperation` drops the pending plan.

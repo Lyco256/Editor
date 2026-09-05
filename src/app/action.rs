@@ -44,6 +44,17 @@ pub enum Action {
         query: String,
         options: app_ui::workspace::SearchOptionsView,
     },
+    /// Finds all matches in the active document using editor-core semantics.
+    FindInDocument {
+        query: String,
+        options: editor_core::FindOptions,
+    },
+    /// Replaces all matches in the active document as one undoable transaction.
+    ReplaceInDocument {
+        query: String,
+        replacement: String,
+        options: editor_core::FindOptions,
+    },
     CancelSearch(u64),
     RequestEffect(Effect),
     Quit,

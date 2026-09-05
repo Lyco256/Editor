@@ -79,3 +79,5 @@ didChange/didSave/didClose notifications through the persistent session.
 Revoking trust stops the persistent server and rejects any late server-originated workspace edit.
 Git status events populate the pure dashboard model and successful Git mutations schedule a status
 refresh.
+In-document find and replace are root actions backed by editor-core; match ranges are retained for
+overview consumers and replace-all is undoable.

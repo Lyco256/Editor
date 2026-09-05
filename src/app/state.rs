@@ -37,6 +37,8 @@ pub struct AppState {
     pub(crate) workspace_ui: app_ui::workspace::WorkspaceUiState,
     pub(crate) language_ui: app_ui::language::LanguageModel,
     pub(crate) lsp_results: HashMap<String, serde_json::Value>,
+    pub(crate) find_query: String,
+    pub(crate) find_matches: Vec<TextRange>,
     pub(crate) last_language_method: Option<String>,
     pub(crate) syntax_snapshot: syntax_engine::SyntaxSnapshot,
     pub(crate) document_id: DocumentId,
@@ -717,6 +719,8 @@ impl Default for AppState {
             workspace_ui: app_ui::workspace::WorkspaceUiState::default(),
             language_ui: app_ui::language::LanguageModel::new(0),
             lsp_results: HashMap::new(),
+            find_query: String::new(),
+            find_matches: Vec::new(),
             last_language_method: None,
             syntax_snapshot: syntax_engine::SyntaxSnapshot::default(),
             document_id: DocumentId(1),
@@ -737,6 +741,8 @@ impl Default for AppState {
                 CommandEntry::available("editor.copy", "Copy"),
                 CommandEntry::available("editor.cut", "Cut"),
                 CommandEntry::available("editor.paste", "Paste"),
+                CommandEntry::available("editor.find", "Find in Document"),
+                CommandEntry::available("editor.replace", "Replace in Document"),
                 CommandEntry::available("editor.expandSelection", "Expand Selection"),
                 CommandEntry::available("editor.format", "Format Document"),
                 CommandEntry::available("editor.reopenUtf8", "Reopen with UTF-8"),
@@ -2958,6 +2964,62 @@ impl AppState {
             Action::CancelFileOperation => self.cancel_file_operation(),
             Action::QuickOpen(action) => self.apply_workspace_action(action),
             Action::StartSearch { query, options } => self.start_workspace_search(query, options),
+            Action::FindInDocument { query, options } => {
+                self.find_query.clone_from(&query);
+                self.find_matches = self
+                    .buffer
+                    .find(&query, options)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|matched| matched.range)
+                    .collect();
+                self.output.push(OutputMessage {
+                    subsystem: "editor".to_owned(),
+                    operation: "find".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!("{} match(es) in active document", self.find_matches.len()),
+                });
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::ReplaceInDocument {
+                query,
+                replacement,
+                options,
+            } => {
+                match self.buffer.replace_all(&query, &replacement, options) {
+                    Ok(applied) => {
+                        self.find_query = query;
+                        self.find_matches.clear();
+                        if applied.changed {
+                            self.sync_buffer_projection();
+                            self.deferred_effects.push(self.syntax_effect());
+                        }
+                        self.output.push(OutputMessage {
+                            subsystem: "editor".to_owned(),
+                            operation: "replace".to_owned(),
+                            level: OutputLevel::Information,
+                            message: if applied.changed {
+                                "document matches replaced".to_owned()
+                            } else {
+                                "no document matches replaced".to_owned()
+                            },
+                        });
+                    }
+                    Err(error) => self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "replace".to_owned(),
+                        level: OutputLevel::Error,
+                        message: error.to_string(),
+                    }),
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
             Action::CancelSearch(session_id) => Transition {
                 effects: vec![Effect::CancelSearch { session_id }],
                 render: true,
@@ -3559,6 +3621,30 @@ impl AppState {
             "editor.expandSelection" => {
                 let _ = self.apply_editor_action(app_ui::editor::EditorAction::ExpandSelection);
             }
+            "editor.find" => {
+                if self.find_query.is_empty() {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "find".to_owned(),
+                        level: OutputLevel::Information,
+                        message: "provide a query with FindInDocument".to_owned(),
+                    });
+                } else {
+                    self.find_matches = self
+                        .buffer
+                        .find(&self.find_query, editor_core::FindOptions::default())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|matched| matched.range)
+                        .collect();
+                }
+            }
+            "editor.replace" => self.output.push(OutputMessage {
+                subsystem: "editor".to_owned(),
+                operation: "replace".to_owned(),
+                level: OutputLevel::Information,
+                message: "provide query and replacement with ReplaceInDocument".to_owned(),
+            }),
             "editor.format" => {
                 if !self.workspace_trusted {
                     self.output.push(OutputMessage {
@@ -5441,6 +5527,30 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::FormatDocument { .. }))
         );
+    }
+
+    #[test]
+    fn in_document_find_and_replace_route_through_root_actions() {
+        let mut state = AppState {
+            buffer: TextBuffer::new("one two one"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        let find = state.apply_action(Action::FindInDocument {
+            query: "one".to_owned(),
+            options: editor_core::FindOptions::default(),
+        });
+        assert!(find.render);
+        assert_eq!(state.find_matches.len(), 2);
+        let replace = state.apply_action(Action::ReplaceInDocument {
+            query: "one".to_owned(),
+            replacement: "1".to_owned(),
+            options: editor_core::FindOptions::default(),
+        });
+        assert!(replace.render);
+        assert_eq!(state.active_text, "1 two 1");
+        assert!(state.buffer.undo().expect("undo replacement"));
+        assert_eq!(state.buffer.to_string(), "one two one");
     }
 
     #[test]

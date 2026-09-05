@@ -27,6 +27,8 @@ Implemented in the integration pass:
 - confirmed root filesystem-operation prompts and background create/rename/move/delete effects,
   including dirty-buffer deletion protection and Explorer refresh;
 - direct terminal paste now participates in format-on-paste precedence and remains undoable;
+- root `FindInDocument`/`ReplaceInDocument` actions now expose in-file search and undoable
+  replace-all semantics through editor-core;
 - root headless acceptance coverage for create, rename, move, and delete confirmation workflows;
 - Windows installer (`build/editor.iss`) and packaging script (`build/package.ps1`).
 
