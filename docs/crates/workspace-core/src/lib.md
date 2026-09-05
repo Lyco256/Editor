@@ -11,6 +11,8 @@ The crate is split into focused modules:
 - `filesystem.rs` exposes lazy tree traversal, file-change tracking, quick-open indexing, and file
   operation plans/execution.
 - `search.rs` streams project search through `rg` when available and a Rust fallback otherwise.
+- `search.rs` also exposes `ReplacementReport`, which records per-file success and failure after a
+  replacement plan executes.
 - `workspace.rs` persists trust and recent-workspace state.
 
 The root application still owns process authorization policy. This crate never reaches into UI types

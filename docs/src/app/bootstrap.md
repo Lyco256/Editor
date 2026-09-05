@@ -6,6 +6,10 @@ or workspace; a redirected launch uses the deterministic headless lifecycle. Sav
 workspace adapter thread and return typed completion events. Interactive no-argument startup restores
 the latest application-data session (falling back to the current directory), and shutdown persists
 the resulting session atomically. Invalid options return a usage error without starting a
-subprocess. A panic hook performs best-effort terminal restoration and safe crash logging.
+subprocess. A panic hook performs best-effort terminal restoration and safe crash logging. The
+bootstrap loads and saves the canonical-path workspace trust store beside recovery data.
 Explorer refreshes are dispatched to the workspace adapter thread and returned as typed events;
-filesystem traversal is not performed by the renderer.
+filesystem traversal is not performed by the renderer. Clipboard reads and writes are performed by
+the system adapter on a worker and return typed success/failure events; clipboard contents are not
+logged. Trusted language-server effects now use `lsp-client` stdio framing and initialization,
+forwarding stderr/crash events and requesting shutdown when the dispatcher is dropped.

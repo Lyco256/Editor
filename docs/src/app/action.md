@@ -5,3 +5,5 @@ I/O. Input adapters create them; `AppState` consumes them. Trust changes and eff
 explicit so policy tests can observe authorization decisions.
 `OpenPath` and `AddWorkspaceRoot` make file/workspace navigation explicit root actions; the
 transition layer performs the corresponding model update and reports errors as output messages.
+`SplitPane`, `CloseSplit`, and `SetSplitRatio` make horizontal/vertical editor layout changes
+explicit and keep them in the same state transition path as tab changes.

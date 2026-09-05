@@ -6,6 +6,8 @@ use std::{
     io::IsTerminal,
     path::PathBuf,
     process::{Command, ExitCode, Stdio},
+    sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
@@ -19,7 +21,7 @@ use super::{
     event::Event,
     runtime::{
         AppRuntime, EffectDispatcher, QueueActionSource, RecordingDispatcher,
-        run_interactive_with_state,
+        run_interactive_with_state_and_recovery,
     },
     state::AppState,
 };
@@ -129,6 +131,17 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
     let dispatcher = ServiceDispatcher::default();
     let mut state = AppState::default();
     let recovery = config_core::RecoveryStore::for_application("Editor").ok();
+    let trust_path = recovery.as_ref().and_then(|store| {
+        store
+            .directory()
+            .parent()
+            .map(|path| path.join("trust.json"))
+    });
+    if let Some(path) = &trust_path {
+        if let Ok(store) = workspace_core::load_trust_store(path) {
+            state.set_trust_store(store);
+        }
+    }
     if request.path.is_none() {
         if let Some(store) = &recovery {
             match store.load_latest() {
@@ -157,11 +170,22 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
             state.open_startup_path(path);
         }
     }
-    match run_interactive_with_state(backend, dispatcher, size, state) {
+    match run_interactive_with_state_and_recovery(
+        backend,
+        dispatcher,
+        size,
+        state,
+        recovery.clone(),
+    ) {
         Ok(final_state) => {
             if let Some(store) = recovery {
                 if let Err(error) = store.save(&final_state.session_state()) {
                     eprintln!("Editor: could not persist session: {error}");
+                }
+            }
+            if let Some(path) = trust_path {
+                if let Err(error) = final_state.trust_store.save(&path) {
+                    eprintln!("Editor: could not persist workspace trust: {error}");
                 }
             }
             ExitCode::SUCCESS
@@ -177,12 +201,23 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
 struct ServiceDispatcher {
     events: Receiver<Event>,
     sender: Sender<Event>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Default for ServiceDispatcher {
     fn default() -> Self {
         let (sender, events) = mpsc::channel();
-        Self { events, sender }
+        Self {
+            events,
+            sender,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Drop for ServiceDispatcher {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
     }
 }
 
@@ -226,6 +261,148 @@ impl EffectDispatcher for ServiceDispatcher {
                             },
                         },
                     );
+                    let _ = sender.send(event);
+                });
+                return;
+            }
+            if let Effect::ClipboardWrite { request, text, cut } = effect.clone() {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let event = match terminal_backend::SystemClipboard::new() {
+                        Ok(mut clipboard) => {
+                            match terminal_backend::Clipboard::write_text(&mut clipboard, &text) {
+                                Ok(()) => Event::ClipboardWritten { request, cut },
+                                Err(error) => Event::ClipboardFailed {
+                                    request,
+                                    message: editor_types::OutputMessage {
+                                        subsystem: "clipboard".to_owned(),
+                                        operation: "write".to_owned(),
+                                        level: editor_types::OutputLevel::Error,
+                                        message: error.to_string(),
+                                    },
+                                },
+                            }
+                        }
+                        Err(error) => Event::ClipboardFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "clipboard".to_owned(),
+                                operation: "connect".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+                return;
+            }
+            if let Effect::ClipboardRead { request } = effect.clone() {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let event = match terminal_backend::SystemClipboard::new() {
+                        Ok(mut clipboard) => {
+                            match terminal_backend::Clipboard::read_text(&mut clipboard) {
+                                Ok(text) => Event::ClipboardRead { request, text },
+                                Err(error) => Event::ClipboardFailed {
+                                    request,
+                                    message: editor_types::OutputMessage {
+                                        subsystem: "clipboard".to_owned(),
+                                        operation: "read".to_owned(),
+                                        level: editor_types::OutputLevel::Error,
+                                        message: error.to_string(),
+                                    },
+                                },
+                            }
+                        }
+                        Err(error) => Event::ClipboardFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "clipboard".to_owned(),
+                                operation: "connect".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+                return;
+            }
+            if let Effect::FormatDocument {
+                request,
+                text,
+                spec,
+                timeout_ms,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let event = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => {
+                            let snapshot = lsp_client::TextSnapshot::new(text.clone());
+                            let command = lsp_client::CommandSpec {
+                                executable: PathBuf::from(spec.executable),
+                                args: spec.arguments,
+                                environment: std::collections::BTreeMap::new(),
+                                current_dir: None,
+                            };
+                            let formatter = lsp_client::FormatterSpec {
+                                command,
+                                timeout: std::time::Duration::from_millis(timeout_ms),
+                            };
+                            match runtime.block_on(lsp_client::FormatterRunner::new().run(
+                                &snapshot,
+                                &formatter,
+                                &lsp_client::ProcessCancelToken::new(),
+                            )) {
+                                Ok(outcome) => Event::DocumentFormatted {
+                                    request,
+                                    replacement: outcome.replacement,
+                                },
+                                Err(error) => Event::DocumentFormatFailed {
+                                    request,
+                                    message: editor_types::OutputMessage {
+                                        subsystem: "formatter".to_owned(),
+                                        operation: "format".to_owned(),
+                                        level: editor_types::OutputLevel::Error,
+                                        message: error.to_string(),
+                                    },
+                                },
+                            }
+                        }
+                        Err(error) => Event::DocumentFormatFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "formatter".to_owned(),
+                                operation: "runtime".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+                return;
+            }
+            if let Effect::ApplyReplacementPlan { request, plan } = effect.clone() {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let event = match workspace_core::apply_replacement_plan(&plan) {
+                        Ok(report) => Event::ReplacementApplied { request, report },
+                        Err(error) => Event::ReplacementFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "replace".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        },
+                    };
                     let _ = sender.send(event);
                 });
                 return;
@@ -275,6 +452,126 @@ impl EffectDispatcher for ServiceDispatcher {
             } = effect
             {
                 let sender = self.sender.clone();
+                let shutdown = self.shutdown.clone();
+                if matches!(kind, super::effect::ExternalProcessKind::LanguageServer) {
+                    thread::spawn(move || {
+                        let event_sender = sender.clone();
+                        let shutdown = shutdown.clone();
+                        let result = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|error| error.to_string())
+                            .and_then(|runtime| {
+                                let event_sender = event_sender.clone();
+                                runtime.block_on(async move {
+                                    let command = lsp_client::CommandSpec {
+                                        executable: PathBuf::from(spec.executable),
+                                        args: spec.arguments,
+                                        environment: std::collections::BTreeMap::new(),
+                                        current_dir: None,
+                                    };
+                                    let client = lsp_client::LspClient::spawn(command)
+                                        .await
+                                        .map_err(|error| error.to_string())?;
+                                    client
+                                        .initialize(
+                                            lsp_client::protocol::InitializeParams::default(),
+                                        )
+                                        .await
+                                        .map_err(|error| error.to_string())?;
+                                    client
+                                        .initialized()
+                                        .await
+                                        .map_err(|error| error.to_string())?;
+                                    let mut events = client.subscribe();
+                                    let _ = event_sender.send(Event::EffectCompleted(request));
+                                    while !shutdown.load(Ordering::SeqCst) {
+                                        let Ok(event) = tokio::time::timeout(
+                                            std::time::Duration::from_millis(100),
+                                            events.recv(),
+                                        )
+                                        .await
+                                        .unwrap_or(Err(
+                                            tokio::sync::broadcast::error::RecvError::Closed,
+                                        )) else {
+                                            let _ = client.shutdown().await;
+                                            break;
+                                        };
+                                        match event {
+                                            lsp_client::ClientEvent::StderrLine(line) => {
+                                                let _ = event_sender.send(Event::Output(
+                                                    editor_types::OutputMessage {
+                                                        subsystem: "lsp".to_owned(),
+                                                        operation: "stderr".to_owned(),
+                                                        level: editor_types::OutputLevel::Warning,
+                                                        message: line,
+                                                    },
+                                                ));
+                                            }
+                                            lsp_client::ClientEvent::ProtocolError(message) => {
+                                                let _ = event_sender.send(Event::Output(
+                                                    editor_types::OutputMessage {
+                                                        subsystem: "lsp".to_owned(),
+                                                        operation: "protocol".to_owned(),
+                                                        level: editor_types::OutputLevel::Error,
+                                                        message,
+                                                    },
+                                                ));
+                                            }
+                                            lsp_client::ClientEvent::Crashed { message } => {
+                                                let _ = event_sender.send(Event::EffectFailed {
+                                                    request,
+                                                    message: editor_types::OutputMessage {
+                                                        subsystem: "lsp".to_owned(),
+                                                        operation: "crash".to_owned(),
+                                                        level: editor_types::OutputLevel::Error,
+                                                        message,
+                                                    },
+                                                });
+                                                break;
+                                            }
+                                            lsp_client::ClientEvent::Exited { status } => {
+                                                let _ = event_sender.send(Event::EffectFailed {
+                                                    request,
+                                                    message: editor_types::OutputMessage {
+                                                        subsystem: "lsp".to_owned(),
+                                                        operation: "exit".to_owned(),
+                                                        level: editor_types::OutputLevel::Error,
+                                                        message: format!(
+                                                            "language server exited with {status:?}"
+                                                        ),
+                                                    },
+                                                });
+                                                break;
+                                            }
+                                            lsp_client::ClientEvent::Diagnostics(params) => {
+                                                let _ =
+                                                    event_sender.send(Event::LanguageDiagnostics {
+                                                        request,
+                                                        params,
+                                                    });
+                                            }
+                                            lsp_client::ClientEvent::Notification { .. }
+                                            | lsp_client::ClientEvent::ServerRequest { .. } => {}
+                                        }
+                                    }
+                                    Ok::<(), String>(())
+                                })
+                            });
+                        if let Err(message) = result {
+                            let _ = sender.send(Event::EffectFailed {
+                                request,
+                                message: editor_types::OutputMessage {
+                                    subsystem: "lsp".to_owned(),
+                                    operation: "startup".to_owned(),
+                                    level: editor_types::OutputLevel::Error,
+                                    message,
+                                },
+                            });
+                        }
+                    });
+                    return;
+                }
                 thread::spawn(move || {
                     let result = Command::new(&spec.executable)
                         .args(&spec.arguments)
@@ -283,17 +580,6 @@ impl EffectDispatcher for ServiceDispatcher {
                         .stderr(Stdio::piped())
                         .spawn();
                     let event = match result {
-                        Ok(mut child)
-                            if matches!(
-                                kind,
-                                super::effect::ExternalProcessKind::LanguageServer
-                            ) =>
-                        {
-                            // Language servers are long-lived; leave the child attached to the
-                            // session and report successful startup without waiting for exit.
-                            let _ = child.stderr.take();
-                            Event::EffectCompleted(request)
-                        }
                         Ok(mut child) => match child.wait() {
                             Ok(status) if status.success() => Event::EffectCompleted(request),
                             Ok(status) => Event::EffectFailed {

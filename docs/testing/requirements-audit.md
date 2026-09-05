@@ -8,7 +8,11 @@ Implemented in the integration pass:
 
 - persistent root `TextBuffer` editing, smart input, undo/redo, dirty-quit protection, atomic save
   effects, and deterministic save/reopen tests;
-- application-data session snapshot/restore for all open tabs, active-tab selection, and unsaved contents;
+- application-data session snapshot/restore for all open tabs, active-tab selection, split layout,
+  tab order, multiple selections, missing-file recovery, and unsaved contents;
+- root clipboard copy/cut/paste effects (with cut-after-write safety), an authorized external
+  formatter effect, and recovery checkpoints after each action;
+- canonical-path trust-store loading and saving at process bootstrap;
 - bounded search result backpressure, native `notify` watcher abstraction, typed replacement-range
   validation, typed LSP serialization errors, and panic terminal cleanup;
 - root command palette plus Explorer/Output toggles;
@@ -18,20 +22,18 @@ Implemented in the integration pass:
 
 Still release-blocking or environment-blocked:
 
-1. Root orchestration does not yet connect every app-ui action to live LSP, syntax, workspace, and
-   Git service state; the domain crates and snapshots are covered in isolation.
-2. Root session persistence now restores all open tabs and active-tab selection; split-pane layout
-   restoration and continuous recovery checkpoints are not yet wired.
-3. Format-on-save/paste, system clipboard commands, mouse selection, project replace, and full
-   Problems/Git/LSP views remain UI-service integration work rather than root effects (mouse
-   selection and basic Git/LSP restart/status adapters are now covered).
-4. Search and native watcher workers use standard threads; the architecture target is Tokio-based
+1. Root orchestration still does not connect every app-ui action to live syntax, workspace search,
+   project replace, Git mutations, or the complete LSP request/result model; diagnostics and LSP
+   lifecycle status now have a root event path, but completion/hover/rename/etc. are not wired.
+2. Format-on-save/paste, Save As/close, and full Problems/Git/LSP views remain UI-service
+   integration work. Manual formatting and clipboard commands are now root effects.
+3. Search and native watcher workers use standard threads; the architecture target is Tokio-based
    orchestration.
-5. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
+4. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated
    open/close measurements because this environment cannot provide an interactive Windows Terminal.
    `docs/testing/final-smoke.md` records the same limitation. The master requirement requires user
    approval before treating those missing measurements as an exception.
-6. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
+5. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
    been compiled; the release binary and staging package script are verified.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked

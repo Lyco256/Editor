@@ -22,6 +22,38 @@ pub enum Event {
         request: RequestId,
         entries: Vec<ExplorerEntryData>,
     },
+    ClipboardWritten {
+        request: RequestId,
+        cut: bool,
+    },
+    ClipboardRead {
+        request: RequestId,
+        text: String,
+    },
+    ClipboardFailed {
+        request: RequestId,
+        message: OutputMessage,
+    },
+    DocumentFormatted {
+        request: RequestId,
+        replacement: String,
+    },
+    DocumentFormatFailed {
+        request: RequestId,
+        message: OutputMessage,
+    },
+    LanguageDiagnostics {
+        request: RequestId,
+        params: lsp_client::protocol::PublishDiagnosticsParams,
+    },
+    ReplacementApplied {
+        request: RequestId,
+        report: workspace_core::ReplacementReport,
+    },
+    ReplacementFailed {
+        request: RequestId,
+        message: OutputMessage,
+    },
     EffectCompleted(RequestId),
     EffectFailed {
         request: RequestId,

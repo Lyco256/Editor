@@ -13,15 +13,21 @@ use editor_types::{
     Modifier, MouseAction, MouseButton, OutputLevel, OutputMessage, RequestId,
 };
 
-use super::{action::Action, effect::Effect, event::Event};
+use super::{
+    action::Action,
+    effect::{Effect, ProcessSpec},
+    event::Event,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
     pub running: bool,
     pub workspace_trusted: bool,
+    pub(crate) trust_store: workspace_core::TrustStore,
     pub frame_number: u64,
     pub language_server: LanguageServerStatus,
     pub git_status: Option<GitStatusSummary>,
+    pub diagnostics: Vec<editor_types::Diagnostic>,
     pub output: Vec<OutputMessage>,
     pub active_path: Option<PathBuf>,
     pub workspace_roots: Vec<PathBuf>,
@@ -34,7 +40,13 @@ pub struct AppState {
     pub(crate) palette: CommandPaletteState,
     pub(crate) tabs: Vec<TabState>,
     pub(crate) active_tab: usize,
+    pub(crate) split_axis: Option<app_ui::shell::SplitAxis>,
+    pub(crate) split_ratio_percent: u16,
+    pub(crate) split_secondary_tab: Option<usize>,
     pending_processes: HashMap<RequestId, super::effect::ExternalProcessKind>,
+    pending_clipboard: HashMap<RequestId, PendingClipboard>,
+    pending_format: HashMap<RequestId, u64>,
+    pub(crate) external_formatter: Option<ProcessSpec>,
     latest_explorer_request: Option<RequestId>,
     mouse_anchor: Option<CharacterOffset>,
     /// Persistent editor buffer backing the active document. The public text fields remain a
@@ -56,14 +68,27 @@ pub struct TabState {
     pub buffer: TextBuffer,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingClipboard {
+    Cut {
+        range: editor_types::TextRange,
+        expected: String,
+    },
+    Paste {
+        range: editor_types::TextRange,
+    },
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
             running: true,
             workspace_trusted: false,
+            trust_store: workspace_core::TrustStore::default(),
             frame_number: 0,
             language_server: LanguageServerStatus::Stopped,
             git_status: None,
+            diagnostics: Vec::new(),
             output: Vec::new(),
             active_path: None,
             workspace_roots: Vec::new(),
@@ -77,6 +102,13 @@ impl Default for AppState {
                 CommandEntry::available("editor.save", "Save"),
                 CommandEntry::available("editor.undo", "Undo"),
                 CommandEntry::available("editor.redo", "Redo"),
+                CommandEntry::available("editor.copy", "Copy"),
+                CommandEntry::available("editor.cut", "Cut"),
+                CommandEntry::available("editor.paste", "Paste"),
+                CommandEntry::available("editor.format", "Format Document"),
+                CommandEntry::available("workbench.splitVertical", "Split Editor Vertical"),
+                CommandEntry::available("workbench.splitHorizontal", "Split Editor Horizontal"),
+                CommandEntry::available("workbench.closeSplit", "Close Editor Split"),
                 CommandEntry::available("editor.quit", "Quit"),
                 CommandEntry::available("git.refresh", "Refresh Git Status"),
             ]),
@@ -85,7 +117,13 @@ impl Default for AppState {
                 buffer: TextBuffer::default(),
             }],
             active_tab: 0,
+            split_axis: None,
+            split_ratio_percent: 50,
+            split_secondary_tab: None,
             pending_processes: HashMap::new(),
+            pending_clipboard: HashMap::new(),
+            pending_format: HashMap::new(),
+            external_formatter: None,
             latest_explorer_request: None,
             mouse_anchor: None,
             buffer: TextBuffer::default(),
@@ -156,6 +194,32 @@ impl AppState {
                 ..Transition::default()
             },
         }
+    }
+
+    /// Replaces the active document's selection set through the authoritative root state path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the editor-core validation error when a selection is outside the document.
+    pub fn set_active_selections(
+        &mut self,
+        selections: editor_core::SelectionSet,
+    ) -> Result<(), editor_core::EditorError> {
+        self.buffer.set_selections(selections)?;
+        self.sync_buffer_projection();
+        Ok(())
+    }
+
+    /// Configures the already-authorized external formatter fallback used by `editor.format`.
+    /// The caller must still trust-gate execution through the root policy.
+    pub fn set_external_formatter(&mut self, spec: Option<ProcessSpec>) {
+        self.external_formatter = spec;
+    }
+
+    /// Installs the persisted trust store before startup paths are opened.
+    pub fn set_trust_store(&mut self, store: workspace_core::TrustStore) {
+        self.trust_store = store;
+        self.refresh_workspace_trust();
     }
 
     /// Routes language-panel actions to root effects. Language servers are discovered only after
@@ -334,9 +398,27 @@ impl AppState {
             workspace_roots: self.workspace_roots.clone(),
             editors,
             tab_order,
-            split_layout: config_core::SplitLayout::Editor {
-                editor_id: format!("tab-{}", self.active_tab),
-            },
+            split_layout: self.split_axis.map_or_else(
+                || config_core::SplitLayout::Editor {
+                    editor_id: format!("tab-{}", self.active_tab),
+                },
+                |axis| config_core::SplitLayout::Split {
+                    axis: match axis {
+                        app_ui::shell::SplitAxis::Horizontal => config_core::SplitAxis::Horizontal,
+                        app_ui::shell::SplitAxis::Vertical => config_core::SplitAxis::Vertical,
+                    },
+                    ratio: f32::from(self.split_ratio_percent) / 100.0,
+                    first: Box::new(config_core::SplitLayout::Editor {
+                        editor_id: format!("tab-{}", self.active_tab),
+                    }),
+                    second: Box::new(config_core::SplitLayout::Editor {
+                        editor_id: format!(
+                            "tab-{}",
+                            self.split_secondary_tab.unwrap_or(self.active_tab)
+                        ),
+                    }),
+                },
+            ),
             active_editor: Some(format!("tab-{}", self.active_tab)),
             ..config_core::SessionState::default()
         }
@@ -344,21 +426,42 @@ impl AppState {
 
     /// Restores every editor tab from a previously persisted session. Missing files are skipped
     /// safely while unsaved text remains available from the recovery record.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::single_match_else,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub fn restore_session(&mut self, session: &config_core::SessionState) {
         self.workspace_roots.clone_from(&session.workspace_roots);
         if session.editors.is_empty() {
             return;
         }
         self.tabs.clear();
-        for editor in &session.editors {
+        let ordered_editors = if session.tab_order.is_empty() {
+            session.editors.iter().collect::<Vec<_>>()
+        } else {
+            session
+                .tab_order
+                .iter()
+                .filter_map(|id| {
+                    session
+                        .editors
+                        .iter()
+                        .find(|editor| &editor.editor_id == id)
+                })
+                .collect::<Vec<_>>()
+        };
+        for editor in &ordered_editors {
+            let editor = *editor;
             let (path, disk_text) = if let Some(path) = &editor.original_path {
-                let Ok(document) = workspace_core::load_text_document(
+                match workspace_core::load_text_document(
                     path,
                     &workspace_core::DocumentLoadOptions::default(),
-                ) else {
-                    continue;
-                };
-                (Some(path.clone()), document.text)
+                ) {
+                    Ok(document) => (Some(path.clone()), document.text),
+                    Err(_) => (Some(path.clone()), String::new()),
+                }
             } else {
                 (None, String::new())
             };
@@ -367,7 +470,30 @@ impl AppState {
             if editor.dirty {
                 buffer.mark_recovered_dirty();
             }
-            if let Ok(position) = buffer.position_to_offset(LogicalPosition {
+            let selections = editor
+                .selections
+                .iter()
+                .filter_map(|selection| {
+                    let anchor = buffer
+                        .position_to_offset(LogicalPosition {
+                            line: selection.anchor.line,
+                            character: selection.anchor.character,
+                        })
+                        .ok()?;
+                    let active = buffer
+                        .position_to_offset(LogicalPosition {
+                            line: selection.active.line,
+                            character: selection.active.character,
+                        })
+                        .ok()?;
+                    Some(editor_core::Selection::new(anchor, active))
+                })
+                .collect::<Vec<_>>();
+            if !selections.is_empty() {
+                if let Ok(selection_set) = editor_core::SelectionSet::new(selections, 0) {
+                    let _ = buffer.set_selections(selection_set);
+                }
+            } else if let Ok(position) = buffer.position_to_offset(LogicalPosition {
                 line: editor.cursor.line,
                 character: editor.cursor.character,
             }) {
@@ -384,13 +510,54 @@ impl AppState {
             .active_editor
             .as_ref()
             .and_then(|active| {
-                session
-                    .editors
+                ordered_editors
                     .iter()
                     .position(|editor| &editor.editor_id == active)
             })
             .unwrap_or(0)
             .min(self.tabs.len().saturating_sub(1));
+        self.split_axis = match &session.split_layout {
+            config_core::SplitLayout::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let first_id = match first.as_ref() {
+                    config_core::SplitLayout::Editor { editor_id } => Some(editor_id.as_str()),
+                    _ => None,
+                };
+                let second_id = match second.as_ref() {
+                    config_core::SplitLayout::Editor { editor_id } => Some(editor_id.as_str()),
+                    _ => None,
+                };
+                let first_index = first_id.and_then(|id| {
+                    ordered_editors
+                        .iter()
+                        .position(|editor| editor.editor_id == id)
+                });
+                let second_index = second_id.and_then(|id| {
+                    ordered_editors
+                        .iter()
+                        .position(|editor| editor.editor_id == id)
+                });
+                self.split_secondary_tab = second_index;
+                if first_index.is_some() && second_index.is_some() {
+                    self.split_ratio_percent = (*ratio * 100.0).round().clamp(10.0, 90.0) as u16;
+                    Some(match axis {
+                        config_core::SplitAxis::Horizontal => app_ui::shell::SplitAxis::Horizontal,
+                        config_core::SplitAxis::Vertical => app_ui::shell::SplitAxis::Vertical,
+                    })
+                } else {
+                    self.split_secondary_tab = None;
+                    None
+                }
+            }
+            _ => {
+                self.split_secondary_tab = None;
+                None
+            }
+        };
         let active = self.tabs[self.active_tab].clone();
         self.active_path = active.path;
         self.buffer = active.buffer;
@@ -413,6 +580,7 @@ impl AppState {
             }];
             self.active_tab = 0;
             self.workspace_roots = self.active_path.iter().cloned().collect();
+            self.refresh_workspace_trust();
             self.refresh_explorer_entries();
             self.active_text.clear();
             self.active_dirty = false;
@@ -436,6 +604,7 @@ impl AppState {
                     .and_then(|path| path.parent())
                     .map(|path| vec![path.to_path_buf()])
                     .unwrap_or_default();
+                self.refresh_workspace_trust();
                 self.refresh_explorer_entries();
                 self.active_text = document.text;
                 self.active_dirty = false;
@@ -506,6 +675,15 @@ impl AppState {
             tab.buffer = self.buffer.clone();
         }
     }
+
+    fn refresh_workspace_trust(&mut self) {
+        if let Some(root) = self.workspace_roots.first() {
+            self.workspace_trusted = self
+                .trust_store
+                .state_for_path(root)
+                .allows_external_processes();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -517,7 +695,7 @@ pub struct Transition {
 
 impl AppState {
     #[must_use]
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::needless_return)]
     pub fn apply_action(&mut self, action: Action) -> Transition {
         match action {
             Action::Quit => {
@@ -539,6 +717,16 @@ impl AppState {
             }
             Action::SetWorkspaceTrust(trusted) => {
                 self.workspace_trusted = trusted;
+                if let Some(root) = self.workspace_roots.first() {
+                    self.trust_store.set_state(
+                        root,
+                        if trusted {
+                            workspace_core::TrustState::Trusted
+                        } else {
+                            workspace_core::TrustState::Untrusted
+                        },
+                    );
+                }
                 if trusted {
                     if let Some(path) = self.active_path.as_ref().filter(|path| path.is_file()) {
                         if let Some(language) = syntax_engine::SyntaxLanguage::from_path(path) {
@@ -598,6 +786,39 @@ impl AppState {
                     ..Transition::default()
                 }
             }
+            Action::SplitPane {
+                axis,
+                ratio_percent,
+            } => {
+                self.split_axis = Some(axis);
+                self.split_ratio_percent = ratio_percent.clamp(10, 90);
+                self.split_secondary_tab = Some(
+                    self.split_secondary_tab
+                        .unwrap_or(self.active_tab)
+                        .min(self.tabs.len().saturating_sub(1)),
+                );
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::CloseSplit => {
+                self.split_axis = None;
+                self.split_secondary_tab = None;
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::SetSplitRatio(ratio_percent) => {
+                if self.split_axis.is_some() {
+                    self.split_ratio_percent = ratio_percent.clamp(10, 90);
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
             Action::AddWorkspaceRoot(path) => {
                 if path.is_dir() {
                     if !self.workspace_roots.iter().any(|root| root == &path) {
@@ -617,6 +838,14 @@ impl AppState {
                     ..Transition::default()
                 }
             }
+            Action::ApplyReplacementPlan(plan) => Transition {
+                effects: vec![Effect::ApplyReplacementPlan {
+                    request: RequestId(self.frame_number.saturating_add(1)),
+                    plan,
+                }],
+                render: true,
+                ..Transition::default()
+            },
             Action::RequestEffect(effect)
                 if effect.requires_trusted_workspace() && !self.workspace_trusted =>
             {
@@ -627,6 +856,10 @@ impl AppState {
                     }
                     Effect::SaveDocument { .. }
                     | Effect::RefreshExplorer { .. }
+                    | Effect::ClipboardWrite { .. }
+                    | Effect::ClipboardRead { .. }
+                    | Effect::FormatDocument { .. }
+                    | Effect::ApplyReplacementPlan { .. }
                     | Effect::Render => {
                         unreachable!("unguarded effect")
                     }
@@ -648,12 +881,35 @@ impl AppState {
                     }
                     Effect::SaveDocument { .. }
                     | Effect::RefreshExplorer { .. }
+                    | Effect::ClipboardWrite { .. }
+                    | Effect::ClipboardRead { .. }
+                    | Effect::FormatDocument { .. }
+                    | Effect::ApplyReplacementPlan { .. }
                     | Effect::Render => {}
                 }
                 Transition {
                     effects: vec![effect],
                     ..Transition::default()
                 }
+            }
+            Action::Input(InputEvent::Key(key))
+                if key.modifiers.contains(Modifier::Control)
+                    && matches!(key.code, KeyCode::Character('c' | 'x' | 'v'))
+                    && (!self.buffer.selections().primary().is_cursor()
+                        || matches!(key.code, KeyCode::Character('x' | 'v'))) =>
+            {
+                let command = match key.code {
+                    KeyCode::Character('c') => "editor.copy",
+                    KeyCode::Character('x') => "editor.cut",
+                    KeyCode::Character('v') => "editor.paste",
+                    _ => unreachable!("clipboard shortcut guard"),
+                };
+                let effect = self.apply_command(command);
+                return Transition {
+                    effects: effect.into_iter().collect(),
+                    render: true,
+                    ..Transition::default()
+                };
             }
             Action::Input(InputEvent::Key(key))
                 if matches!(key.code, KeyCode::Character('c' | 'q'))
@@ -693,7 +949,11 @@ impl AppState {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     fn apply_input(&mut self, input: InputEvent) {
         if let InputEvent::Key(ref key) = input {
             if key.code == KeyCode::Character('p') && key.modifiers.contains(Modifier::Control) {
@@ -737,6 +997,7 @@ impl AppState {
                 return;
             }
         }
+        let before_version = self.buffer.snapshot().version();
         let result = match input {
             InputEvent::Paste(text) => self
                 .buffer
@@ -784,6 +1045,38 @@ impl AppState {
                 _ => Ok(()),
             },
             InputEvent::Mouse(mouse) => {
+                if mouse.position.row == 0
+                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
+                {
+                    let index = usize::from(mouse.position.column / 20);
+                    self.switch_tab(index);
+                    return;
+                }
+                if matches!(mouse.action, MouseAction::Drag(MouseButton::Left)) {
+                    if let Some(axis) = self.split_axis {
+                        let (coordinate, total) = match axis {
+                            app_ui::shell::SplitAxis::Vertical => (
+                                mouse
+                                    .position
+                                    .column
+                                    .saturating_sub(if self.explorer_visible { 25 } else { 1 }),
+                                80_u16.saturating_sub(if self.explorer_visible { 25 } else { 1 }),
+                            ),
+                            app_ui::shell::SplitAxis::Horizontal => {
+                                (mouse.position.row.saturating_sub(1), 23)
+                            }
+                        };
+                        if total > 0 {
+                            self.split_ratio_percent = (u32::from(coordinate)
+                                .saturating_mul(100)
+                                .checked_div(u32::from(total))
+                                .unwrap_or(50)
+                                .clamp(10, 90))
+                                as u16;
+                            return;
+                        }
+                    }
+                }
                 if let Some(offset) = self.mouse_offset(mouse.position.row, mouse.position.column) {
                     match mouse.action {
                         MouseAction::Down(MouseButton::Left) => {
@@ -818,6 +1111,9 @@ impl AppState {
                 message: error.to_string(),
             });
         }
+        if self.buffer.snapshot().version() != before_version {
+            self.diagnostics.clear();
+        }
         self.sync_buffer_projection();
     }
 
@@ -842,6 +1138,7 @@ impl AppState {
         self.buffer.apply_transaction(transaction).map(|_| ())
     }
 
+    #[allow(clippy::too_many_lines, clippy::needless_return)]
     fn apply_command(&mut self, command: &str) -> Option<Effect> {
         match command {
             "editor.undo" => {
@@ -866,6 +1163,92 @@ impl AppState {
                 });
             }
             "editor.save" => {}
+            "editor.copy" | "editor.cut" => {
+                let selection = self.buffer.selections().primary();
+                let range = selection.range();
+                if selection.is_cursor() {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: command.to_owned(),
+                        level: OutputLevel::Information,
+                        message: "no selection to copy".to_owned(),
+                    });
+                } else if let Ok(text) = self.buffer.snapshot().text_in_range(range) {
+                    let cut = command == "editor.cut";
+                    let request = self.next_clipboard_request();
+                    if cut {
+                        self.pending_clipboard.insert(
+                            request,
+                            PendingClipboard::Cut {
+                                range,
+                                expected: text.to_owned(),
+                            },
+                        );
+                    }
+                    return Some(Effect::ClipboardWrite {
+                        request,
+                        text: text.to_owned(),
+                        cut,
+                    });
+                }
+            }
+            "editor.paste" => {
+                let request = self.next_clipboard_request();
+                self.pending_clipboard.insert(
+                    request,
+                    PendingClipboard::Paste {
+                        range: self.buffer.selections().primary().range(),
+                    },
+                );
+                return Some(Effect::ClipboardRead { request });
+            }
+            "editor.format" => {
+                if !self.workspace_trusted {
+                    self.output.push(OutputMessage {
+                        subsystem: "workspace-trust".to_owned(),
+                        operation: "format".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: "trust the workspace before running an external formatter"
+                            .to_owned(),
+                    });
+                    self.sync_buffer_projection();
+                    return None;
+                }
+                let Some(spec) = self.external_formatter.clone() else {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "format".to_owned(),
+                        level: OutputLevel::Information,
+                        message: "no language-server or external formatter is configured"
+                            .to_owned(),
+                    });
+                    self.sync_buffer_projection();
+                    return None;
+                };
+                let request = RequestId(self.frame_number.saturating_add(1));
+                let version = self.buffer.snapshot().version();
+                self.pending_format.insert(request, version);
+                return Some(Effect::FormatDocument {
+                    request,
+                    text: self.active_text.clone(),
+                    spec,
+                    timeout_ms: 5_000,
+                });
+            }
+            "workbench.splitVertical" => {
+                self.split_axis = Some(app_ui::shell::SplitAxis::Vertical);
+                self.split_ratio_percent = 50;
+                self.split_secondary_tab = Some(self.active_tab);
+            }
+            "workbench.splitHorizontal" => {
+                self.split_axis = Some(app_ui::shell::SplitAxis::Horizontal);
+                self.split_ratio_percent = 50;
+                self.split_secondary_tab = Some(self.active_tab);
+            }
+            "workbench.closeSplit" => {
+                self.split_axis = None;
+                self.split_secondary_tab = None;
+            }
             "git.refresh" if self.workspace_trusted => {
                 if let Some(root) = self.workspace_roots.first().cloned() {
                     let request = RequestId(self.frame_number.saturating_add(1));
@@ -897,6 +1280,14 @@ impl AppState {
         self.active_text = self.buffer.to_string();
         self.active_dirty = self.buffer.is_dirty();
         self.sync_active_tab();
+    }
+
+    fn next_clipboard_request(&self) -> RequestId {
+        RequestId(
+            self.frame_number
+                .saturating_add(1)
+                .saturating_add(self.pending_clipboard.len() as u64),
+        )
     }
 
     fn refresh_explorer_entries(&mut self) {
@@ -970,6 +1361,7 @@ impl AppState {
             .ok()
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn apply_event(&mut self, event: Event) {
         match event {
             Event::DocumentSaved { path } => {
@@ -1008,6 +1400,147 @@ impl AppState {
                     .collect();
             }
             Event::ExplorerUpdated { .. } => {}
+            Event::ClipboardWritten { request, cut } => {
+                if cut {
+                    if let Some(PendingClipboard::Cut { range, expected }) =
+                        self.pending_clipboard.remove(&request)
+                    {
+                        let current = self
+                            .buffer
+                            .snapshot()
+                            .text_in_range(range)
+                            .ok()
+                            .map(str::to_owned);
+                        if current.as_deref() == Some(expected.as_str()) {
+                            if let Ok(transaction) =
+                                editor_core::Transaction::new(vec![editor_core::Edit::delete(
+                                    range,
+                                )])
+                            {
+                                let _ = self.buffer.apply_transaction(transaction);
+                                self.sync_buffer_projection();
+                            }
+                        } else {
+                            self.output.push(OutputMessage {
+                                subsystem: "editor".to_owned(),
+                                operation: "cut".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "selection changed before clipboard write completed"
+                                    .to_owned(),
+                            });
+                        }
+                    }
+                }
+            }
+            Event::ClipboardRead { request, text } => {
+                if let Some(PendingClipboard::Paste { range }) =
+                    self.pending_clipboard.remove(&request)
+                {
+                    if let Ok(transaction) =
+                        editor_core::Transaction::new(vec![editor_core::Edit::replace(
+                            range, &text,
+                        )])
+                    {
+                        if self.buffer.apply_transaction(transaction).is_ok() {
+                            self.sync_buffer_projection();
+                        }
+                    }
+                }
+            }
+            Event::ClipboardFailed { request, message } => {
+                self.pending_clipboard.remove(&request);
+                self.output.push(message);
+            }
+            Event::DocumentFormatted {
+                request,
+                replacement,
+            } => {
+                let Some(version) = self.pending_format.remove(&request) else {
+                    return;
+                };
+                if self.buffer.snapshot().version() != version {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "format".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: "discarded stale formatter result".to_owned(),
+                    });
+                    return;
+                }
+                let range = editor_types::TextRange {
+                    start: editor_types::CharacterOffset(0),
+                    end: editor_types::CharacterOffset(self.buffer.len_chars()),
+                };
+                if let Ok(transaction) =
+                    editor_core::Transaction::new(vec![editor_core::Edit::replace(
+                        range,
+                        &replacement,
+                    )])
+                {
+                    if self.buffer.apply_transaction(transaction).is_ok() {
+                        self.sync_buffer_projection();
+                    }
+                }
+            }
+            Event::DocumentFormatFailed { request, message } => {
+                self.pending_format.remove(&request);
+                self.output.push(message);
+            }
+            Event::LanguageDiagnostics { params, .. } => {
+                let snapshot = self.buffer.snapshot();
+                let mut diagnostics = Vec::new();
+                for diagnostic in params.diagnostics {
+                    let Ok(start) = lsp_client::protocol::lsp_position_to_editor(
+                        snapshot.text(),
+                        diagnostic.range.start,
+                        lsp_client::protocol::PositionEncoding::Utf16,
+                    ) else {
+                        continue;
+                    };
+                    let Ok(end) = lsp_client::protocol::lsp_position_to_editor(
+                        snapshot.text(),
+                        diagnostic.range.end,
+                        lsp_client::protocol::PositionEncoding::Utf16,
+                    ) else {
+                        continue;
+                    };
+                    let severity = match diagnostic.severity.unwrap_or(1) {
+                        1 => editor_types::DiagnosticSeverity::Error,
+                        2 => editor_types::DiagnosticSeverity::Warning,
+                        3 => editor_types::DiagnosticSeverity::Information,
+                        _ => editor_types::DiagnosticSeverity::Hint,
+                    };
+                    if let (Ok(start), Ok(end)) = (
+                        self.buffer.position_to_offset(start),
+                        self.buffer.position_to_offset(end),
+                    ) {
+                        diagnostics.push(editor_types::Diagnostic {
+                            document: editor_types::DocumentId(0),
+                            range: editor_types::TextRange { start, end },
+                            severity,
+                            message: diagnostic.message,
+                            source: None,
+                            version: params
+                                .version
+                                .and_then(|version| u64::try_from(version).ok()),
+                        });
+                    }
+                }
+                self.diagnostics = diagnostics;
+            }
+            Event::ReplacementApplied { report, .. } => {
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "replace".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!(
+                        "replaced {} file(s); {} file(s) failed",
+                        report.modified_files.len(),
+                        report.failed_files.len()
+                    ),
+                });
+            }
+            Event::ReplacementFailed { message, .. } => self.output.push(message),
             Event::ExternalProcessBlocked { kind, .. } => {
                 if matches!(kind, super::effect::ExternalProcessKind::LanguageServer) {
                     self.language_server = LanguageServerStatus::DisabledByPolicy;
@@ -1050,6 +1583,7 @@ mod tests {
     use crate::app::{
         action::Action,
         effect::{Effect, ExternalProcessKind, ProcessSpec},
+        event::Event,
     };
     use editor_core::TextBuffer;
 
@@ -1226,5 +1760,113 @@ mod tests {
             transition.effects.first(),
             Some(Effect::RefreshGitStatus { .. })
         ));
+    }
+
+    #[test]
+    fn cut_deletes_only_after_clipboard_write_succeeds() {
+        use editor_core::{CharacterOffset, Selection, SelectionSet};
+        let mut state = AppState {
+            buffer: TextBuffer::new("hello"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        state
+            .set_active_selections(SelectionSet::single(Selection::new(
+                CharacterOffset(0),
+                CharacterOffset(5),
+            )))
+            .expect("selection");
+        let transition =
+            state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.cut")));
+        let Effect::ClipboardWrite {
+            request, cut: true, ..
+        } = transition.effects[0].clone()
+        else {
+            panic!("cut should request a clipboard write");
+        };
+        assert_eq!(state.active_text, "hello");
+        state.apply_event(Event::ClipboardWritten { request, cut: true });
+        assert_eq!(state.active_text, "");
+    }
+
+    #[test]
+    fn paste_is_applied_as_one_transaction_after_clipboard_read() {
+        let mut state = AppState::default();
+        let transition =
+            state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.paste")));
+        let Effect::ClipboardRead { request } = transition.effects[0].clone() else {
+            panic!("paste should request a clipboard read");
+        };
+        state.apply_event(Event::ClipboardRead {
+            request,
+            text: "typed".to_owned(),
+        });
+        assert_eq!(state.active_text, "typed");
+        let _ = state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.undo")));
+        assert_eq!(state.active_text, "");
+    }
+
+    #[test]
+    fn format_effect_is_trust_gated_and_result_is_one_undoable_transaction() {
+        let mut state = AppState {
+            buffer: TextBuffer::new("before"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        state.set_external_formatter(Some(ProcessSpec {
+            executable: "formatter".to_owned(),
+            arguments: Vec::new(),
+        }));
+        let blocked = state.apply_action(Action::Invoke(editor_types::CommandId::new(
+            "editor.format",
+        )));
+        assert!(blocked.effects.is_empty());
+        let _ = state.apply_action(Action::SetWorkspaceTrust(true));
+        let transition = state.apply_action(Action::Invoke(editor_types::CommandId::new(
+            "editor.format",
+        )));
+        let Effect::FormatDocument { request, .. } = transition.effects[0].clone() else {
+            panic!("format should dispatch the configured formatter");
+        };
+        state.apply_event(Event::DocumentFormatted {
+            request,
+            replacement: "after".to_owned(),
+        });
+        assert_eq!(state.active_text, "after");
+        let _ = state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.undo")));
+        assert_eq!(state.active_text, "before");
+    }
+
+    #[test]
+    fn lsp_diagnostics_are_converted_to_root_ranges() {
+        let mut state = AppState {
+            buffer: TextBuffer::new("diagnostic\n"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        state.apply_event(Event::LanguageDiagnostics {
+            request: RequestId(1),
+            params: lsp_client::protocol::PublishDiagnosticsParams {
+                uri: lsp_client::protocol::DocumentUri("file:///test.rs".to_owned()),
+                diagnostics: vec![lsp_client::protocol::Diagnostic {
+                    range: lsp_client::protocol::Range {
+                        start: lsp_client::protocol::Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: lsp_client::protocol::Position {
+                            line: 0,
+                            character: 4,
+                        },
+                    },
+                    severity: Some(1),
+                    code: None,
+                    message: "error".to_owned(),
+                }],
+                version: Some(1),
+            },
+        });
+        assert_eq!(state.diagnostics.len(), 1);
+        assert_eq!(state.diagnostics[0].range.end.0, 4);
     }
 }

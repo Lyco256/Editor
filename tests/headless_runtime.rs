@@ -244,3 +244,134 @@ fn multiple_tabs_and_active_tab_survive_session_restore() {
     assert_eq!(restored.active_tab_index(), 1);
     assert_eq!(restored.active_text, "!two");
 }
+
+#[test]
+fn split_layout_and_multiple_selections_survive_session_restore() {
+    use editor_core::{CharacterOffset, Selection, SelectionSet};
+
+    let directory = tempfile::tempdir().expect("workspace");
+    let first = directory.path().join("first.txt");
+    let second = directory.path().join("second.txt");
+    std::fs::write(&first, "one two").expect("first");
+    std::fs::write(&second, "three four").expect("second");
+    let mut state = editor::app::state::AppState::default();
+    state.open_startup_path(&first);
+    state.open_tab(&second).expect("open second tab");
+    state
+        .set_active_selections(
+            SelectionSet::new(
+                vec![
+                    Selection::new(CharacterOffset(0), CharacterOffset(5)),
+                    Selection::new(CharacterOffset(6), CharacterOffset(10)),
+                ],
+                1,
+            )
+            .expect("valid selections"),
+        )
+        .expect("set selections");
+    let _ = state.apply_action(Action::SplitPane {
+        axis: app_ui::shell::SplitAxis::Vertical,
+        ratio_percent: 60,
+    });
+
+    let session = state.session_state();
+    assert!(matches!(
+        session.split_layout,
+        config_core::SplitLayout::Split { .. }
+    ));
+    assert_eq!(session.editors[1].selections.len(), 2);
+
+    let mut restored = editor::app::state::AppState::default();
+    restored.restore_session(&session);
+    let restored_session = restored.session_state();
+    assert!(matches!(
+        restored_session.split_layout,
+        config_core::SplitLayout::Split {
+            axis: config_core::SplitAxis::Vertical,
+            ..
+        }
+    ));
+    assert_eq!(restored_session.editors[1].selections.len(), 2);
+}
+
+#[test]
+fn missing_original_file_keeps_recovered_unsaved_text() {
+    let missing = std::env::temp_dir().join("editor-recovery-missing-file.txt");
+    let session = config_core::SessionState {
+        editors: vec![config_core::EditorSession {
+            editor_id: "tab-0".to_owned(),
+            original_path: Some(missing),
+            unsaved_text: Some("recovered".to_owned()),
+            dirty: true,
+            ..config_core::EditorSession::default()
+        }],
+        tab_order: vec!["tab-0".to_owned()],
+        active_editor: Some("tab-0".to_owned()),
+        ..config_core::SessionState::default()
+    };
+    let mut restored = editor::app::state::AppState::default();
+    restored.restore_session(&session);
+    assert_eq!(restored.active_text, "recovered");
+    assert!(restored.active_dirty);
+}
+
+#[test]
+fn recovery_checkpoint_is_written_after_an_edit() {
+    use editor_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+    let app_data = tempfile::tempdir().expect("application data");
+    let store = config_core::RecoveryStore::from_app_data_base(app_data.path(), "Editor")
+        .expect("recovery store");
+    let input = Action::Input(InputEvent::Key(KeyEvent {
+        code: KeyCode::Character('x'),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    }));
+    let runtime = AppRuntime::with_recovery_store(
+        FakeTerminal::default(),
+        QueueActionSource::new([input]),
+        RecordingDispatcher::default(),
+        (80, 24),
+        editor::app::state::AppState::default(),
+        store.clone(),
+    );
+    let final_state = runtime.run().expect("checkpoint runtime");
+    assert_eq!(final_state.active_text, "x");
+    let loaded = store.load_latest().expect("load checkpoint");
+    assert_eq!(
+        loaded.session.expect("session").editors[0]
+            .unsaved_text
+            .as_deref(),
+        Some("x")
+    );
+}
+
+#[test]
+fn project_replacement_plan_runs_as_a_background_effect() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let path = directory.path().join("replace.txt");
+    std::fs::write(&path, "old old").expect("seed");
+    let plan = workspace_core::ReplacementPlan {
+        files: vec![workspace_core::search::FileReplacementPlan {
+            path: path.clone(),
+            edits: vec![
+                workspace_core::ReplacementEdit {
+                    range: 4..7,
+                    replacement: "new".to_owned(),
+                },
+                workspace_core::ReplacementEdit {
+                    range: 0..3,
+                    replacement: "new".to_owned(),
+                },
+            ],
+        }],
+    };
+    let mut state = editor::app::state::AppState::default();
+    let transition = state.apply_action(Action::ApplyReplacementPlan(plan));
+    let Effect::ApplyReplacementPlan { request, plan } = transition.effects[0].clone() else {
+        panic!("replacement should dispatch a typed effect");
+    };
+    let report = workspace_core::apply_replacement_plan(&plan).expect("replace");
+    state.apply_event(Event::ReplacementApplied { request, report });
+    assert_eq!(std::fs::read_to_string(path).expect("read"), "new new");
+}

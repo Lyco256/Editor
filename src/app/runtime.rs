@@ -53,6 +53,7 @@ pub struct AppRuntime<T, I, D> {
     dispatcher: D,
     state: AppState,
     size: (u16, u16),
+    recovery: Option<config_core::RecoveryStore>,
 }
 
 impl<T, I, D> AppRuntime<T, I, D>
@@ -80,6 +81,26 @@ where
             dispatcher,
             state,
             size,
+            recovery: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_recovery_store(
+        terminal: T,
+        input: I,
+        dispatcher: D,
+        size: (u16, u16),
+        state: AppState,
+        recovery: config_core::RecoveryStore,
+    ) -> Self {
+        Self {
+            terminal,
+            input,
+            dispatcher,
+            state,
+            size,
+            recovery: Some(recovery),
         }
     }
 
@@ -120,6 +141,7 @@ where
             for effect in transition.effects {
                 self.dispatcher.dispatch(effect);
             }
+            self.persist_checkpoint();
             for event in self.dispatcher.poll_events() {
                 self.state.apply_event(event);
             }
@@ -137,6 +159,20 @@ where
             .map_err(|error| RuntimeError::Render(error.to_string()))?;
         self.state.frame_number += 1;
         Ok(())
+    }
+
+    fn persist_checkpoint(&mut self) {
+        let Some(store) = &self.recovery else {
+            return;
+        };
+        if let Err(error) = store.save(&self.state.session_state()) {
+            self.state.output.push(editor_types::OutputMessage {
+                subsystem: "recovery".to_owned(),
+                operation: "checkpoint".to_owned(),
+                level: editor_types::OutputLevel::Warning,
+                message: format!("could not persist recovery checkpoint: {error}"),
+            });
+        }
     }
 }
 
@@ -156,6 +192,35 @@ fn frame_for_state(
             || "Welcome".to_owned(),
             |name| name.to_string_lossy().into_owned(),
         );
+    let mut diagnostic_counts = app_ui::editor::DiagnosticCounts::default();
+    let diagnostic_markers = state
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let kind = match diagnostic.severity {
+                editor_types::DiagnosticSeverity::Error => {
+                    diagnostic_counts.error += 1;
+                    app_ui::editor::MarkerKind::Error
+                }
+                editor_types::DiagnosticSeverity::Warning => {
+                    diagnostic_counts.warning += 1;
+                    app_ui::editor::MarkerKind::Warning
+                }
+                editor_types::DiagnosticSeverity::Information => {
+                    diagnostic_counts.information += 1;
+                    app_ui::editor::MarkerKind::Information
+                }
+                editor_types::DiagnosticSeverity::Hint => {
+                    diagnostic_counts.hint += 1;
+                    app_ui::editor::MarkerKind::Hint
+                }
+            };
+            app_ui::editor::MarkerSpan {
+                range: diagnostic.range,
+                kind,
+            }
+        })
+        .collect::<Vec<_>>();
     let status = EditorStatusData {
         file_name: file_name.clone(),
         dirty: state.active_dirty,
@@ -170,6 +235,7 @@ fn frame_for_state(
             "untrusted"
         }
         .to_owned(),
+        diagnostics: diagnostic_counts,
         ..EditorStatusData::default()
     };
     let viewport = EditorViewportState {
@@ -178,7 +244,10 @@ fn frame_for_state(
         viewport: app_ui::editor::TextViewport::default(),
         selections: buffer.selections().clone(),
         folds: editor_core::FoldSet::default(),
-        markers: SemanticMarkerSet::default(),
+        markers: SemanticMarkerSet {
+            language: diagnostic_markers.clone(),
+            ..SemanticMarkerSet::default()
+        },
         search_matches: Vec::new(),
         bracket_matches: Vec::new(),
         status: status.clone(),
@@ -200,7 +269,7 @@ fn frame_for_state(
             expanded: entry.expanded,
         })
         .collect();
-    let output_entries = state
+    let mut output_entries: Vec<PanelEntry> = state
         .output
         .iter()
         .map(|message| PanelEntry {
@@ -213,6 +282,63 @@ fn frame_for_state(
             },
         })
         .collect();
+    output_entries.extend(state.diagnostics.iter().map(|diagnostic| PanelEntry {
+        label: diagnostic.message.clone(),
+        detail: Some(format!(
+            "{}:{}",
+            diagnostic.range.start.0,
+            match diagnostic.severity {
+                editor_types::DiagnosticSeverity::Error => "error",
+                editor_types::DiagnosticSeverity::Warning => "warning",
+                editor_types::DiagnosticSeverity::Information => "info",
+                editor_types::DiagnosticSeverity::Hint => "hint",
+            }
+        )),
+        level: match diagnostic.severity {
+            editor_types::DiagnosticSeverity::Error => StyleRole::Error,
+            editor_types::DiagnosticSeverity::Warning => StyleRole::Warning,
+            editor_types::DiagnosticSeverity::Information => StyleRole::Information,
+            editor_types::DiagnosticSeverity::Hint => StyleRole::Hint,
+        },
+    }));
+    let second_viewport = state
+        .split_secondary_tab
+        .and_then(|index| state.tabs.get(index))
+        .map(|tab| {
+            let title = tab
+                .path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map_or_else(
+                    || "Welcome".to_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+            EditorViewportState {
+                title,
+                snapshot: tab.buffer.snapshot(),
+                viewport: app_ui::editor::TextViewport::default(),
+                selections: tab.buffer.selections().clone(),
+                folds: editor_core::FoldSet::default(),
+                markers: SemanticMarkerSet {
+                    language: diagnostic_markers,
+                    ..SemanticMarkerSet::default()
+                },
+                search_matches: Vec::new(),
+                bracket_matches: Vec::new(),
+                status: status.clone(),
+                show_line_numbers: true,
+                tab_width: 4,
+            }
+        });
+    let root = match (state.split_axis, second_viewport) {
+        (Some(axis), Some(second)) => PaneNode::split(
+            axis,
+            state.split_ratio_percent,
+            PaneNode::leaf(viewport),
+            PaneNode::leaf(second),
+        ),
+        _ => PaneNode::leaf(viewport),
+    };
     let shell = ShellState {
         explorer: ExplorerState {
             roots,
@@ -237,9 +363,13 @@ fn frame_for_state(
                 closeable: true,
             })
             .collect(),
-        root: PaneNode::leaf(viewport),
+        root,
         bottom: BottomPanelState {
-            title: "Output".to_owned(),
+            title: if state.diagnostics.is_empty() {
+                "Output".to_owned()
+            } else {
+                "Problems".to_owned()
+            },
             entries: output_entries,
             visible: state.bottom_panel_visible || !state.output.is_empty(),
         },
@@ -287,7 +417,7 @@ where
 /// Returns a typed lifecycle error when entering, reading, rendering, or restoring the terminal
 /// fails.
 pub fn run_interactive_with_state<T, D>(
-    mut terminal: T,
+    terminal: T,
     dispatcher: D,
     size: (u16, u16),
     state: AppState,
@@ -296,11 +426,40 @@ where
     T: InteractiveTerminal,
     D: EffectDispatcher,
 {
+    run_interactive_with_state_and_recovery(terminal, dispatcher, size, state, None)
+}
+
+/// Interactive runtime variant with optional crash-recovery checkpoints after each action.
+///
+/// # Errors
+///
+/// Returns a typed lifecycle error when entering, reading, rendering, or restoring the terminal
+/// fails.
+pub fn run_interactive_with_state_and_recovery<T, D>(
+    mut terminal: T,
+    dispatcher: D,
+    size: (u16, u16),
+    state: AppState,
+    recovery: Option<config_core::RecoveryStore>,
+) -> Result<AppState, RuntimeError>
+where
+    T: InteractiveTerminal,
+    D: EffectDispatcher,
+{
     terminal
         .enter()
         .map_err(|error| RuntimeError::Enter(error.to_string()))?;
-    let mut runtime =
-        AppRuntime::with_state(terminal, InteractiveActionSource, dispatcher, size, state);
+    let mut runtime = match recovery {
+        Some(store) => AppRuntime::with_recovery_store(
+            terminal,
+            InteractiveActionSource,
+            dispatcher,
+            size,
+            state,
+            store,
+        ),
+        None => AppRuntime::with_state(terminal, InteractiveActionSource, dispatcher, size, state),
+    };
     let runtime_result = runtime.run_entered_interactive();
     let restore_result = runtime
         .terminal
@@ -344,6 +503,7 @@ where
             for effect in transition.effects {
                 self.dispatcher.dispatch(effect);
             }
+            self.persist_checkpoint();
             for event in self.dispatcher.poll_events() {
                 self.state.apply_event(event);
             }

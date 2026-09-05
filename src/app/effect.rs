@@ -35,6 +35,24 @@ pub enum Effect {
         request: RequestId,
         roots: Vec<PathBuf>,
     },
+    ClipboardWrite {
+        request: RequestId,
+        text: String,
+        cut: bool,
+    },
+    ClipboardRead {
+        request: RequestId,
+    },
+    FormatDocument {
+        request: RequestId,
+        text: String,
+        spec: ProcessSpec,
+        timeout_ms: u64,
+    },
+    ApplyReplacementPlan {
+        request: RequestId,
+        plan: workspace_core::ReplacementPlan,
+    },
     Render,
 }
 
@@ -43,7 +61,9 @@ impl Effect {
     pub const fn requires_trusted_workspace(&self) -> bool {
         matches!(
             self,
-            Self::ExternalProcess { .. } | Self::RefreshGitStatus { .. }
+            Self::ExternalProcess { .. }
+                | Self::RefreshGitStatus { .. }
+                | Self::FormatDocument { .. }
         )
     }
 }
