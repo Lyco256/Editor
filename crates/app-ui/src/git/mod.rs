@@ -1602,6 +1602,7 @@ mod tests {
     fn snapshot(name: &str) -> String {
         fs::read_to_string(repo_root().join("tests/snapshots/ui-git").join(name))
             .expect("snapshot should exist")
+            .replace("\r\n", "\n")
             .trim_end()
             .to_owned()
     }
