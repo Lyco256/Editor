@@ -9,6 +9,15 @@ use lsp_client::{
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, TextSnapshot,
     VersionedTextDocumentIdentifier, WorkspaceFolder,
 };
+
+#[test]
+fn document_uri_percent_encodes_paths() {
+    let uri = DocumentUri::from_path(std::path::Path::new("C:/work space/日本語.rs"));
+    assert_eq!(
+        uri.0,
+        "file:///C:/work%20space/%E6%97%A5%E6%9C%AC%E8%AA%9E.rs"
+    );
+}
 use serde_json::json;
 use tokio::time;
 

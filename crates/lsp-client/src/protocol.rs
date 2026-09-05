@@ -45,8 +45,19 @@ impl DocumentUri {
     #[must_use]
     pub fn from_path(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref().to_string_lossy().replace('\\', "/");
-        let trimmed = path.strip_prefix('/').unwrap_or(&path);
-        Self(format!("file:///{trimmed}"))
+        let path = path.strip_prefix('/').unwrap_or(&path);
+        let mut encoded = String::with_capacity(path.len());
+        for byte in path.as_bytes() {
+            if byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/' | b':')
+            {
+                encoded.push(char::from(*byte));
+            } else {
+                use std::fmt::Write as _;
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+        Self(format!("file:///{encoded}"))
     }
 }
 

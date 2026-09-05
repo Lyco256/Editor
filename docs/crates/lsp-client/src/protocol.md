@@ -21,6 +21,8 @@ Invariants:
 - Frames are encoded with a valid Content-Length header and raw JSON payload.
 - Malformed headers, malformed JSON, and unsupported response IDs become typed protocol errors.
 - The negotiated position encoding defaults to UTF-16 when the server does not advertise a choice.
+- `DocumentUri::from_path` emits canonical `file:///` URIs and percent-encodes spaces and non-ASCII
+  path bytes without executing or normalizing outside the requested path.
 
 Data flow:
 

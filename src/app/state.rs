@@ -1957,7 +1957,7 @@ impl AppState {
     }
 
     fn document_uri(path: &Path) -> String {
-        format!("file://{}", path.to_string_lossy().replace('\\', "/"))
+        lsp_client::protocol::DocumentUri::from_path(path).0
     }
 
     fn queue_lsp_notification(&mut self, method: &str, params: serde_json::Value) {
@@ -5431,7 +5431,7 @@ impl AppState {
                     .iter()
                     .map(|root| {
                         serde_json::json!({
-                            "uri": format!("file://{}", root.to_string_lossy().replace('\\', "/")),
+                            "uri": Self::document_uri(root),
                             "name": root.file_name().and_then(|name| name.to_str()).unwrap_or("workspace"),
                         })
                     })
