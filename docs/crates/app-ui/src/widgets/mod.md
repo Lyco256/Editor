@@ -1,5 +1,46 @@
-# Shared widgets
+# `widgets` module
 
-Role: ownership-safe primitives used by shell and feature views. `Rect` uses terminal cell dimensions
-and contains no filesystem or process behavior. Wave 2 shell work extends this region.
+Role: shared terminal UI helpers for `app-ui`.
 
+This module owns the reusable rectangle geometry, framebuffer drawing helpers, command-palette
+filtering state, and deterministic framebuffer snapshot formatting used by the shell and editor
+tests.
+
+Important types:
+
+- `Rect` for layout geometry and split calculations.
+- `CommandEntry`, `CommandMatch`, and `CommandPaletteState` for palette filtering and selection.
+- Helper constructors for styled `Cell` values and rectangle fills/borders.
+
+Invariants:
+
+- Helpers never touch the filesystem, terminal, or process APIs.
+- Palette filtering is deterministic and keeps disabled commands visible.
+- Snapshot formatting is semantic: it records roles and visible cells instead of escape bytes.
+
+Data flow:
+
+- Shell and editor code create `Cell` values and write them into the terminal framebuffer through
+  the helpers here.
+- Tests render a `Framebuffer`, then use `frame_snapshot` or `semantic_palette_snapshot` for
+  deterministic golden output.
+
+Concurrency:
+
+- Pure value helpers only. No shared mutable state and no background work.
+
+Error behavior:
+
+- The drawing helpers ignore out-of-bounds writes that the caller has already clipped away.
+- Palette filtering returns empty matches rather than executing commands.
+
+Dependencies:
+
+- `editor-types` for command identifiers and semantic roles.
+- `terminal-backend` for `Cell`, `Framebuffer`, theme color resolution, and semantic palette data.
+
+Tests:
+
+- palette filtering and activation selection
+- framebuffer semantic snapshot formatting
+- theme depth mapping for true-color and reduced-color output
