@@ -1,6 +1,6 @@
 # Requirements audit (2026-09-05)
 
-`devenv` is the current integration branch at commit `1887f97`; it is not yet promoted to `main`
+`devenv` is the current integration branch at commit `db0c11a`; it is not yet promoted to `main`
 because release gates remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
 all workspace tests, source/document mirrors, release build, and redirected headless startup.
 
