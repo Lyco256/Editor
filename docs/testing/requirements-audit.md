@@ -78,8 +78,8 @@ Release-gate status and evidence:
 7. Revoking Workspace Trust now stops persistent language-server sessions and rejects late server
    workspace edits, with deterministic root-state coverage.
 
-Remaining product-integration gaps no longer include static VSIX archive discovery: runtime startup
-now scans both unpacked extension directories and `.vsix` archives, extracts archives through the
+Static VSIX archive discovery is complete: runtime startup now scans both unpacked extension
+directories and `.vsix` archives, extracts archives through the
 path-safe compatibility boundary into an OS cache, and loads supported themes/snippets/language
 configuration without executing extension code.
 Explorer directory rows now expand/collapse through a background refresh, and Ctrl+Shift+E enables
