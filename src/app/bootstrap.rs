@@ -224,14 +224,33 @@ impl Drop for ServiceDispatcher {
 impl EffectDispatcher for ServiceDispatcher {
     #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, effect: Effect) {
-        let Effect::SaveDocument { path, text } = effect.clone() else {
-            if let Effect::SaveDocumentAs { path, text } = effect.clone() {
+        let Effect::SaveDocument {
+            path,
+            text,
+            encoding,
+            with_bom,
+            line_endings,
+        } = effect.clone()
+        else {
+            if let Effect::SaveDocumentAs {
+                path,
+                text,
+                encoding,
+                with_bom,
+                line_endings,
+            } = effect.clone()
+            {
                 let sender = self.sender.clone();
                 thread::spawn(move || {
                     let event = match workspace_core::save_text_document(
                         &path,
                         &text,
-                        &workspace_core::DocumentSaveOptions::default(),
+                        &workspace_core::DocumentSaveOptions {
+                            encoding,
+                            with_bom,
+                            line_endings,
+                            ..workspace_core::DocumentSaveOptions::default()
+                        },
                     ) {
                         Ok(_) => Event::DocumentSavedAs { path },
                         Err(error) => Event::DocumentSaveFailed {
@@ -644,7 +663,12 @@ impl EffectDispatcher for ServiceDispatcher {
             let event = match workspace_core::save_text_document(
                 &path,
                 &text,
-                &workspace_core::DocumentSaveOptions::default(),
+                &workspace_core::DocumentSaveOptions {
+                    encoding,
+                    with_bom,
+                    line_endings,
+                    ..workspace_core::DocumentSaveOptions::default()
+                },
             ) {
                 Ok(_) => Event::DocumentSaved { path },
                 Err(error) => Event::DocumentSaveFailed {
