@@ -4,7 +4,6 @@
 //! semantic line markers. It stays pure: the state comes from upstream models and the output is a
 //! framebuffer plus action intents.
 #![allow(
-    clippy::all,
     clippy::bool_to_int_with_if,
     clippy::if_same_then_else,
     clippy::ignored_unit_patterns,
