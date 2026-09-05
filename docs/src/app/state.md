@@ -43,6 +43,8 @@ worker or view direct process access.
 Language panel actions (completion, hover, signature help, navigation, rename, code actions,
 inlay hints, symbols, formatting, restart, and dismissal) are routed through root state; request
 commands include document and workspace symbols.
+Selecting a completion item applies its LSP `textEdit`/`insertText` as one undoable transaction when
+the server supplied an applicable edit.
 Opening or switching to a document loads applicable `.editorconfig` sections; indentation, charset
 fallback, end-of-line policy, trailing-whitespace trimming, and final-newline policy are applied to
 the active document while invalid properties surface typed warnings. Save normalization is recorded

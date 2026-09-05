@@ -792,7 +792,7 @@ impl AppState {
 
     /// Routes language-panel actions to root effects. Language servers are discovered only after
     /// an explicit trust decision; unavailable servers become a visible non-blocking status.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     pub fn apply_language_action(
         &mut self,
         action: app_ui::language::LanguageAction,
@@ -840,8 +840,23 @@ impl AppState {
                 }
                 self.language_server = LanguageServerStatus::Unavailable;
             }
-            LanguageAction::AcceptCompletion { index }
-            | LanguageAction::ExpandCompletionDetails { index } => {
+            LanguageAction::AcceptCompletion { index } => {
+                self.last_language_method = Some("textDocument/completion".to_owned());
+                self.bottom_panel_view = BottomPanelView::Language;
+                self.bottom_panel_visible = true;
+                let applied = self.apply_completion_item(index);
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "completion".to_owned(),
+                    level: OutputLevel::Information,
+                    message: if applied {
+                        format!("completion item {index} inserted")
+                    } else {
+                        format!("completion item {index} selected")
+                    },
+                });
+            }
+            LanguageAction::ExpandCompletionDetails { index } => {
                 self.last_language_method = Some("textDocument/completion".to_owned());
                 self.bottom_panel_view = BottomPanelView::Language;
                 self.bottom_panel_visible = true;
@@ -849,7 +864,7 @@ impl AppState {
                     subsystem: "lsp".to_owned(),
                     operation: "completion".to_owned(),
                     level: OutputLevel::Information,
-                    message: format!("completion item {index} selected"),
+                    message: format!("completion details expanded for item {index}"),
                 });
             }
             LanguageAction::OpenHover => {
@@ -896,6 +911,51 @@ impl AppState {
             render: true,
             ..Transition::default()
         }
+    }
+
+    fn apply_completion_item(&mut self, index: usize) -> bool {
+        let Some((range, text)) = self.completion_edit(index) else {
+            return false;
+        };
+        let Ok(transaction) = Transaction::new(vec![Edit::replace(range, text)]) else {
+            return false;
+        };
+        if self.buffer.apply_transaction(transaction).is_err() {
+            return false;
+        }
+        self.language_ui
+            .set_document_version(self.buffer.snapshot().version());
+        self.sync_buffer_projection();
+        self.deferred_effects.push(self.syntax_effect());
+        true
+    }
+
+    fn completion_edit(&self, index: usize) -> Option<(TextRange, String)> {
+        let result = self.lsp_results.get("textDocument/completion")?;
+        let values = result
+            .as_array()
+            .or_else(|| result.get("items")?.as_array())?;
+        let item = values.get(index)?;
+        let text = item
+            .get("textEdit")
+            .and_then(|edit| edit.get("newText"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| item.get("insertText").and_then(serde_json::Value::as_str))
+            .or_else(|| item.get("label").and_then(serde_json::Value::as_str))?
+            .to_owned();
+        let range = item
+            .get("textEdit")
+            .and_then(|edit| edit.get("range"))
+            .and_then(|range| {
+                let start = json_position(range.get("start")?)?;
+                let end = json_position(range.get("end")?)?;
+                Some(TextRange {
+                    start: self.buffer.position_to_offset(start).ok()?,
+                    end: self.buffer.position_to_offset(end).ok()?,
+                })
+            })
+            .unwrap_or_else(|| self.buffer.selections().primary().range());
+        Some((range, text))
     }
 
     /// Converts a language-panel request into a trust-gated JSON-RPC effect.
@@ -4420,6 +4480,11 @@ mod tests {
             .expect("completion view should be populated");
         assert_eq!(completion.list.rows.len(), 2);
         assert_eq!(completion.list.selected, Some(0));
+        let transition = state
+            .apply_language_action(app_ui::language::LanguageAction::AcceptCompletion { index: 1 });
+        assert!(transition.render);
+        assert_eq!(state.active_text, "print!");
+        assert!(state.active_dirty);
     }
 
     #[test]
