@@ -31,10 +31,11 @@ Implemented in the integration pass:
 Still release-blocking or environment-blocked:
 
 1. `docs/testing/performance.md` now records release size, idle working-set/private memory, idle CPU,
-   repeated redirected startup/close measurements, and a 21.22 ms deterministic 10 MiB edit
-   transaction. Native keystroke-to-frame latency and repeated open/close of a 10 MiB document
-   remain unavailable; `docs/testing/final-smoke.md` records the PTY smoke scope. The master
-   requirement requires user approval before treating those missing measurements as an exception.
+   repeated redirected startup/close measurements, a process-level five-iteration Windows Terminal
+   10 MiB open/force-close sample, and a 21.22 ms deterministic 10 MiB edit transaction. Native
+   keystroke-to-frame latency and clean interactive open/close memory behavior remain unavailable;
+   `docs/testing/final-smoke.md` records the PTY smoke scope. The master requirement requires user
+   approval before treating those missing measurements as an exception.
 2. Root action coverage now includes every language-panel action and workspace file-operation
    confirmation path. The headless acceptance suite covers the fake-server initialize/request/response
    lifecycle, semantic tokens, Git projection/mutation routing, encoding round trips, and

@@ -10,6 +10,7 @@ manual formatter transactions, project replacement effects, command palette rout
 abstraction, and session recovery.
 
 The release binary was launched without arguments in the current environment and exited 0 through the
-safe headless startup path. A PTY-backed smoke run, idle memory/CPU samples, and successful Inno
-Setup compilation are recorded in the smoke/performance documents; native 10 MiB typing-latency
-profiling remains outstanding.
+safe headless startup path. A PTY-backed smoke run, idle memory/CPU samples, a five-iteration
+Windows Terminal 10 MiB process-level open/force-close sample, and successful Inno Setup compilation
+are recorded in the smoke/performance documents; native 10 MiB typing-latency and clean interactive
+open/close profiling remain outstanding.

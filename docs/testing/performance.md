@@ -19,3 +19,11 @@ native keystroke-to-frame latency is still not directly profiled.
 
 10 MiB typing latency and repeated open/close of a 10 MiB document still require a dedicated native
 Windows Terminal profiling session; they are not inferred from the startup measurements above.
+
+A process-level Windows Terminal launch loop was additionally run on 2026-09-05 for five iterations
+against a 10 MiB document. The exact `target/release/editor.exe` process was sampled after 700 ms
+and then force-closed to avoid leaving test tabs open; working-set samples were 122,736,640,
+99,835,904, 119,201,792, 130,641,920, and 95,600,640 bytes (minimum 91.2 MiB, maximum
+124.6 MiB, mean 108.3 MiB). The samples do not show monotonic growth, but force-close is not a
+clean interactive close and therefore does not replace a native keystroke-to-frame or clean
+open/close profiling session.
