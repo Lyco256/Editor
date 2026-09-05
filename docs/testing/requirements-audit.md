@@ -25,9 +25,11 @@ Implemented in the integration pass:
 
 Still release-blocking or environment-blocked:
 
-1. Root still does not project all app-ui language/workspace/Git models into rendered views or
-   complete every LSP result (completion/hover/rename/code actions/etc.); syntax parser refresh,
-   search streaming, diagnostics, and generic request effects now have root paths.
+1. Root still does not project all app-ui editor/language/workspace/Git models into rendered views:
+   the runtime leaves syntax/semantic highlight spans, bracket matches, search-match markers, and
+   several panel models unpopulated, and it does not complete every LSP result
+   (completion/hover/rename/code actions/etc.). Syntax parser refresh, search streaming,
+   diagnostics, and generic request effects now have root paths.
 2. Format-on-save/paste root chaining exists behind explicit state flags, but settings/UI controls,
    LSP-formatting precedence, and full Problems/Git/LSP interactive views remain incomplete.
 3. Root retains detected encoding/BOM/line-ending metadata in tabs, session records, status
