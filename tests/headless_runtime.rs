@@ -1035,3 +1035,31 @@ fn save_as_retargets_only_after_atomic_write_and_close_protects_dirty_tabs() {
             .any(|message| message.operation == "close-tab")
     );
 }
+
+#[test]
+fn root_file_operation_confirmation_updates_active_document_after_atomic_rename() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let source = directory.path().join("before.rs");
+    let target = directory.path().join("after.rs");
+    std::fs::write(&source, "fn main() {}\n").expect("source");
+    let mut state = editor::app::state::AppState::default();
+    state.open_startup_path(&source);
+    let plan = workspace_core::FileOperationPlan::Rename(
+        workspace_core::plan_rename(&source, &target).expect("rename plan"),
+    );
+    let prompt = state.apply_action(Action::RequestFileOperation(plan));
+    assert!(prompt.effects.is_empty());
+    let confirmed = state.apply_action(Action::ConfirmFileOperation);
+    let Some(Effect::FileOperation { request, plan }) = confirmed.effects.first().cloned() else {
+        panic!("confirmed file operation effect expected");
+    };
+    match &plan {
+        workspace_core::FileOperationPlan::Rename(rename) => {
+            workspace_core::rename_path(&rename.source, &rename.target).expect("rename");
+        }
+        _ => panic!("rename plan expected"),
+    }
+    state.apply_event(Event::FileOperationCompleted { request, plan });
+    assert_eq!(state.active_path.as_deref(), Some(target.as_path()));
+    assert!(target.is_file());
+}
