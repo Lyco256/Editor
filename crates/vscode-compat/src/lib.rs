@@ -604,7 +604,14 @@ pub fn extract_vsix(
     let stem = archive
         .file_stem()
         .and_then(OsStr::to_str)
-        .filter(|value| !value.is_empty())
+        .filter(|value| {
+            !value.is_empty()
+                && *value != "."
+                && *value != ".."
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        })
         .unwrap_or("vsix");
     // Validate every archive name before creating any output.  A malformed later entry must not
     // leave a partially extracted tree behind.
@@ -2156,6 +2163,18 @@ mod tests {
         assert_eq!(package.themes.len(), 1);
         assert_eq!(package.snippets.len(), 1);
         assert_eq!(package.languages.len(), 1);
+    }
+
+    #[test]
+    fn vsix_archive_stem_cannot_escape_cache_directory() {
+        let source = fixtures().join("static-extension.vsix");
+        let archive_dir = tempfile::tempdir().expect("archive directory");
+        let archive = archive_dir.path().join("..vsix");
+        std::fs::copy(source, &archive).expect("copy archive");
+        let destination = tempfile::tempdir().expect("destination");
+        let extracted = extract_vsix(&archive, destination.path()).expect("extract archive");
+        assert!(extracted.starts_with(destination.path()));
+        assert!(extracted.file_name().is_some_and(|name| name != ".."));
     }
 
     #[test]
