@@ -615,6 +615,8 @@ pub enum EditorAction {
         line: u32,
     },
     SelectRange(TextRange),
+    /// Expands the primary selection to the next syntax-aware structural range.
+    ExpandSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

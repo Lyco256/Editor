@@ -556,6 +556,7 @@ pub enum LanguageAction {
     ExpandCompletionDetails {
         index: usize,
     },
+    PrepareRename,
     OpenHover,
     OpenSignatureHelp,
     AcceptRenamePreview,
@@ -600,6 +601,16 @@ pub enum LanguageEffectRequest {
         version: u64,
         position: LogicalPosition,
     },
+    RequestDeclaration {
+        document: DocumentId,
+        version: u64,
+        position: LogicalPosition,
+    },
+    RequestImplementation {
+        document: DocumentId,
+        version: u64,
+        position: LogicalPosition,
+    },
     RequestReferences {
         document: DocumentId,
         version: u64,
@@ -610,6 +621,16 @@ pub enum LanguageEffectRequest {
         version: u64,
         position: LogicalPosition,
         new_name: String,
+    },
+    RequestPrepareRename {
+        document: DocumentId,
+        version: u64,
+        position: LogicalPosition,
+    },
+    RequestCompletionResolve {
+        document: DocumentId,
+        version: u64,
+        index: usize,
     },
     RequestCodeActions {
         document: DocumentId,
@@ -630,6 +651,11 @@ pub enum LanguageEffectRequest {
     RequestFormatting {
         document: DocumentId,
         version: u64,
+    },
+    RequestRangeFormatting {
+        document: DocumentId,
+        version: u64,
+        range: editor_types::TextRange,
     },
     RestartLanguageServer,
 }

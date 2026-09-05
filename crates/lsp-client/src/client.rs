@@ -346,6 +346,34 @@ impl LspClient {
         self.send_message(notification).await
     }
 
+    /// Sends a JSON-RPC response for a request initiated by the language server.
+    ///
+    /// Server requests are intentionally acknowledged through this explicit method so root
+    /// orchestration can apply policy and edits before responding. A response must contain either
+    /// a result or an error; callers that reject a request should use a typed failure result when
+    /// no protocol error payload is needed.
+    pub async fn respond(
+        &self,
+        id: RequestId,
+        result: Option<JsonValue>,
+        error: Option<protocol::JsonRpcErrorObject>,
+    ) -> Result<(), ClientError> {
+        if result.is_none() && error.is_none() {
+            return Err(ClientError::Protocol(
+                protocol::ProtocolError::InvalidHeader(
+                    "JSON-RPC response must contain a result or error".to_owned(),
+                ),
+            ));
+        }
+        self.send_message(JsonRpcResponse {
+            jsonrpc: "2.0".to_owned(),
+            id,
+            result,
+            error,
+        })
+        .await
+    }
+
     pub async fn did_open(&self, params: DidOpenTextDocumentParams) -> Result<(), ClientError> {
         self.notify_json("textDocument/didOpen", params).await
     }
