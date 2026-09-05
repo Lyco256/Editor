@@ -50,7 +50,7 @@ Language panel actions (completion, hover, signature help, navigation, rename, c
 inlay hints, symbols, formatting, restart, and dismissal) are routed through root state; request
 commands include document and workspace symbols, completion resolve, prepare rename,
 declaration/implementation navigation, and range formatting. `editor.expandSelection` uses
-syntax-produced symbol ranges to grow the primary selection.
+syntax-produced symbol ranges or the configured VS Code word pattern to grow the primary selection.
 Selecting a completion item applies its LSP `textEdit`/`insertText` as one undoable transaction when
 the server supplied an applicable edit.
 Rename previews and code actions apply applicable active-document workspace edits as one undoable
@@ -66,6 +66,9 @@ Opening or switching to a document loads applicable `.editorconfig` sections; in
 fallback, end-of-line policy, trailing-whitespace trimming, and final-newline policy are applied to
 the active document while invalid properties surface typed warnings. Save normalization is recorded
 as one undoable buffer transaction before bytes are written.
+Language configuration also supplies line- and block-comment toggling, word selection, indentation
+regexes, and safe Enter-rule append/remove actions when those fields are present. Loaded snippet prefixes
+expand on Tab as one undoable transaction, with tab stops rendered from their safe defaults.
 `open_tab`, `SwitchTab`, and the session serializer retain each open buffer, detected encoding/BOM/
 line-ending metadata, and active-tab index,
 including an optional horizontal/vertical split, split ratio, and secondary tab. Session restore

@@ -24,7 +24,8 @@ syntax-aware structural selection expansion.
 Trusted language-server requests now reuse the persistent client session when available. Root
 queues workspace-folder, didOpen, didChange, didSave, and didClose notifications; deterministic
 state coverage verifies the lifecycle notifications are emitted. Directory resource operations
-remain explicitly rejected and are still outside the complete WorkspaceEdit surface.
+support recursive rename/delete with in-memory rollback journaling; non-recursive directory deletes
+return a typed error.
 In-document FindInDocument/ReplaceInDocument actions now expose editor-core search and undoable
 replace-all behavior through root state, with keyboard prompt entry and typed invalid-expression
 errors. Quick Open and project search also have keyboard prompt entry, and resolved VS Code
@@ -33,12 +34,14 @@ Explorer directory clicks now toggle an expanded-directory set and dispatch back
 file rows continue to open tabs without renderer I/O.
 
 LSP didChange notifications now carry the smallest changed range derivable from the old/current
-snapshots. Workspace-local and static-extension language configuration bracket pairs are applied
-to smart editing when available. Basic VS Code `when` predicates and two-stroke key chords are
-evaluated by root dispatch.
+snapshots. Workspace-local and static-extension language configuration drives bracket/surrounding
+pairs, line/block comments, word selection, indentation regexes, and safe Enter append/remove
+actions when available. Workspace/static-directory or VSIX snippets expand on Tab as one undoable
+transaction, and matching static themes map to semantic terminal roles. Basic VS Code `when`
+predicates and two-stroke key chords are evaluated by root dispatch.
 
-File resource WorkspaceEdit operations (create/rename/delete) are now applied with trusted-root
-validation and rollback on operation failure. Directory resource operations remain explicitly
-rejected. Rename and code-action edits targeting unopened documents use the same background worker
+File and directory resource WorkspaceEdit operations (create/rename/delete) are now applied with
+trusted-root validation and rollback on operation failure. Rename and code-action edits targeting
+unopened documents use the same background worker
 as server-originated edits.
 Revoking Workspace Trust shuts down persistent LSP sessions and rejects late server edits.

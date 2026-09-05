@@ -2,7 +2,7 @@
 #![allow(clippy::struct_excessive_bools)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -40,6 +40,13 @@ pub struct AppState {
     pub(crate) find_query: String,
     pub(crate) find_matches: Vec<TextRange>,
     pub(crate) pair_config: Vec<PairConfig>,
+    pub(crate) indentation_rules: Option<editor_core::IndentationRules>,
+    pub(crate) on_enter_rules: Vec<editor_core::EnterRule>,
+    pub(crate) snippets: Vec<vscode_compat::SnippetDefinition>,
+    language_line_comment: Option<String>,
+    language_block_comment: Option<(String, String)>,
+    language_word_pattern: Option<String>,
+    pub(crate) theme_name: String,
     pub(crate) indent_style: editor_core::IndentStyle,
     pub(crate) keybindings: Vec<config_core::Keybinding>,
     pending_key_chord: Option<editor_types::KeyEvent>,
@@ -163,6 +170,17 @@ fn panel_glyphs(text: &str) -> Vec<app_ui::language::Glyph> {
 
 fn panel_row(text: impl AsRef<str>) -> app_ui::language::PanelRow {
     app_ui::language::PanelRow::new(panel_glyphs(text.as_ref()))
+}
+
+fn snippet_part_text(part: &vscode_compat::SnippetPart) -> String {
+    match part {
+        vscode_compat::SnippetPart::Text(text) => text.clone(),
+        vscode_compat::SnippetPart::TabStop(_) => String::new(),
+        vscode_compat::SnippetPart::Placeholder { default, .. }
+        | vscode_compat::SnippetPart::Variable { default, .. } => {
+            default.iter().map(snippet_part_text).collect()
+        }
+    }
 }
 
 fn keybinding_parts(binding: &config_core::Keybinding) -> Vec<&str> {
@@ -797,6 +815,13 @@ impl Default for AppState {
             find_query: String::new(),
             find_matches: Vec::new(),
             pair_config: PairConfig::common_defaults(),
+            indentation_rules: None,
+            on_enter_rules: Vec::new(),
+            snippets: Vec::new(),
+            language_line_comment: None,
+            language_block_comment: None,
+            language_word_pattern: None,
+            theme_name: "Editor Dark".to_owned(),
             indent_style: editor_core::IndentStyle::Spaces(4),
             keybindings: Vec::new(),
             pending_key_chord: None,
@@ -828,6 +853,9 @@ impl Default for AppState {
                 CommandEntry::available("workbench.quickOpen", "Quick Open"),
                 CommandEntry::available("workspace.search", "Search Workspace"),
                 CommandEntry::available("editor.expandSelection", "Expand Selection"),
+                CommandEntry::available("editor.toggleLineComment", "Toggle Line Comment"),
+                CommandEntry::available("editor.toggleBlockComment", "Toggle Block Comment"),
+                CommandEntry::available("editor.insertSnippet", "Insert Snippet"),
                 CommandEntry::available("editor.format", "Format Document"),
                 CommandEntry::available("editor.reopenUtf8", "Reopen with UTF-8"),
                 CommandEntry::available("editor.reopenUtf16Le", "Reopen with UTF-16 LE"),
@@ -983,7 +1011,8 @@ impl AppState {
                             && range.end >= current.end
                             && (range.start < current.start || range.end > current.end)
                     })
-                    .min_by_key(|range| range.end.0.saturating_sub(range.start.0));
+                    .min_by_key(|range| range.end.0.saturating_sub(range.start.0))
+                    .or_else(|| self.language_word_range_at_cursor());
                 if let Some(range) = candidate {
                     let _ = self
                         .buffer
@@ -1001,6 +1030,73 @@ impl AppState {
                 render: true,
                 ..Transition::default()
             },
+        }
+    }
+
+    fn language_word_range_at_cursor(&self) -> Option<editor_types::TextRange> {
+        let pattern = regex::Regex::new(self.language_word_pattern.as_deref()?).ok()?;
+        let snapshot = self.buffer.snapshot();
+        let text = snapshot.text();
+        let cursor = self.buffer.selections().primary().active.0;
+        let cursor_byte = text
+            .char_indices()
+            .nth(cursor)
+            .map_or(text.len(), |(byte, _)| byte);
+        pattern.find_iter(text).find_map(|matched| {
+            if matched.start() > cursor_byte || matched.end() < cursor_byte {
+                return None;
+            }
+            Some(editor_types::TextRange {
+                start: editor_types::CharacterOffset(text[..matched.start()].chars().count()),
+                end: editor_types::CharacterOffset(text[..matched.end()].chars().count()),
+            })
+        })
+    }
+
+    fn expand_snippet(&mut self) -> bool {
+        let cursor = self.buffer.selections().primary().active;
+        if !self.buffer.selections().primary().is_cursor() {
+            return false;
+        }
+        let text = self.buffer.snapshot().text().to_owned();
+        let cursor_byte = text
+            .char_indices()
+            .nth(cursor.0)
+            .map_or(text.len(), |(byte, _)| byte);
+        let prefix_start = text[..cursor_byte]
+            .char_indices()
+            .rev()
+            .find(|(_, character)| character.is_whitespace())
+            .map_or(0, |(byte, character)| byte + character.len_utf8());
+        let prefix = &text[prefix_start..cursor_byte];
+        let Some(snippet) = self
+            .snippets
+            .iter()
+            .find(|snippet| snippet.prefix.iter().any(|value| value == prefix))
+        else {
+            return false;
+        };
+        let replacement = snippet
+            .body
+            .parts
+            .iter()
+            .map(snippet_part_text)
+            .collect::<String>();
+        let start = editor_types::CharacterOffset(text[..prefix_start].chars().count());
+        let end = editor_types::CharacterOffset(cursor.0);
+        let Ok(transaction) = Transaction::new(vec![Edit::replace(
+            editor_types::TextRange { start, end },
+            replacement,
+        )]) else {
+            return false;
+        };
+        match self.buffer.apply_transaction(transaction) {
+            Ok(applied) if applied.changed => {
+                self.sync_buffer_projection();
+                self.deferred_effects.push(self.syntax_effect());
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1044,13 +1140,25 @@ impl AppState {
     ) {
         let Some(configuration) = configuration else {
             self.pair_config = PairConfig::common_defaults();
+            self.indentation_rules = None;
+            self.on_enter_rules.clear();
+            self.language_line_comment = None;
+            self.language_block_comment = None;
+            self.language_word_pattern = None;
             return;
         };
-        let source = if configuration.auto_closing_pairs.is_empty() {
-            &configuration.brackets
-        } else {
-            &configuration.auto_closing_pairs
-        };
+        let mut source = configuration.auto_closing_pairs.clone();
+        if source.is_empty() {
+            source.clone_from(&configuration.brackets);
+        }
+        for pair in &configuration.surrounding_pairs {
+            if !source
+                .iter()
+                .any(|existing| existing.open == pair.open && existing.close == pair.close)
+            {
+                source.push(pair.clone());
+            }
+        }
         let pairs = source
             .iter()
             .filter_map(|pair| PairConfig::new(&pair.open, &pair.close).ok())
@@ -1060,6 +1168,60 @@ impl AppState {
         } else {
             pairs
         };
+        self.indentation_rules =
+            configuration
+                .indentation_rules
+                .as_ref()
+                .map(|rules| editor_core::IndentationRules {
+                    increase_indent_pattern: rules.increase_indent_pattern.clone(),
+                    decrease_indent_pattern: rules.decrease_indent_pattern.clone(),
+                    indent_next_line_pattern: rules.indent_next_line_pattern.clone(),
+                    unindented_line_pattern: rules.unindented_line_pattern.clone(),
+                });
+        self.language_line_comment = configuration
+            .comments
+            .as_ref()
+            .and_then(|comments| comments.line_comment.clone());
+        self.language_block_comment = configuration
+            .comments
+            .as_ref()
+            .and_then(|comments| comments.block_comment.as_ref())
+            .map(|pair| (pair.open.clone(), pair.close.clone()));
+        self.on_enter_rules = configuration
+            .on_enter_rules
+            .iter()
+            .map(|rule| editor_core::EnterRule {
+                before_text: rule.before_text.clone(),
+                after_text: rule.after_text.clone(),
+                previous_line_text: rule.previous_line_text.clone(),
+                append_text: rule
+                    .action
+                    .as_ref()
+                    .and_then(|action| action.append_text.clone()),
+                remove_text: rule
+                    .action
+                    .as_ref()
+                    .and_then(|action| action.remove_text.clone()),
+                indent_action: rule
+                    .action
+                    .as_ref()
+                    .and_then(|action| action.indent_action.clone()),
+            })
+            .collect();
+        self.language_word_pattern = configuration.word_pattern.as_deref().and_then(|pattern| {
+            match regex::Regex::new(pattern) {
+                Ok(_) => Some(pattern.to_owned()),
+                Err(error) => {
+                    self.output.push(OutputMessage {
+                        subsystem: "vscode-compat".to_owned(),
+                        operation: "language-configuration".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: format!("invalid wordPattern: {error}"),
+                    });
+                    None
+                }
+            }
+        });
     }
 
     /// Applies the resolved settings snapshot to root behavior and every open buffer.
@@ -1074,6 +1236,7 @@ impl AppState {
             editor_core::IndentStyle::Tabs
         };
         self.keybindings.clone_from(&settings.keybindings);
+        self.theme_name.clone_from(&settings.theme);
         self.workspace_tab_width = self.tab_width;
         self.workspace_insert_spaces = self.insert_spaces;
         self.show_line_numbers = settings.line_numbers;
@@ -3083,7 +3246,166 @@ pub struct Transition {
 }
 
 impl AppState {
-    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    fn toggle_line_comment(&mut self) {
+        let Some(marker) = self.language_line_comment.clone() else {
+            self.output.push(OutputMessage {
+                subsystem: "editor".to_owned(),
+                operation: "toggle-comment".to_owned(),
+                level: OutputLevel::Information,
+                message: "no language line-comment delimiter is configured".to_owned(),
+            });
+            return;
+        };
+        let snapshot = self.buffer.snapshot();
+        let text = snapshot.text().to_owned();
+        let mut lines = Vec::new();
+        let mut offset = 0usize;
+        for line in text.split_inclusive('\n') {
+            let content = line.strip_suffix('\n').unwrap_or(line);
+            let content = content.strip_suffix('\r').unwrap_or(content);
+            let content_chars = content.chars().count();
+            lines.push((offset, content_chars, content.to_owned()));
+            offset = offset.saturating_add(line.chars().count());
+        }
+        if lines.is_empty() {
+            lines.push((0, 0, String::new()));
+        }
+        let mut selected = BTreeSet::new();
+        for selection in self.buffer.selections().selections() {
+            let Ok(start) = snapshot.offset_to_position(selection.range().start) else {
+                continue;
+            };
+            let Ok(end) = snapshot.offset_to_position(selection.range().end) else {
+                continue;
+            };
+            let end_line = if end.character == 0 && end.line > start.line {
+                end.line.saturating_sub(1)
+            } else {
+                end.line
+            };
+            for line in start.line..=end_line {
+                selected.insert(usize::try_from(line).unwrap_or(usize::MAX));
+            }
+        }
+        if selected.is_empty() {
+            selected.insert(0);
+        }
+        let mut all_commented = true;
+        for line in &selected {
+            let Some((_, _, content)) = lines.get(*line) else {
+                continue;
+            };
+            let indent = content
+                .chars()
+                .take_while(|character| character.is_whitespace() && *character != '\n')
+                .count();
+            let rest = content.chars().skip(indent).collect::<String>();
+            if !rest.is_empty() && !rest.starts_with(&marker) {
+                all_commented = false;
+            }
+        }
+        let mut edits = Vec::new();
+        for line in selected {
+            let Some((line_start, content_len, content)) = lines.get(line) else {
+                continue;
+            };
+            let indent = content
+                .chars()
+                .take_while(|character| character.is_whitespace() && *character != '\n')
+                .count();
+            let marker_start = line_start.saturating_add(indent);
+            let rest = content.chars().skip(indent).collect::<String>();
+            if all_commented {
+                if rest.starts_with(&marker) {
+                    let mut remove = marker.chars().count();
+                    if rest.chars().nth(remove) == Some(' ') {
+                        remove = remove.saturating_add(1);
+                    }
+                    edits.push(Edit::delete(editor_types::TextRange {
+                        start: editor_types::CharacterOffset(marker_start),
+                        end: editor_types::CharacterOffset(marker_start.saturating_add(remove)),
+                    }));
+                }
+            } else if *content_len >= indent {
+                edits.push(Edit::insert(
+                    editor_types::CharacterOffset(marker_start),
+                    format!("{marker} "),
+                ));
+            }
+        }
+        if edits.is_empty() {
+            return;
+        }
+        match Transaction::new(edits)
+            .and_then(|transaction| self.buffer.apply_transaction(transaction))
+        {
+            Ok(applied) if applied.changed => {
+                self.sync_buffer_projection();
+                self.deferred_effects.push(self.syntax_effect());
+            }
+            Ok(_) => {}
+            Err(error) => self.output.push(OutputMessage {
+                subsystem: "editor".to_owned(),
+                operation: "toggle-comment".to_owned(),
+                level: OutputLevel::Error,
+                message: format!("could not toggle line comment: {error}"),
+            }),
+        }
+    }
+
+    fn toggle_block_comment(&mut self) {
+        let Some((open, close)) = self.language_block_comment.clone() else {
+            self.output.push(OutputMessage {
+                subsystem: "editor".to_owned(),
+                operation: "toggle-comment".to_owned(),
+                level: OutputLevel::Information,
+                message: "no language block-comment delimiters are configured".to_owned(),
+            });
+            return;
+        };
+        let selection = self.buffer.selections().primary();
+        let range = selection.range();
+        let snapshot = self.buffer.snapshot();
+        let Ok(selected) = snapshot.text_in_range(range) else {
+            return;
+        };
+        let open_len = open.chars().count();
+        let close_len = close.chars().count();
+        let edits = if selected.starts_with(&open) && selected.ends_with(&close) {
+            vec![
+                Edit::delete(TextRange {
+                    start: range.start,
+                    end: CharacterOffset(range.start.0.saturating_add(open_len)),
+                }),
+                Edit::delete(TextRange {
+                    start: CharacterOffset(range.end.0.saturating_sub(close_len)),
+                    end: range.end,
+                }),
+            ]
+        } else {
+            vec![
+                Edit::insert(range.end, close.clone()),
+                Edit::insert(range.start, open.clone()),
+            ]
+        };
+        match Transaction::new(edits)
+            .and_then(|transaction| self.buffer.apply_transaction(transaction))
+        {
+            Ok(applied) if applied.changed => {
+                self.sync_buffer_projection();
+                self.deferred_effects.push(self.syntax_effect());
+            }
+            Ok(_) => {}
+            Err(error) => self.output.push(OutputMessage {
+                subsystem: "editor".to_owned(),
+                operation: "toggle-comment".to_owned(),
+                level: OutputLevel::Error,
+                message: format!("could not toggle block comment: {error}"),
+            }),
+        }
+    }
+
     #[allow(clippy::too_many_lines, clippy::needless_return)]
     pub fn apply_action(&mut self, action: Action) -> Transition {
         let before_version = self.buffer.snapshot().version();
@@ -3624,6 +3946,14 @@ impl AppState {
                 self.begin_input_mode(InputMode::QuickOpen);
                 return None;
             }
+            if key.code == KeyCode::Character('/') && key.modifiers.contains(Modifier::Control) {
+                if key.modifiers.contains(Modifier::Shift) {
+                    self.toggle_block_comment();
+                } else {
+                    self.toggle_line_comment();
+                }
+                return None;
+            }
             if key.code == KeyCode::Character('p') && key.modifiers.contains(Modifier::Control) {
                 self.palette_visible = !self.palette_visible;
                 if !self.palette_visible {
@@ -3685,7 +4015,17 @@ impl AppState {
                 }
                 KeyCode::Enter => self
                     .buffer
-                    .smart_enter(&self.pair_config, self.indent_style)
+                    .smart_enter_with_rules_and_actions(
+                        &self.pair_config,
+                        self.indent_style,
+                        self.indentation_rules.as_ref(),
+                        &self.on_enter_rules,
+                    )
+                    .map(|_| ()),
+                KeyCode::Tab if self.expand_snippet() => Ok(()),
+                KeyCode::Tab => self
+                    .buffer
+                    .smart_insert(&self.indent_style.unit(), &self.pair_config)
                     .map(|_| ()),
                 KeyCode::Backspace => self.buffer.smart_backspace().map(|_| ()),
                 KeyCode::Delete => self.delete_forward(),
@@ -4112,6 +4452,18 @@ impl AppState {
             }
             "editor.expandSelection" => {
                 let _ = self.apply_editor_action(app_ui::editor::EditorAction::ExpandSelection);
+            }
+            "editor.toggleLineComment" => self.toggle_line_comment(),
+            "editor.toggleBlockComment" => self.toggle_block_comment(),
+            "editor.insertSnippet" => {
+                if !self.expand_snippet() {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "snippet".to_owned(),
+                        level: OutputLevel::Information,
+                        message: "no matching snippet prefix at the cursor".to_owned(),
+                    });
+                }
             }
             "editor.find" => self.begin_input_mode(InputMode::Find),
             "editor.replace" => self.begin_input_mode(InputMode::ReplaceQuery),
@@ -5457,6 +5809,85 @@ mod tests {
         })));
         assert!(!transition.render || state.bottom_panel_view != BottomPanelView::Problems);
         assert!(!state.bottom_panel_visible);
+    }
+
+    #[test]
+    fn language_comments_and_word_pattern_drive_editor_actions() {
+        let mut state = AppState {
+            buffer: TextBuffer::new("value\nother"),
+            ..AppState::default()
+        };
+        let source = r#"{
+            "comments": {"lineComment": "//", "blockComment": ["/*", "*/"]},
+            "wordPattern": "[A-Za-z_][A-Za-z0-9_]*"
+        }"#;
+        let (configuration, _) = vscode_compat::load_language_configuration_json(
+            std::path::Path::new("lang.json"),
+            source,
+        )
+        .expect("language configuration");
+        state.set_language_configuration(Some(&configuration));
+        let _ = state.apply_command("editor.toggleLineComment");
+        assert_eq!(state.active_text, "// value\nother");
+        let _ = state.apply_command("editor.toggleLineComment");
+        assert_eq!(state.active_text, "value\nother");
+        state
+            .buffer
+            .set_selections(editor_core::SelectionSet::single(
+                editor_core::Selection::new(
+                    editor_types::CharacterOffset(0),
+                    editor_types::CharacterOffset(5),
+                ),
+            ))
+            .expect("selection");
+        let _ = state.apply_command("editor.toggleBlockComment");
+        assert_eq!(state.active_text, "/*value*/\nother");
+        state
+            .buffer
+            .set_selections(editor_core::SelectionSet::single(
+                editor_core::Selection::new(
+                    editor_types::CharacterOffset(0),
+                    editor_types::CharacterOffset(9),
+                ),
+            ))
+            .expect("expanded selection");
+        let _ = state.apply_command("editor.toggleBlockComment");
+        assert_eq!(state.active_text, "value\nother");
+        state
+            .buffer
+            .set_selections(editor_core::SelectionSet::single(
+                editor_core::Selection::cursor(editor_types::CharacterOffset(2)),
+            ))
+            .expect("cursor");
+        let _ = state.apply_editor_action(app_ui::editor::EditorAction::ExpandSelection);
+        assert_eq!(state.buffer.selections().primary().range().end.0, 5);
+    }
+
+    #[test]
+    fn snippet_tab_expands_body_as_one_transaction() {
+        let (snippet_file, _) = vscode_compat::load_snippet_json(
+            std::path::Path::new("snippets.json"),
+            r#"{"fn":{"prefix":"fn","body":["fn $1() {","  $0","}"]}}"#,
+        )
+        .expect("snippet");
+        let mut state = AppState {
+            buffer: TextBuffer::new("fn"),
+            snippets: snippet_file.snippets,
+            ..AppState::default()
+        };
+        state
+            .buffer
+            .set_selections(editor_core::SelectionSet::single(
+                editor_core::Selection::cursor(editor_types::CharacterOffset(2)),
+            ))
+            .expect("cursor");
+        let _ = state.apply_input(InputEvent::Key(editor_types::KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: editor_types::Modifiers::default(),
+            repeat: false,
+        }));
+        assert_eq!(state.active_text, "fn () {\n  \n}");
+        assert!(state.buffer.can_undo());
     }
 
     #[test]

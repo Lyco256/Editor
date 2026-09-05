@@ -46,6 +46,7 @@ syntax-engine = { path = "crates/syntax-engine" }
 terminal-backend = { path = "crates/terminal-backend" }
 thiserror.workspace = true
 serde_json.workspace = true
+regex = "1.11"
 tokio.workspace = true
 vcs-git = { path = "crates/vcs-git" }
 vscode-compat = { path = "crates/vscode-compat" }

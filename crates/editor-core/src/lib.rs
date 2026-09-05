@@ -19,7 +19,7 @@ pub use editor_types::{CharacterOffset, LogicalPosition, TextRange};
 pub use fold::{FoldRegion, FoldSet};
 pub use search::{FindMatch, FindOptions, SearchKind};
 pub use selection::{Selection, SelectionSet};
-pub use smart::{IndentStyle, PairConfig, SmartEditOutcome};
+pub use smart::{EnterRule, IndentStyle, IndentationRules, PairConfig, SmartEditOutcome};
 pub use transaction::{Edit, Transaction, TransactionBuilder};
 
 /// Immutable document metadata shared with asynchronous syntax and language services.

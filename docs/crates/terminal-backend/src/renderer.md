@@ -6,6 +6,7 @@ Important types:
 
 - `DifferentialRenderer` stores the previous frame snapshot and the terminal writer.
 - `Theme`, `ResolvedColor`, and `ResolvedUnderline` drive semantic-to-terminal style conversion.
+- `set_theme` replaces semantic colors at runtime and invalidates the previous-frame snapshot.
 
 Invariants:
 

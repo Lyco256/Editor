@@ -71,6 +71,11 @@ impl<W: Write> CrosstermBackend<W> {
         }
     }
 
+    /// Replaces the semantic theme used by subsequent framebuffer renders.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.renderer.set_theme(theme);
+    }
+
     /// Returns the current terminal dimensions.
     ///
     /// # Errors

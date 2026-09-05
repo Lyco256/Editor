@@ -8,6 +8,7 @@ Important types:
 - `CrosstermBackend` combines lifecycle, input, and rendering for production use.
 - `CursorShape` exposes portable cursor shape choices without leaking crossterm types.
 - `TerminalError` classifies terminal I/O failures and inactive-state misuse.
+- `set_theme` allows root startup to apply a validated static VS Code theme.
 
 Invariants:
 

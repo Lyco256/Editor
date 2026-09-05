@@ -34,6 +34,12 @@ impl<W: Write> DifferentialRenderer<W> {
         self.capabilities
     }
 
+    /// Replaces the semantic theme while preserving differential-renderer state.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.invalidate();
+    }
+
     #[must_use]
     pub const fn writer(&self) -> &W {
         &self.writer

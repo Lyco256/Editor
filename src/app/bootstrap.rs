@@ -126,7 +126,7 @@ impl StartupRequest {
 
 fn run_interactive_session(request: StartupRequest) -> ExitCode {
     let size = terminal_backend::CrosstermBackend::<std::io::Stdout>::size().unwrap_or((80, 24));
-    let backend = terminal_backend::CrosstermBackend::stdout();
+    let mut backend = terminal_backend::CrosstermBackend::stdout();
     let dispatcher = match ServiceDispatcher::try_new() {
         Ok(dispatcher) => dispatcher,
         Err(error) => {
@@ -176,7 +176,11 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
         }
     }
     apply_workspace_settings(&mut state);
+    if let Some(theme) = load_workspace_theme(&mut state) {
+        backend.set_theme(theme);
+    }
     apply_workspace_language_configuration(&mut state);
+    apply_workspace_snippets(&mut state);
     state.schedule_syntax_refresh();
     match run_interactive_with_state_and_recovery(
         backend,
@@ -303,6 +307,162 @@ fn apply_workspace_language_configuration(state: &mut AppState) {
     }
 }
 
+fn load_workspace_theme(state: &mut AppState) -> Option<terminal_backend::Theme> {
+    let root = state.workspace_roots.first()?.clone();
+    let theme_name = state.theme_name.clone();
+    let mut candidates = Vec::new();
+    let vscode = root.join(".vscode");
+    candidates.push(vscode.join("theme.json"));
+    let themes = vscode.join("themes");
+    if let Ok(entries) = std::fs::read_dir(themes) {
+        candidates.extend(
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "json")
+                }),
+        );
+    }
+    for path in candidates {
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match vscode_compat::load_theme_json(&path, &contents) {
+            Ok((theme, warnings)) => {
+                for warning in warnings {
+                    state.output.push(editor_types::OutputMessage {
+                        subsystem: "vscode-compat".to_owned(),
+                        operation: "theme".to_owned(),
+                        level: editor_types::OutputLevel::Warning,
+                        message: warning.message,
+                    });
+                }
+                if theme.name.eq_ignore_ascii_case(&theme_name) {
+                    return Some(convert_static_theme(&theme));
+                }
+            }
+            Err(error) => state.output.push(editor_types::OutputMessage {
+                subsystem: "vscode-compat".to_owned(),
+                operation: "theme".to_owned(),
+                level: editor_types::OutputLevel::Warning,
+                message: format!("{}: {error}", path.display()),
+            }),
+        }
+    }
+    let extension_root = vscode.join("extensions");
+    let cache_root = std::env::temp_dir().join("editor-vsix-cache");
+    for source in extension_candidates(&extension_root) {
+        let package = match load_static_extension_candidate(&source, &cache_root) {
+            Ok(package) => package,
+            Err(error) => {
+                state.output.push(editor_types::OutputMessage {
+                    subsystem: "vscode-compat".to_owned(),
+                    operation: "theme".to_owned(),
+                    level: editor_types::OutputLevel::Warning,
+                    message: format!("{}: {error}", source.display()),
+                });
+                continue;
+            }
+        };
+        for warning in &package.warnings {
+            state.output.push(editor_types::OutputMessage {
+                subsystem: "vscode-compat".to_owned(),
+                operation: "extension".to_owned(),
+                level: editor_types::OutputLevel::Warning,
+                message: warning.message.clone(),
+            });
+        }
+        if let Some(theme) = package
+            .themes
+            .iter()
+            .find(|theme| theme.name.eq_ignore_ascii_case(&theme_name))
+        {
+            return Some(convert_static_theme(theme));
+        }
+    }
+    None
+}
+
+fn convert_static_theme(theme: &vscode_compat::StaticTheme) -> terminal_backend::Theme {
+    let mut converted = terminal_backend::Theme::default();
+    let mappings = [
+        ("editor.foreground", editor_types::StyleRole::EditorText),
+        (
+            "editor.background",
+            editor_types::StyleRole::EditorBackground,
+        ),
+        (
+            "editor.selectionBackground",
+            editor_types::StyleRole::Selection,
+        ),
+        (
+            "editor.lineHighlightBackground",
+            editor_types::StyleRole::CurrentLine,
+        ),
+        (
+            "editorLineNumber.foreground",
+            editor_types::StyleRole::LineNumber,
+        ),
+        ("editorGutter.background", editor_types::StyleRole::Gutter),
+        ("panel.background", editor_types::StyleRole::Panel),
+        ("statusBar.background", editor_types::StyleRole::StatusBar),
+        ("editorError.foreground", editor_types::StyleRole::Error),
+        ("editorWarning.foreground", editor_types::StyleRole::Warning),
+        (
+            "editorInfo.foreground",
+            editor_types::StyleRole::Information,
+        ),
+        ("editorHint.foreground", editor_types::StyleRole::Hint),
+        (
+            "gitDecoration.addedResourceForeground",
+            editor_types::StyleRole::GitAdded,
+        ),
+        (
+            "gitDecoration.modifiedResourceForeground",
+            editor_types::StyleRole::GitModified,
+        ),
+        (
+            "gitDecoration.deletedResourceForeground",
+            editor_types::StyleRole::GitDeleted,
+        ),
+        (
+            "editor.findMatchBackground",
+            editor_types::StyleRole::SearchMatch,
+        ),
+    ];
+    for (name, role) in mappings {
+        let Some(color) = theme.colors.get(name).and_then(theme_color_rgb) else {
+            continue;
+        };
+        converted.set_color(role, color);
+    }
+    converted
+}
+
+fn theme_color_rgb(value: &vscode_compat::ThemeColor) -> Option<terminal_backend::RgbColor> {
+    let hex = match value {
+        vscode_compat::ThemeColor::Hex(hex) => hex.as_str(),
+        vscode_compat::ThemeColor::Style(style) => style.foreground.as_deref()?,
+    };
+    let hex = hex.strip_prefix('#')?;
+    let (red, green, blue) = match hex.len() {
+        3 => (
+            u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?,
+            u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?,
+            u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?,
+        ),
+        6 | 8 => (
+            u8::from_str_radix(&hex[0..2], 16).ok()?,
+            u8::from_str_radix(&hex[2..4], 16).ok()?,
+            u8::from_str_radix(&hex[4..6], 16).ok()?,
+        ),
+        _ => return None,
+    };
+    Some(terminal_backend::RgbColor::new(red, green, blue))
+}
+
 fn apply_extension_language_configuration(state: &mut AppState, root: &Path) {
     let Some(language_id) = state
         .active_path
@@ -313,24 +473,16 @@ fn apply_extension_language_configuration(state: &mut AppState, root: &Path) {
         return;
     };
     let extension_root = root.join(".vscode").join("extensions");
-    let Ok(entries) = std::fs::read_dir(extension_root) else {
-        return;
-    };
-    let mut directories = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    directories.sort();
-    for directory in directories {
-        let package = match vscode_compat::load_static_extension_directory(&directory) {
+    let cache_root = std::env::temp_dir().join("editor-vsix-cache");
+    for source in extension_candidates(&extension_root) {
+        let package = match load_static_extension_candidate(&source, &cache_root) {
             Ok(package) => package,
             Err(error) => {
                 state.output.push(editor_types::OutputMessage {
                     subsystem: "vscode-compat".to_owned(),
                     operation: "extension".to_owned(),
                     level: editor_types::OutputLevel::Warning,
-                    message: format!("{}: {error}", directory.display()),
+                    message: format!("{}: {error}", source.display()),
                 });
                 continue;
             }
@@ -356,6 +508,124 @@ fn apply_extension_language_configuration(state: &mut AppState, root: &Path) {
             }
             return;
         }
+    }
+}
+
+fn apply_workspace_snippets(state: &mut AppState) {
+    let Some(root) = state.workspace_roots.first().cloned() else {
+        return;
+    };
+    let language_id = state
+        .active_path
+        .as_deref()
+        .and_then(syntax_engine::SyntaxLanguage::from_path)
+        .map(|language| language.name().to_owned());
+    let snippets_root = root.join(".vscode").join("snippets");
+    if let Ok(entries) = std::fs::read_dir(snippets_root) {
+        let mut files = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        for path in files {
+            load_snippet_file(state, &path, language_id.as_deref());
+        }
+    }
+    let extension_root = root.join(".vscode").join("extensions");
+    let cache_root = std::env::temp_dir().join("editor-vsix-cache");
+    for source in extension_candidates(&extension_root) {
+        let package = match load_static_extension_candidate(&source, &cache_root) {
+            Ok(package) => package,
+            Err(error) => {
+                state.output.push(editor_types::OutputMessage {
+                    subsystem: "vscode-compat".to_owned(),
+                    operation: "snippet".to_owned(),
+                    level: editor_types::OutputLevel::Warning,
+                    message: format!("{}: {error}", source.display()),
+                });
+                continue;
+            }
+        };
+        for snippet_file in package.snippets {
+            if snippet_file.language.as_deref().is_none_or(|language| {
+                language_id
+                    .as_deref()
+                    .is_some_and(|active| active.eq_ignore_ascii_case(language))
+            }) {
+                state.snippets.extend(snippet_file.snippets);
+            }
+        }
+    }
+}
+
+fn extension_candidates(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                || path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("vsix"))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+}
+
+fn load_static_extension_candidate(
+    source: &Path,
+    cache_root: &Path,
+) -> Result<vscode_compat::StaticExtensionPackage, vscode_compat::CompatibilityError> {
+    if source.is_dir() {
+        vscode_compat::load_static_extension_directory(source)
+    } else {
+        vscode_compat::load_static_extension_vsix(source, cache_root)
+    }
+}
+
+fn load_snippet_file(state: &mut AppState, path: &Path, language_id: Option<&str>) {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            state.output.push(editor_types::OutputMessage {
+                subsystem: "vscode-compat".to_owned(),
+                operation: "snippet".to_owned(),
+                level: editor_types::OutputLevel::Warning,
+                message: format!("{}: {error}", path.display()),
+            });
+            return;
+        }
+    };
+    match vscode_compat::load_snippet_json(path, &contents) {
+        Ok((snippet_file, warnings)) => {
+            for warning in warnings {
+                state.output.push(editor_types::OutputMessage {
+                    subsystem: "vscode-compat".to_owned(),
+                    operation: "snippet".to_owned(),
+                    level: editor_types::OutputLevel::Warning,
+                    message: warning.message,
+                });
+            }
+            if snippet_file.language.as_deref().is_none_or(|language| {
+                language_id.is_some_and(|active| active.eq_ignore_ascii_case(language))
+            }) {
+                state.snippets.extend(snippet_file.snippets);
+            }
+        }
+        Err(error) => state.output.push(editor_types::OutputMessage {
+            subsystem: "vscode-compat".to_owned(),
+            operation: "snippet".to_owned(),
+            level: editor_types::OutputLevel::Warning,
+            message: format!("{}: {error}", path.display()),
+        }),
     }
 }
 
@@ -513,6 +783,85 @@ enum LspResourceOperation {
     },
 }
 
+#[derive(Debug, Clone)]
+struct ResourceBackup {
+    path: PathBuf,
+    entries: Option<Vec<ResourceEntry>>,
+}
+
+type ResourceEntry = (PathBuf, bool, Vec<u8>);
+
+fn snapshot_visit(
+    path: &Path,
+    root: &Path,
+    entries: &mut Vec<ResourceEntry>,
+) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+    let relative = path.strip_prefix(root).unwrap_or(Path::new(""));
+    if metadata.is_dir() {
+        entries.push((relative.to_path_buf(), true, Vec::new()));
+        for child in std::fs::read_dir(path)
+            .map_err(|error| format!("could not enumerate {}: {error}", path.display()))?
+        {
+            let child = child
+                .map_err(|error| format!("could not enumerate {}: {error}", path.display()))?;
+            snapshot_visit(&child.path(), root, entries)?;
+        }
+    } else {
+        entries.push((
+            relative.to_path_buf(),
+            false,
+            std::fs::read(path)
+                .map_err(|error| format!("could not back up {}: {error}", path.display()))?,
+        ));
+    }
+    Ok(())
+}
+
+fn snapshot_resource(path: &Path) -> Result<Option<Vec<ResourceEntry>>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut entries = Vec::new();
+    snapshot_visit(path, path, &mut entries)?;
+    Ok(Some(entries))
+}
+
+fn remove_resource(path: &Path) -> Result<(), std::io::Error> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+fn restore_resource_backups(backups: &[ResourceBackup]) {
+    for backup in backups.iter().rev() {
+        if backup.path.exists() {
+            let _ = remove_resource(&backup.path);
+        }
+        let Some(entries) = &backup.entries else {
+            continue;
+        };
+        for (relative, is_directory, bytes) in entries {
+            let destination = if relative.as_os_str().is_empty() {
+                backup.path.clone()
+            } else {
+                backup.path.join(relative)
+            };
+            if *is_directory {
+                let _ = std::fs::create_dir_all(&destination);
+            } else {
+                if let Some(parent) = destination.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(destination, bytes);
+            }
+        }
+    }
+}
+
 fn lsp_resource_operations(edit: &serde_json::Value) -> Result<Vec<LspResourceOperation>, String> {
     let Some(changes) = edit
         .get("documentChanges")
@@ -667,7 +1016,7 @@ fn apply_lsp_workspace_edit(
         }
     }
     let resources = lsp_resource_operations(edit)?;
-    let mut backups = Vec::<(PathBuf, Option<Vec<u8>>)>::new();
+    let mut backups = Vec::<ResourceBackup>::new();
     for operation in &resources {
         let operation_paths = match operation {
             LspResourceOperation::Create { path, .. }
@@ -679,40 +1028,16 @@ fn apply_lsp_workspace_edit(
         for path in operation_paths {
             if backups
                 .iter()
-                .any(|(existing, _)| workspace_core::path_eq(existing, &path))
+                .any(|existing| workspace_core::path_eq(&existing.path, &path))
             {
                 continue;
             }
-            let backup =
-                if path.exists() {
-                    if path.is_dir() {
-                        return Err(format!(
-                            "directory resource operations are not supported: {}",
-                            path.display()
-                        ));
-                    }
-                    Some(std::fs::read(&path).map_err(|error| {
-                        format!("could not back up {}: {error}", path.display())
-                    })?)
-                } else {
-                    None
-                };
-            backups.push((path, backup));
+            backups.push(ResourceBackup {
+                entries: snapshot_resource(&path)?,
+                path,
+            });
         }
     }
-    let rollback = |backups: &[(PathBuf, Option<Vec<u8>>)]| {
-        for (path, bytes) in backups {
-            match bytes {
-                Some(bytes) => {
-                    let _ = std::fs::write(path, bytes);
-                }
-                None if path.exists() && path.is_file() => {
-                    let _ = std::fs::remove_file(path);
-                }
-                None => {}
-            }
-        }
-    };
     for operation in &resources {
         let result = match operation {
             LspResourceOperation::Create {
@@ -726,6 +1051,7 @@ fn apply_lsp_workspace_edit(
                     } else if !overwrite {
                         Err(format!("create target already exists: {}", path.display()))
                     } else {
+                        remove_resource(path).map_err(|error| error.to_string())?;
                         std::fs::write(path, []).map_err(|error| error.to_string())
                     }
                 } else {
@@ -755,7 +1081,7 @@ fn apply_lsp_workspace_edit(
                     ))
                 } else {
                     if new_path.exists() {
-                        std::fs::remove_file(new_path).map_err(|error| error.to_string())?;
+                        remove_resource(new_path).map_err(|error| error.to_string())?;
                     }
                     std::fs::rename(old_path, new_path).map_err(|error| error.to_string())
                 }
@@ -763,19 +1089,24 @@ fn apply_lsp_workspace_edit(
             LspResourceOperation::Delete {
                 path,
                 ignore_if_not_exists,
-                ..
+                recursive,
             } => {
                 if !path.exists() && *ignore_if_not_exists {
                     Ok(())
                 } else if !path.exists() {
                     Err(format!("delete target does not exist: {}", path.display()))
+                } else if path.is_dir() && !recursive {
+                    Err(format!(
+                        "delete target is a directory and recursive=false: {}",
+                        path.display()
+                    ))
                 } else {
-                    std::fs::remove_file(path).map_err(|error| error.to_string())
+                    remove_resource(path).map_err(|error| error.to_string())
                 }
             }
         };
         if let Err(error) = result {
-            rollback(&backups);
+            restore_resource_backups(&backups);
             return Err(format!("workspace resource operation failed: {error}"));
         }
     }
@@ -862,7 +1193,7 @@ fn apply_lsp_workspace_edit(
     match text_result {
         Ok(prepared) => Ok(prepared),
         Err(error) => {
-            rollback(&backups);
+            restore_resource_backups(&backups);
             Err(error)
         }
     }
@@ -1962,7 +2293,8 @@ mod tests {
 
     use super::{
         StartupRequest, apply_lsp_workspace_edit, apply_workspace_language_configuration,
-        apply_workspace_settings,
+        apply_workspace_settings, apply_workspace_snippets, convert_static_theme,
+        load_workspace_theme,
     };
 
     #[test]
@@ -2005,7 +2337,7 @@ mod tests {
         std::fs::create_dir_all(&vscode).expect("settings directory");
         std::fs::write(
             vscode.join("language-configuration.json"),
-            r#"{"brackets":[["<",">"]],"autoClosingPairs":[["<",">"]]}"#,
+            r#"{"brackets":[["<",">"]],"autoClosingPairs":[["<",">"]],"indentationRules":{"increaseIndentPattern":"\\{$"}}"#,
         )
         .expect("language configuration");
         let mut state = super::AppState::default();
@@ -2014,6 +2346,78 @@ mod tests {
         assert_eq!(state.pair_config.len(), 1);
         assert_eq!(state.pair_config[0].open, "<");
         assert_eq!(state.pair_config[0].close, ">");
+        assert_eq!(
+            state
+                .indentation_rules
+                .as_ref()
+                .and_then(|rules| rules.increase_indent_pattern.as_deref()),
+            Some(r"\{$")
+        );
+    }
+
+    #[test]
+    fn workspace_snippets_are_loaded_for_active_language() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let snippets = directory.path().join(".vscode").join("snippets");
+        std::fs::create_dir_all(&snippets).expect("snippet directory");
+        std::fs::write(
+            snippets.join("rust.json"),
+            r#"{"main":{"prefix":"main","body":["fn main() {","\\t$0","}"]}}"#,
+        )
+        .expect("snippet file");
+        let mut state = super::AppState::default();
+        state.workspace_roots.push(directory.path().to_path_buf());
+        state.active_path = Some(directory.path().join("main.rs"));
+        apply_workspace_snippets(&mut state);
+        assert_eq!(state.snippets.len(), 1);
+        assert_eq!(state.snippets[0].prefix, vec!["main".to_owned()]);
+    }
+
+    #[test]
+    fn static_vsix_theme_is_loaded_without_executing_extension_code() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let extensions = directory.path().join(".vscode").join("extensions");
+        std::fs::create_dir_all(&extensions).expect("extension directory");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("vscode-compat")
+            .join("static-extension.vsix");
+        std::fs::copy(&fixture, extensions.join("static-compat-fixture.vsix"))
+            .expect("copy VSIX fixture");
+        let mut state = super::AppState::default();
+        state.workspace_roots.push(directory.path().to_path_buf());
+        state.theme_name = "Fixture Dark".to_owned();
+        let theme = load_workspace_theme(&mut state).expect("VSIX theme");
+        assert_eq!(
+            theme.color(editor_types::StyleRole::EditorText),
+            terminal_backend::RgbColor::new(0xd4, 0xd4, 0xd4)
+        );
+    }
+
+    #[test]
+    fn static_theme_maps_known_semantic_roles() {
+        let (theme, _) = vscode_compat::load_theme_json(
+            std::path::Path::new("theme.json"),
+            r##"{
+                "name": "Custom",
+                "type": "dark",
+                "colors": {
+                    "editor.foreground": "#010203",
+                    "editor.background": "#0a0b0c"
+                }
+            }"##,
+        )
+        .expect("theme");
+        let converted = convert_static_theme(&theme);
+        assert_eq!(
+            converted.color(editor_types::StyleRole::EditorText),
+            terminal_backend::RgbColor::new(1, 2, 3)
+        );
+        assert_eq!(
+            converted.color(editor_types::StyleRole::EditorBackground),
+            terminal_backend::RgbColor::new(10, 11, 12)
+        );
     }
 
     #[test]
@@ -2072,6 +2476,46 @@ mod tests {
             "content"
         );
         assert!(directory.path().join("created.txt").is_file());
+    }
+
+    #[test]
+    fn server_workspace_edit_worker_applies_directory_resource_operations() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let source = directory.path().join("old-dir");
+        let target = directory.path().join("new-dir");
+        std::fs::create_dir_all(source.join("nested")).expect("source directory");
+        std::fs::write(source.join("nested").join("file.txt"), "content").expect("file");
+        let uri = |path: &std::path::Path| {
+            format!("file:///{}", path.to_string_lossy().replace('\\', "/"))
+        };
+        let rename = serde_json::json!({
+            "documentChanges": [{
+                "kind": "rename", "oldUri": uri(&source), "newUri": uri(&target)
+            }]
+        });
+        apply_lsp_workspace_edit(
+            &rename,
+            &[directory.path().to_path_buf()],
+            lsp_client::protocol::PositionEncoding::Utf16,
+        )
+        .expect("directory rename");
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::read_to_string(target.join("nested").join("file.txt")).expect("renamed file"),
+            "content"
+        );
+        let delete = serde_json::json!({
+            "documentChanges": [{
+                "kind": "delete", "uri": uri(&target), "options": {"recursive": true}
+            }]
+        });
+        apply_lsp_workspace_edit(
+            &delete,
+            &[directory.path().to_path_buf()],
+            lsp_client::protocol::PositionEncoding::Utf16,
+        )
+        .expect("directory delete");
+        assert!(!target.exists());
     }
 
     #[test]

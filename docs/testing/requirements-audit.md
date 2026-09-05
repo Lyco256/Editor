@@ -74,13 +74,17 @@ Release-gate status and evidence:
 7. Revoking Workspace Trust now stops persistent language-server sessions and rejects late server
    workspace edits, with deterministic root-state coverage.
 
-Remaining product-integration gaps include applying imported VS Code themes/snippets and static
-VSIX contributions in the runtime (the compatibility parser and safety checks are present).
+Remaining product-integration gaps no longer include static VSIX archive discovery: runtime startup
+now scans both unpacked extension directories and `.vsix` archives, extracts archives through the
+path-safe compatibility boundary into an OS cache, and loads supported themes/snippets/language
+configuration without executing extension code.
 Explorer directory rows now expand/collapse through a background refresh; keyboard focus and
-context-menu hit-testing remain outside the current shell surface. Language configuration currently
-applies bracket pairs only; comments, word patterns, on-enter rules, and indentation rules are not
-yet wired into document behavior. VS Code keybinding `when` contexts and multi-key chords are
-parsed but not evaluated by root dispatch. Directory resource-operation semantics remain explicitly
-rejected and must be implemented or explicitly scoped out. The product goal is not marked complete
+context-menu hit-testing remain outside the current shell surface. Language configuration now
+drives line/block comments, word selection, bracket/surrounding pairs, indentation regexes, and
+safe on-enter append/remove actions. Folding-marker-specific behavior remains outside the root
+editor path. VS Code keybinding `when` contexts and two-stroke chords are
+evaluated for the supported predicates; more complex context expressions remain unsupported.
+Directory resource operations now support recursive rename/delete with in-memory rollback
+journaling; non-recursive directory deletes return a typed error. The product goal is not marked complete
 until these product gaps are resolved or explicitly accepted, the performance/smoke evidence is
 supplied, and the identical verified state is promoted to `main`.

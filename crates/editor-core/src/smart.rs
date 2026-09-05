@@ -29,6 +29,26 @@ pub struct PairConfig {
     pub overtype: bool,
 }
 
+/// Regex-driven indentation hints imported from a language configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IndentationRules {
+    pub increase_indent_pattern: Option<String>,
+    pub decrease_indent_pattern: Option<String>,
+    pub indent_next_line_pattern: Option<String>,
+    pub unindented_line_pattern: Option<String>,
+}
+
+/// Regex predicates and insertion hints for language-configured Enter behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EnterRule {
+    pub before_text: Option<String>,
+    pub after_text: Option<String>,
+    pub previous_line_text: Option<String>,
+    pub append_text: Option<String>,
+    pub remove_text: Option<String>,
+    pub indent_action: Option<String>,
+}
+
 impl PairConfig {
     pub fn new(open: impl Into<String>, close: impl Into<String>) -> Result<Self> {
         let open = open.into();
@@ -246,6 +266,33 @@ impl TextBuffer {
         pairs: &[PairConfig],
         indent_style: IndentStyle,
     ) -> Result<SmartEditOutcome> {
+        self.smart_enter_with_rules(pairs, indent_style, None)
+    }
+
+    /// Inserts a newline while applying optional language-provided indentation regexes.
+    pub fn smart_enter_with_rules(
+        &mut self,
+        pairs: &[PairConfig],
+        indent_style: IndentStyle,
+        rules: Option<&IndentationRules>,
+    ) -> Result<SmartEditOutcome> {
+        self.smart_enter_with_rules_and_actions(pairs, indent_style, rules, &[])
+    }
+
+    /// Inserts a newline with indentation rules and optional language Enter actions.
+    #[allow(clippy::too_many_lines)]
+    pub fn smart_enter_with_rules_and_actions(
+        &mut self,
+        pairs: &[PairConfig],
+        indent_style: IndentStyle,
+        rules: Option<&IndentationRules>,
+        on_enter_rules: &[EnterRule],
+    ) -> Result<SmartEditOutcome> {
+        let compiled_rules = rules.map(CompiledIndentationRules::compile).transpose()?;
+        let compiled_enter_rules = on_enter_rules
+            .iter()
+            .map(CompiledEnterRule::compile)
+            .collect::<Result<Vec<_>>>()?;
         let text = self.to_string();
         let newline = preferred_newline(&text);
         let selections = self.selections().clone();
@@ -264,6 +311,25 @@ impl TextBuffer {
                 .collect();
             let before = &text[..start_byte];
             let after = &text[char_to_byte(&text, range.end.0)..];
+            let after_line = &after[..after.find('\n').unwrap_or(after.len())];
+            let previous_line = before.strip_suffix(line_prefix).and_then(|prefix| {
+                prefix
+                    .rsplit_once('\n')
+                    .map_or(Some(prefix), |(_, line)| Some(line))
+            });
+            let enter_action = compiled_enter_rules
+                .iter()
+                .find(|rule| rule.matches(line_prefix, after_line, previous_line));
+            let mut edit_range = range;
+            if let Some(rule) = enter_action {
+                if let Some(remove_text) = &rule.remove_text {
+                    let remove_len = remove_text.chars().count();
+                    if before.ends_with(remove_text) && range.start.0 >= remove_len {
+                        edit_range.start =
+                            CharacterOffset(range.start.0.saturating_sub(remove_len));
+                    }
+                }
+            }
             let pair_between = selection.is_cursor()
                 && pairs
                     .iter()
@@ -275,24 +341,54 @@ impl TextBuffer {
                 (replacement, cursor_delta)
             } else {
                 let extra_indent = pairs.iter().any(|pair| before.ends_with(&pair.open));
-                let indent = if extra_indent {
-                    format!("{base_indent}{}", indent_style.unit())
-                } else {
-                    base_indent
+                let mut indent = base_indent.clone();
+                let line_matches = |pattern: &Option<regex::Regex>| {
+                    pattern
+                        .as_ref()
+                        .is_some_and(|pattern| pattern.is_match(line_prefix))
                 };
-                let replacement = format!("{newline}{indent}");
+                if compiled_rules
+                    .as_ref()
+                    .is_some_and(|rules| line_matches(&rules.unindented_line_pattern))
+                {
+                    indent.clear();
+                } else {
+                    let should_decrease = compiled_rules
+                        .as_ref()
+                        .is_some_and(|rules| line_matches(&rules.decrease_indent_pattern));
+                    if should_decrease {
+                        remove_indent_unit(&mut indent, indent_style);
+                    }
+                    let should_increase = extra_indent
+                        || compiled_rules.as_ref().is_some_and(|rules| {
+                            line_matches(&rules.increase_indent_pattern)
+                                || line_matches(&rules.indent_next_line_pattern)
+                        });
+                    if should_increase {
+                        indent.push_str(&indent_style.unit());
+                    }
+                }
+                let mut replacement = format!("{newline}{indent}");
+                if let Some(rule) = enter_action {
+                    if let Some(append_text) = &rule.append_text {
+                        replacement.push_str(append_text);
+                    }
+                    if rule.indent_action.as_deref() == Some("indent") {
+                        replacement.push_str(&indent_style.unit());
+                    }
+                }
                 let cursor_delta = replacement.chars().count();
                 (replacement, cursor_delta)
             };
-            let final_start = range.start.0.saturating_add_signed(delta);
+            let final_start = edit_range.start.0.saturating_add_signed(delta);
             let replacement_len = replacement.chars().count();
-            edits.push(Edit::replace(range, replacement));
+            edits.push(Edit::replace(edit_range, replacement));
             resulting.push(Selection::cursor(CharacterOffset(
                 final_start + cursor_delta,
             )));
             delta = delta.saturating_add(
                 isize::try_from(replacement_len).unwrap_or(isize::MAX)
-                    - isize::try_from(range.end.0 - range.start.0).unwrap_or(isize::MAX),
+                    - isize::try_from(edit_range.end.0 - edit_range.start.0).unwrap_or(isize::MAX),
             );
         }
         let resulting = SelectionSet::new(resulting, selections.primary_index())?;
@@ -331,6 +427,97 @@ impl TextBuffer {
             })
             .collect::<Result<Vec<_>>>()?;
         self.apply_transaction(TransactionBuilder::new().extend(edits).build()?)
+    }
+}
+
+#[derive(Debug)]
+#[allow(clippy::struct_field_names)]
+struct CompiledIndentationRules {
+    increase_indent_pattern: Option<regex::Regex>,
+    decrease_indent_pattern: Option<regex::Regex>,
+    indent_next_line_pattern: Option<regex::Regex>,
+    unindented_line_pattern: Option<regex::Regex>,
+}
+
+impl CompiledIndentationRules {
+    fn compile(rules: &IndentationRules) -> Result<Self> {
+        let compile = |pattern: &Option<String>| {
+            pattern
+                .as_deref()
+                .map(regex::Regex::new)
+                .transpose()
+                .map_err(|error| crate::EditorError::InvalidRegex {
+                    message: error.to_string(),
+                })
+        };
+        Ok(Self {
+            increase_indent_pattern: compile(&rules.increase_indent_pattern)?,
+            decrease_indent_pattern: compile(&rules.decrease_indent_pattern)?,
+            indent_next_line_pattern: compile(&rules.indent_next_line_pattern)?,
+            unindented_line_pattern: compile(&rules.unindented_line_pattern)?,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct CompiledEnterRule {
+    before_text: Option<regex::Regex>,
+    after_text: Option<regex::Regex>,
+    previous_line_text: Option<regex::Regex>,
+    append_text: Option<String>,
+    remove_text: Option<String>,
+    indent_action: Option<String>,
+}
+
+impl CompiledEnterRule {
+    fn compile(rule: &EnterRule) -> Result<Self> {
+        let compile = |pattern: &Option<String>| {
+            pattern
+                .as_deref()
+                .map(regex::Regex::new)
+                .transpose()
+                .map_err(|error| crate::EditorError::InvalidRegex {
+                    message: error.to_string(),
+                })
+        };
+        Ok(Self {
+            before_text: compile(&rule.before_text)?,
+            after_text: compile(&rule.after_text)?,
+            previous_line_text: compile(&rule.previous_line_text)?,
+            append_text: rule.append_text.clone(),
+            remove_text: rule.remove_text.clone(),
+            indent_action: rule.indent_action.clone(),
+        })
+    }
+
+    fn matches(&self, before: &str, after: &str, previous: Option<&str>) -> bool {
+        self.before_text
+            .as_ref()
+            .is_none_or(|pattern| pattern.is_match(before))
+            && self
+                .after_text
+                .as_ref()
+                .is_none_or(|pattern| pattern.is_match(after))
+            && self
+                .previous_line_text
+                .as_ref()
+                .is_none_or(|pattern| previous.is_some_and(|line| pattern.is_match(line)))
+    }
+}
+
+fn remove_indent_unit(indent: &mut String, style: IndentStyle) {
+    match style {
+        IndentStyle::Spaces(width) => {
+            let remove = width.max(1).min(indent.len());
+            if indent[..remove].chars().all(|character| character == ' ') {
+                indent.drain(..remove);
+            }
+        }
+        IndentStyle::Tabs => {
+            if indent.starts_with('\t') {
+                indent.remove(0);
+            }
+        }
     }
 }
 
@@ -407,5 +594,39 @@ mod tests {
             .smart_enter(&braces(), IndentStyle::Tabs)
             .expect("enter");
         assert_eq!(buffer.to_string(), "{\r\n\t\r\n}\r\n");
+    }
+
+    #[test]
+    fn language_indentation_rules_adjust_newline_indent() {
+        let mut buffer = TextBuffer::new("if ready {\n    next");
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(19))))
+            .expect("selection");
+        let rules = IndentationRules {
+            increase_indent_pattern: Some(r"\{$".to_owned()),
+            decrease_indent_pattern: Some(r"^\s*}".to_owned()),
+            ..IndentationRules::default()
+        };
+        buffer
+            .smart_enter_with_rules(&[], IndentStyle::Spaces(4), Some(&rules))
+            .expect("enter");
+        assert_eq!(buffer.to_string(), "if ready {\n    next\n    ");
+    }
+
+    #[test]
+    fn language_on_enter_rule_appends_text() {
+        let mut buffer = TextBuffer::new("/// docs");
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(8))))
+            .expect("selection");
+        let rules = [EnterRule {
+            before_text: Some(r"^///.*$".to_owned()),
+            append_text: Some("/// ".to_owned()),
+            ..EnterRule::default()
+        }];
+        buffer
+            .smart_enter_with_rules_and_actions(&[], IndentStyle::Spaces(4), None, &rules)
+            .expect("enter");
+        assert_eq!(buffer.to_string(), "/// docs\n/// ");
     }
 }

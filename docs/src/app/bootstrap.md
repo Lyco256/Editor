@@ -31,5 +31,10 @@ malformed settings remain visible as warning output. A workspace-local
 `.vscode/language-configuration.json`, when present, is parsed through the static compatibility
 boundary and its bracket pairs are applied to smart editing; parse failures and unsupported fields
 are surfaced as typed output instead of enabling unsafe defaults silently. If the workspace file is
-absent, static language configurations from `.vscode/extensions` are considered; malformed extension
+absent, static language configurations from `.vscode/extensions` are considered (both unpacked
+directories and path-safe `.vsix` archives extracted into the OS cache); malformed extension
 metadata is reported as a compatibility warning rather than being silently discarded.
+Workspace and static-extension snippet files are loaded without executing extension code; matching
+prefixes expand through a single undoable root transaction. Valid static theme JSON from workspace
+files or unpacked/archived extensions is mapped to semantic terminal roles before the interactive
+renderer starts, while malformed themes become compatibility warnings.
