@@ -25,15 +25,13 @@ Implemented in the integration pass:
 
 Still release-blocking or environment-blocked:
 
-1. Root still does not project all app-ui editor/language/workspace/Git models into rendered views:
-   the runtime leaves syntax/semantic highlight spans, bracket matches, search-match markers, and
-   several panel models unpopulated. LSP responses now populate versioned language models, but the
-   shell still does not display every result interactively. Syntax parser refresh, search streaming,
-   diagnostics, and generic request effects now have root paths.
-2. Format-on-save/paste root chaining exists behind explicit state flags, but settings/UI controls,
-   LSP-formatting precedence, and full Problems/Git/LSP interactive views remain incomplete.
-   Git hunk staging/unstaging and confirmation-bound discard now dispatch typed effects; branch,
-   stash, diff navigation, and the remaining dashboard actions still lack complete root/view wiring.
+1. Root now projects parser highlights, bracket matches, search markers, diagnostics, and the
+   Problems/Search/Git bottom views. LSP responses populate versioned language models, but semantic
+   spans and several completion/hover/navigation overlays are not yet rendered interactively.
+2. Format-on-save/paste chaining and LSP-formatting precedence are implemented behind explicit state
+   flags, but settings/UI controls and the complete Problems/Git/LSP interaction surface remain
+   incomplete. Git hunk staging/unstaging, confirmation-bound discard, and diff/conflict file opening
+   now have root paths; some branch/stash/history navigation actions still need view-level routing.
 3. Root retains detected encoding/BOM/line-ending metadata in tabs, session records, status
    rendering, and save effects; explicit user conversion/reopen commands are not yet wired.
 4. Search and native watcher workers use standard threads; the architecture target is Tokio-based
