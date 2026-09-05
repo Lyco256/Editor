@@ -34,6 +34,9 @@ are surfaced as typed output instead of enabling unsafe defaults silently. If th
 absent, static language configurations from `.vscode/extensions` are considered (both unpacked
 directories and path-safe `.vsix` archives extracted into the OS cache); malformed extension
 metadata is reported as a compatibility warning rather than being silently discarded.
+Static language contributions are matched by declared language id, filename, or extension, so
+custom file types can receive their configuration and snippets even when Tree-sitter has no
+built-in parser.
 Workspace and static-extension snippet files are loaded without executing extension code; matching
 prefixes expand through a single undoable root transaction. Valid static theme JSON from workspace
 files or unpacked/archived extensions is mapped to semantic terminal roles before the interactive

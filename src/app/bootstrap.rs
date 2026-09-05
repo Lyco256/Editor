@@ -464,14 +464,11 @@ fn theme_color_rgb(value: &vscode_compat::ThemeColor) -> Option<terminal_backend
 }
 
 fn apply_extension_language_configuration(state: &mut AppState, root: &Path) {
-    let Some(language_id) = state
-        .active_path
-        .as_ref()
-        .and_then(syntax_engine::SyntaxLanguage::from_path)
-        .map(|language| language.name().to_owned())
-    else {
+    let Some(active_path) = state.active_path.clone() else {
         return;
     };
+    let language_id = syntax_engine::SyntaxLanguage::from_path(&active_path)
+        .map(|language| language.name().to_owned());
     let extension_root = root.join(".vscode").join("extensions");
     let cache_root = std::env::temp_dir().join("editor-vsix-cache");
     for source in extension_candidates(&extension_root) {
@@ -488,11 +485,13 @@ fn apply_extension_language_configuration(state: &mut AppState, root: &Path) {
             }
         };
         let Some(language) = package.languages.iter().find(|language| {
-            language.id.eq_ignore_ascii_case(&language_id)
-                || language
-                    .aliases
-                    .iter()
-                    .any(|alias| alias.eq_ignore_ascii_case(&language_id))
+            language_id.as_deref().is_some_and(|id| {
+                language.id.eq_ignore_ascii_case(id)
+                    || language
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(id))
+            }) || static_language_matches_path(language, &active_path)
         }) else {
             continue;
         };
@@ -520,6 +519,7 @@ fn apply_workspace_snippets(state: &mut AppState) {
         .as_deref()
         .and_then(syntax_engine::SyntaxLanguage::from_path)
         .map(|language| language.name().to_owned());
+    let active_path = state.active_path.clone();
     let snippets_root = root.join(".vscode").join("snippets");
     if let Ok(entries) = std::fs::read_dir(snippets_root) {
         let mut files = entries
@@ -555,11 +555,41 @@ fn apply_workspace_snippets(state: &mut AppState) {
                 language_id
                     .as_deref()
                     .is_some_and(|active| active.eq_ignore_ascii_case(language))
+                    || active_path.as_deref().is_some_and(|path| {
+                        package.languages.iter().any(|language_spec| {
+                            (language_spec.id.eq_ignore_ascii_case(language)
+                                || language_spec
+                                    .aliases
+                                    .iter()
+                                    .any(|alias| alias.eq_ignore_ascii_case(language)))
+                                && static_language_matches_path(language_spec, path)
+                        })
+                    })
             }) {
                 state.snippets.extend(snippet_file.snippets);
             }
         }
     }
+}
+
+fn static_language_matches_path(language: &vscode_compat::StaticLanguage, path: &Path) -> bool {
+    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+        if language
+            .filenames
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(file_name))
+        {
+            return true;
+        }
+    }
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let extension = format!(".{extension}");
+    language
+        .extensions
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&extension))
 }
 
 fn extension_candidates(root: &Path) -> Vec<PathBuf> {
@@ -2419,6 +2449,42 @@ mod tests {
         assert_eq!(
             theme.color(editor_types::StyleRole::EditorText),
             terminal_backend::RgbColor::new(0xd4, 0xd4, 0xd4)
+        );
+    }
+
+    #[test]
+    fn static_extension_language_mapping_applies_to_custom_extensions() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let extensions = directory.path().join(".vscode").join("extensions");
+        std::fs::create_dir_all(&extensions).expect("extension directory");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("vscode-compat")
+            .join("static-extension.vsix");
+        std::fs::copy(&fixture, extensions.join("static-compat-fixture.vsix"))
+            .expect("copy VSIX fixture");
+        let mut state = super::AppState::default();
+        state.workspace_roots.push(directory.path().to_path_buf());
+        state.active_path = Some(directory.path().join("main.toy"));
+        state.buffer = editor_core::TextBuffer::new("value");
+        apply_workspace_language_configuration(&mut state);
+        let _ = state.apply_action(crate::app::action::Action::Input(
+            editor_types::InputEvent::Key(editor_types::KeyEvent {
+                code: editor_types::KeyCode::Character('/'),
+                modifiers: editor_types::Modifiers::from_modifiers([
+                    editor_types::Modifier::Control,
+                ]),
+                repeat: false,
+            }),
+        ));
+        assert_eq!(state.active_text, "// value");
+        apply_workspace_snippets(&mut state);
+        assert!(
+            state
+                .snippets
+                .iter()
+                .any(|snippet| snippet.prefix.iter().any(|prefix| prefix == "for"))
         );
     }
 
