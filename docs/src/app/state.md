@@ -49,6 +49,7 @@ Rename previews and code actions likewise apply applicable active-document works
 undoable transaction; edits targeting other documents remain preview-only.
 Navigation results reuse an already active tab and place the cursor at the selected LSP location
 instead of opening duplicate tabs.
+Formatting requests pass the active document's resolved tab width and spaces/tabs policy to LSP.
 Opening or switching to a document loads applicable `.editorconfig` sections; indentation, charset
 fallback, end-of-line policy, trailing-whitespace trimming, and final-newline policy are applied to
 the active document while invalid properties surface typed warnings. Save normalization is recorded

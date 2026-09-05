@@ -1162,7 +1162,7 @@ impl AppState {
             ),
             LanguageEffectRequest::RequestFormatting { version, .. } => (
                 "textDocument/formatting",
-                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "options": {"tabSize": 4, "insertSpaces": true}}),
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "options": {"tabSize": self.tab_width, "insertSpaces": self.insert_spaces}}),
                 version,
             ),
             LanguageEffectRequest::RefreshDiagnostics { version, .. } => (
