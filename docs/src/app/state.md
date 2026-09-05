@@ -14,6 +14,9 @@ Git Changes, Diff, Branches, Stashes, History, Commit, and Conflicts each have c
 routes that select the corresponding dashboard view without giving the UI direct process access.
 Language Problems, hover, signature help, completion, code action, restart, and dismiss actions
 are likewise exposed through typed command-palette routes.
+Request commands for completion, hover, signature, definition, references, rename preview, code
+actions, inlay hints, symbols, and formatting construct `LanguageEffectRequest` values with the
+current document version and logical cursor position.
 Trusting a file workspace discovers a conventional language server on `PATH`; its startup and crash
 events update the visible `LanguageServerStatus` without allowing untrusted process execution.
 Left-click and drag input is translated from screen cells to logical buffer selections with bounded

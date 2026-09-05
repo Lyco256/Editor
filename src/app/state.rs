@@ -595,6 +595,16 @@ impl Default for AppState {
                 CommandEntry::available("language.acceptCodeAction", "Accept Code Action"),
                 CommandEntry::available("language.restart", "Restart Language Server"),
                 CommandEntry::available("language.dismiss", "Dismiss Language Popup"),
+                CommandEntry::available("language.requestCompletion", "Request Completion"),
+                CommandEntry::available("language.requestHover", "Request Hover"),
+                CommandEntry::available("language.requestSignature", "Request Signature Help"),
+                CommandEntry::available("language.goToDefinition", "Go to Definition"),
+                CommandEntry::available("language.findReferences", "Find References"),
+                CommandEntry::available("language.requestRename", "Preview Rename"),
+                CommandEntry::available("language.requestCodeActions", "Request Code Actions"),
+                CommandEntry::available("language.requestInlayHints", "Request Inlay Hints"),
+                CommandEntry::available("language.requestSymbols", "Request Document Symbols"),
+                CommandEntry::available("language.requestFormatting", "Request Formatting"),
             ]),
             tabs: vec![TabState::untitled()],
             active_tab: 0,
@@ -2685,6 +2695,93 @@ impl AppState {
             "language.dismiss" => {
                 return self.apply_language_command(app_ui::language::LanguageAction::DismissPopup);
             }
+            "language.requestCompletion" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestCompletion {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                    },
+                );
+            }
+            "language.requestHover" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestHover {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                    },
+                );
+            }
+            "language.requestSignature" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestSignatureHelp {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                    },
+                );
+            }
+            "language.goToDefinition" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestGoTo {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                    },
+                );
+            }
+            "language.findReferences" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestReferences {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                    },
+                );
+            }
+            "language.requestRename" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestRenamePreview {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                        new_name: "renamed".to_owned(),
+                    },
+                );
+            }
+            "language.requestCodeActions" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestCodeActions {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                    },
+                );
+            }
+            "language.requestInlayHints" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestInlayHints {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                    },
+                );
+            }
+            "language.requestSymbols" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestDocumentSymbols {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                    },
+                );
+            }
+            "language.requestFormatting" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestFormatting {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                    },
+                );
+            }
             "workbench.showOutput" => {
                 self.bottom_panel_view = BottomPanelView::Output;
                 self.bottom_panel_visible = true;
@@ -2730,6 +2827,22 @@ impl AppState {
             .effects
             .into_iter()
             .next()
+    }
+
+    fn apply_language_effect_command(
+        &mut self,
+        request: app_ui::language::LanguageEffectRequest,
+    ) -> Option<Effect> {
+        self.apply_language_effect_request(request)
+            .effects
+            .into_iter()
+            .next()
+    }
+
+    fn primary_language_position(&self) -> LogicalPosition {
+        self.buffer
+            .offset_to_position(self.buffer.selections().primary().active)
+            .unwrap_or_default()
     }
 
     fn show_git_view(&mut self, view: app_ui::git::GitView) {
