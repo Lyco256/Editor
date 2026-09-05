@@ -7,3 +7,5 @@ explicit so policy tests can observe authorization decisions.
 transition layer performs the corresponding model update and reports errors as output messages.
 `SplitPane`, `CloseSplit`, and `SetSplitRatio` make horizontal/vertical editor layout changes
 explicit and keep them in the same state transition path as tab changes.
+`SaveAs` and `CloseTab` are explicit root actions; close refuses dirty buffers and Save As does not
+change the active path until the asynchronous atomic write reports success.

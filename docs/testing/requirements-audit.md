@@ -25,8 +25,9 @@ Still release-blocking or environment-blocked:
 1. Root orchestration still does not connect every app-ui action to live syntax, workspace search,
    project replace, Git mutations, or the complete LSP request/result model; diagnostics and LSP
    lifecycle status now have a root event path, but completion/hover/rename/etc. are not wired.
-2. Format-on-save/paste, Save As/close, and full Problems/Git/LSP views remain UI-service
-   integration work. Manual formatting and clipboard commands are now root effects.
+2. Format-on-save and format-on-paste, plus full Problems/Git/LSP interactive views, remain
+   UI-service integration work. Manual formatting, clipboard commands, Save As, dirty close
+   protection, and project replacement effects are covered by root transitions and headless tests.
 3. Search and native watcher workers use standard threads; the architecture target is Tokio-based
    orchestration.
 4. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated

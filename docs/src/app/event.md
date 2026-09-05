@@ -7,3 +7,4 @@ Clipboard completion events never include clipboard contents in failure messages
 carry text only to the pending paste transaction, and successful writes acknowledge cut semantics.
 Language diagnostic notifications are converted from negotiated LSP positions into editor ranges
 before being stored in root state; malformed ranges are ignored safely.
+`DocumentSavedAs` changes the active tab path only after the workspace adapter confirms success.

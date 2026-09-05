@@ -225,6 +225,29 @@ impl EffectDispatcher for ServiceDispatcher {
     #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, effect: Effect) {
         let Effect::SaveDocument { path, text } = effect.clone() else {
+            if let Effect::SaveDocumentAs { path, text } = effect.clone() {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let event = match workspace_core::save_text_document(
+                        &path,
+                        &text,
+                        &workspace_core::DocumentSaveOptions::default(),
+                    ) {
+                        Ok(_) => Event::DocumentSavedAs { path },
+                        Err(error) => Event::DocumentSaveFailed {
+                            path: path.clone(),
+                            message: editor_types::OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "save-as".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: format!("could not save {}: {error}", path.display()),
+                            },
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+                return;
+            }
             if let Effect::RefreshExplorer { request, roots } = effect.clone() {
                 let sender = self.sender.clone();
                 thread::spawn(move || {

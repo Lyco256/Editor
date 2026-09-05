@@ -7,3 +7,5 @@ policy before dispatch. `RefreshGitStatus` is also trust-gated and returns its r
 typed event. `RefreshExplorer` carries workspace roots to a background filesystem traversal.
 `ClipboardWrite` and `ClipboardRead` carry clipboard operations through the terminal-backend
 adapter; cut is acknowledged before its deletion transaction is committed.
+`SaveDocumentAs` uses the same atomic workspace writer while reporting a distinct completion event
+so a failed Save As cannot retarget or dirty the active tab.

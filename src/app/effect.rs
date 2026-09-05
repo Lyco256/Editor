@@ -22,6 +22,10 @@ pub enum Effect {
         path: PathBuf,
         text: String,
     },
+    SaveDocumentAs {
+        path: PathBuf,
+        text: String,
+    },
     ExternalProcess {
         request: RequestId,
         kind: ExternalProcessKind,

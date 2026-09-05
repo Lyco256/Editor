@@ -10,6 +10,9 @@ pub enum Event {
     DocumentSaved {
         path: PathBuf,
     },
+    DocumentSavedAs {
+        path: PathBuf,
+    },
     DocumentSaveFailed {
         path: PathBuf,
         message: OutputMessage,

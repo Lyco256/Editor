@@ -23,14 +23,20 @@ struct SaveDispatcher {
 
 impl EffectDispatcher for SaveDispatcher {
     fn dispatch(&mut self, effect: Effect) {
-        if let Effect::SaveDocument { path, text } = effect {
+        let save_as = matches!(&effect, Effect::SaveDocumentAs { .. });
+        if let Effect::SaveDocument { path, text } | Effect::SaveDocumentAs { path, text } = effect
+        {
             workspace_core::save_text_document(
                 &path,
                 &text,
                 &workspace_core::DocumentSaveOptions::default(),
             )
             .expect("save effect should write atomically");
-            self.events.push(Event::DocumentSaved { path });
+            self.events.push(if save_as {
+                Event::DocumentSavedAs { path }
+            } else {
+                Event::DocumentSaved { path }
+            });
         } else if let Effect::RefreshExplorer { request, roots } = effect {
             let mut entries = Vec::new();
             for root in roots {
@@ -374,4 +380,41 @@ fn project_replacement_plan_runs_as_a_background_effect() {
     let report = workspace_core::apply_replacement_plan(&plan).expect("replace");
     state.apply_event(Event::ReplacementApplied { request, report });
     assert_eq!(std::fs::read_to_string(path).expect("read"), "new new");
+}
+
+#[test]
+fn save_as_retargets_only_after_atomic_write_and_close_protects_dirty_tabs() {
+    use editor_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+    let directory = tempfile::tempdir().expect("workspace");
+    let target = directory.path().join("saved.txt");
+    let input = Action::Input(InputEvent::Key(KeyEvent {
+        code: KeyCode::Character('x'),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    }));
+    let mut state = editor::app::state::AppState::default();
+    let _ = state.apply_action(input.clone());
+    let runtime = AppRuntime::with_state(
+        FakeTerminal::default(),
+        QueueActionSource::new([Action::SaveAs(target.clone()), Action::Quit]),
+        SaveDispatcher::default(),
+        (80, 24),
+        state,
+    );
+    let final_state = runtime.run().expect("save-as runtime");
+    assert!(!final_state.active_dirty);
+    assert_eq!(final_state.active_path.as_deref(), Some(target.as_path()));
+    assert_eq!(std::fs::read_to_string(target).expect("saved file"), "x");
+
+    let mut dirty = editor::app::state::AppState::default();
+    let _ = dirty.apply_action(input);
+    let _ = dirty.apply_action(Action::CloseTab(0));
+    assert!(dirty.active_dirty);
+    assert!(
+        dirty
+            .output
+            .iter()
+            .any(|message| message.operation == "close-tab")
+    );
 }

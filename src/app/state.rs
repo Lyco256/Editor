@@ -424,8 +424,8 @@ impl AppState {
         }
     }
 
-    /// Restores every editor tab from a previously persisted session. Missing files are skipped
-    /// safely while unsaved text remains available from the recovery record.
+    /// Restores every editor tab from a previously persisted session. Missing files are retained
+    /// as in-memory tabs when the session contains unsaved text, preventing recovery data loss.
     #[allow(
         clippy::too_many_lines,
         clippy::single_match_else,
@@ -786,6 +786,50 @@ impl AppState {
                     ..Transition::default()
                 }
             }
+            Action::CloseTab(index) => {
+                if let Some(tab) = self.tabs.get(index) {
+                    if tab.buffer.is_dirty() {
+                        self.output.push(OutputMessage {
+                            subsystem: "editor".to_owned(),
+                            operation: "close-tab".to_owned(),
+                            level: OutputLevel::Warning,
+                            message: "unsaved changes prevent closing this tab".to_owned(),
+                        });
+                    } else if self.tabs.len() > 1 {
+                        self.tabs.remove(index);
+                        if self.active_tab >= self.tabs.len() {
+                            self.active_tab = self.tabs.len().saturating_sub(1);
+                        } else if index < self.active_tab {
+                            self.active_tab = self.active_tab.saturating_sub(1);
+                        }
+                        let tab = self.tabs[self.active_tab].clone();
+                        self.active_path = tab.path;
+                        self.buffer = tab.buffer;
+                        self.sync_buffer_projection();
+                    } else {
+                        self.tabs[0] = TabState {
+                            path: None,
+                            buffer: TextBuffer::default(),
+                        };
+                        self.active_tab = 0;
+                        self.active_path = None;
+                        self.buffer = TextBuffer::default();
+                        self.sync_buffer_projection();
+                    }
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::SaveAs(path) => Transition {
+                effects: vec![Effect::SaveDocumentAs {
+                    path,
+                    text: self.active_text.clone(),
+                }],
+                render: true,
+                ..Transition::default()
+            },
             Action::SplitPane {
                 axis,
                 ratio_percent,
@@ -855,6 +899,7 @@ impl AppState {
                         (*request, super::effect::ExternalProcessKind::Git)
                     }
                     Effect::SaveDocument { .. }
+                    | Effect::SaveDocumentAs { .. }
                     | Effect::RefreshExplorer { .. }
                     | Effect::ClipboardWrite { .. }
                     | Effect::ClipboardRead { .. }
@@ -880,6 +925,7 @@ impl AppState {
                             .insert(*request, super::effect::ExternalProcessKind::Git);
                     }
                     Effect::SaveDocument { .. }
+                    | Effect::SaveDocumentAs { .. }
                     | Effect::RefreshExplorer { .. }
                     | Effect::ClipboardWrite { .. }
                     | Effect::ClipboardRead { .. }
@@ -1372,6 +1418,20 @@ impl AppState {
                 self.output.push(OutputMessage {
                     subsystem: "workspace".to_owned(),
                     operation: "save-file".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!("saved {}", path.display()),
+                });
+            }
+            Event::DocumentSavedAs { path } => {
+                self.active_path = Some(path.clone());
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.path = Some(path.clone());
+                }
+                self.buffer.mark_saved();
+                self.sync_buffer_projection();
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "save-as".to_owned(),
                     level: OutputLevel::Information,
                     message: format!("saved {}", path.display()),
                 });

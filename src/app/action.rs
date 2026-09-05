@@ -12,6 +12,8 @@ pub enum Action {
     SetWorkspaceTrust(bool),
     OpenPath(PathBuf),
     SwitchTab(usize),
+    CloseTab(usize),
+    SaveAs(PathBuf),
     SplitPane {
         axis: app_ui::shell::SplitAxis,
         ratio_percent: u16,
