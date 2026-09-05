@@ -47,8 +47,9 @@ declaration/implementation navigation, and range formatting. `editor.expandSelec
 syntax-produced symbol ranges to grow the primary selection.
 Selecting a completion item applies its LSP `textEdit`/`insertText` as one undoable transaction when
 the server supplied an applicable edit.
-Rename previews and code actions likewise apply applicable active-document workspace edits as one
-undoable transaction; edits targeting other documents remain preview-only.
+Rename previews and code actions apply applicable active-document workspace edits as one undoable
+transaction; edits targeting unopened documents are dispatched to the background workspace-edit
+worker and report typed completion/failure events.
 Server-originated `workspace/applyEdit` requests are validated against trusted workspace roots and
 open buffers, then answered through a typed response effect. Structural selection expansion uses
 syntax-produced symbol ranges.
@@ -72,7 +73,8 @@ Workspace Quick Open and streaming project search are routed through typed root 
 and syntax refreshes are scheduled after document-version changes.
 Language effect requests are converted to structured LSP methods and trust-gated, with negotiated
 position encoding applied to diagnostic range conversion.
-After a trusted server becomes ready, root sends workspace folders and didOpen; edits, saves, and
-close-tab actions queue didChange/didSave/didClose notifications through the persistent session.
+After a trusted server becomes ready, root sends workspace folders and didOpen for every open tab;
+new tabs are opened in the session, edits, saves, and close-tab actions queue
+didChange/didSave/didClose notifications through the persistent session.
 Git status events populate the pure dashboard model and successful Git mutations schedule a status
 refresh.

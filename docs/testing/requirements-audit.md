@@ -51,13 +51,13 @@ Still release-blocking or environment-blocked:
    navigation, range formatting, and syntax-aware structural selection expansion.
 
 5. Trusted language-server requests now reuse the persistent client when available, and root queues
-   didOpen/didChange/didSave/didClose plus workspace-folder notifications. Resource-operation
-   WorkspaceEdit entries remain rejected with a typed response; only text-document edits are applied.
+   didOpen/didChange/didSave/didClose plus workspace-folder notifications. File resource
+   WorkspaceEdit operations (create/rename/delete) are validated, journaled, and applied with
+   rollback on operation failure; directory resource operations remain explicitly rejected.
 
-6. Remaining protocol/UI coverage: opening or switching additional tabs after server startup does
-   not yet emit a new didOpen/didClose pair, and client-originated rename/code-action edits for
-   unopened documents remain preview-only. These are functional gaps against full multi-document
-   LSP behavior and must be closed before release completion.
+6. Client-originated rename/code-action WorkspaceEdits now use the background atomic worker when
+   they target unopened documents. Remaining limitation is explicit rejection of directory
+   resource operations; file resource operations and all text-document edits are handled.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining performance/smoke evidence and promotion to an identical verified

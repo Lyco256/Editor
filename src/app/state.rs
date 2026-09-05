@@ -2,7 +2,7 @@
 #![allow(clippy::struct_excessive_bools)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -28,8 +28,8 @@ pub struct AppState {
     pub frame_number: u64,
     pub language_server: LanguageServerStatus,
     pub(crate) lsp_position_encoding: lsp_client::protocol::PositionEncoding,
-    lsp_open_document: Option<PathBuf>,
-    lsp_last_text: Option<String>,
+    lsp_open_documents: HashSet<PathBuf>,
+    lsp_document_texts: HashMap<PathBuf, String>,
     pub git_status: Option<GitStatusSummary>,
     pub(crate) git_dashboard: Option<app_ui::git::GitDashboardState>,
     pub(crate) git_root: Option<PathBuf>,
@@ -170,7 +170,26 @@ fn json_path(uri: &str) -> PathBuf {
         .strip_prefix("file:///")
         .or_else(|| uri.strip_prefix("file://"))
         .unwrap_or(uri);
-    PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let digit = |value: u8| match value.to_ascii_lowercase() {
+                b'0'..=b'9' => Some(value.to_ascii_lowercase() - b'0'),
+                b'a'..=b'f' => Some(value.to_ascii_lowercase() - b'a' + 10),
+                _ => None,
+            };
+            if let (Some(high), Some(low)) = (digit(bytes[index + 1]), digit(bytes[index + 2])) {
+                decoded.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    PathBuf::from(String::from_utf8_lossy(&decoded).replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
 fn workspace_edits_for_path(edit: &serde_json::Value, path: &Path) -> Vec<serde_json::Value> {
@@ -218,12 +237,32 @@ fn workspace_edit_target_paths(edit: &serde_json::Value) -> Vec<PathBuf> {
         .get("documentChanges")
         .and_then(serde_json::Value::as_array)
     {
-        paths.extend(document_changes.iter().filter_map(|change| {
-            change
-                .get("textDocument")
-                .and_then(|document| document.get("uri"))
-                .and_then(serde_json::Value::as_str)
-                .map(json_path)
+        paths.extend(document_changes.iter().flat_map(|change| {
+            if change.get("kind").is_some() {
+                match change.get("kind").and_then(serde_json::Value::as_str) {
+                    Some("rename") => change
+                        .get("oldUri")
+                        .and_then(serde_json::Value::as_str)
+                        .into_iter()
+                        .chain(change.get("newUri").and_then(serde_json::Value::as_str))
+                        .map(json_path)
+                        .collect::<Vec<_>>(),
+                    _ => change
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .into_iter()
+                        .map(json_path)
+                        .collect::<Vec<_>>(),
+                }
+            } else {
+                change
+                    .get("textDocument")
+                    .and_then(|document| document.get("uri"))
+                    .and_then(serde_json::Value::as_str)
+                    .into_iter()
+                    .map(json_path)
+                    .collect::<Vec<_>>()
+            }
         }));
     }
     paths.sort_by_key(|path| workspace_core::canonical_workspace_key(path));
@@ -669,8 +708,8 @@ impl Default for AppState {
             frame_number: 0,
             language_server: LanguageServerStatus::Stopped,
             lsp_position_encoding: lsp_client::protocol::PositionEncoding::Utf16,
-            lsp_open_document: None,
-            lsp_last_text: None,
+            lsp_open_documents: HashSet::new(),
+            lsp_document_texts: HashMap::new(),
             git_status: None,
             git_dashboard: None,
             git_root: None,
@@ -1083,14 +1122,22 @@ impl AppState {
                 self.last_language_method = Some("textDocument/rename".to_owned());
                 self.bottom_panel_view = BottomPanelView::Language;
                 self.bottom_panel_visible = true;
-                let applied = self
-                    .lsp_results
-                    .get("textDocument/rename")
-                    .cloned()
-                    .and_then(|result| result.get("changes").cloned())
-                    .is_some_and(|changes| {
-                        self.apply_workspace_edit(&serde_json::json!({"changes": changes}))
+                let Some(edit) = self.lsp_results.get("textDocument/rename").cloned() else {
+                    self.output.push(OutputMessage {
+                        subsystem: "lsp".to_owned(),
+                        operation: "rename".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: "rename response is unavailable".to_owned(),
                     });
+                    return Transition {
+                        render: true,
+                        ..Transition::default()
+                    };
+                };
+                if self.workspace_edit_needs_background(&edit) {
+                    return self.queue_lsp_workspace_edit(edit);
+                }
+                let applied = self.apply_workspace_edit(&edit);
                 self.output.push(OutputMessage {
                     subsystem: "lsp".to_owned(),
                     operation: "rename".to_owned(),
@@ -1106,6 +1153,17 @@ impl AppState {
                 self.last_language_method = Some("textDocument/codeAction".to_owned());
                 self.bottom_panel_view = BottomPanelView::Language;
                 self.bottom_panel_visible = true;
+                if let Some(edit) = self
+                    .lsp_results
+                    .get("textDocument/codeAction")
+                    .and_then(|result| result.as_array())
+                    .and_then(|actions| actions.get(index))
+                    .and_then(|action| action.get("edit"))
+                    .filter(|edit| self.workspace_edit_needs_background(edit))
+                    .cloned()
+                {
+                    return self.queue_lsp_workspace_edit(edit);
+                }
                 let applied = self.apply_code_action(index);
                 self.output.push(OutputMessage {
                     subsystem: "lsp".to_owned(),
@@ -1184,6 +1242,32 @@ impl AppState {
         action
             .get("edit")
             .is_some_and(|edit| self.apply_workspace_edit(edit))
+    }
+
+    fn workspace_edit_needs_background(&self, edit: &serde_json::Value) -> bool {
+        if edit
+            .get("documentChanges")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|changes| changes.iter().any(|change| change.get("kind").is_some()))
+        {
+            return true;
+        }
+        workspace_edit_target_paths(edit).iter().any(|path| {
+            !self.tabs.iter().any(|tab| {
+                tab.path
+                    .as_deref()
+                    .is_some_and(|open| workspace_core::path_eq(open, path))
+            })
+        })
+    }
+
+    fn queue_lsp_workspace_edit(&mut self, edit: serde_json::Value) -> Transition {
+        self.apply_action(Action::RequestEffect(Effect::LspApplyWorkspaceEdit {
+            request: RequestId(self.frame_number.saturating_add(1)),
+            edit,
+            roots: self.workspace_roots.clone(),
+            encoding: self.lsp_position_encoding,
+        }))
     }
 
     fn apply_workspace_edit(&mut self, edit: &serde_json::Value) -> bool {
@@ -1581,8 +1665,12 @@ impl AppState {
     fn active_document_uri(&self) -> String {
         self.active_path.as_ref().map_or_else(
             || "untitled:editor".to_owned(),
-            |path| format!("file://{}", path.to_string_lossy().replace('\\', "/")),
+            |path| Self::document_uri(path),
         )
+    }
+
+    fn document_uri(path: &Path) -> String {
+        format!("file://{}", path.to_string_lossy().replace('\\', "/"))
     }
 
     fn queue_lsp_notification(&mut self, method: &str, params: serde_json::Value) {
@@ -1597,47 +1685,80 @@ impl AppState {
         }
     }
 
-    fn queue_lsp_did_open(&mut self) {
-        let Some(path) = self.active_path.clone() else {
-            return;
-        };
+    fn queue_lsp_did_open_for(&mut self, path: PathBuf, text: &str) {
         if self
-            .lsp_open_document
-            .as_ref()
-            .is_some_and(|open| workspace_core::path_eq(open, &path))
+            .lsp_open_documents
+            .iter()
+            .any(|open| workspace_core::path_eq(open, &path))
         {
             return;
         }
-        let text = self.buffer.snapshot().text().to_owned();
+        let language_id = syntax_engine::SyntaxLanguage::from_path(&path).map_or_else(
+            || "plaintext".to_owned(),
+            |language| language.name().to_owned(),
+        );
         self.queue_lsp_notification(
             "textDocument/didOpen",
             serde_json::json!({
                 "textDocument": {
-                    "uri": self.active_document_uri(),
-                    "languageId": syntax_engine::SyntaxLanguage::from_path(&path)
-                        .map_or_else(|| "plaintext".to_owned(), |language| language.name().to_owned()),
-                    "version": self.buffer.snapshot().version(),
+                    "uri": Self::document_uri(&path),
+                    "languageId": language_id,
+                    "version": 1,
                     "text": text,
                 }
             }),
         );
-        self.lsp_open_document = Some(path);
-        self.lsp_last_text = Some(self.buffer.snapshot().text().to_owned());
+        self.lsp_document_texts
+            .insert(path.clone(), text.to_owned());
+        self.lsp_open_documents.insert(path);
+    }
+
+    fn queue_lsp_did_open(&mut self) {
+        let documents = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                tab.path
+                    .clone()
+                    .map(|path| (path, tab.buffer.snapshot().text().to_owned()))
+            })
+            .collect::<Vec<_>>();
+        for (path, text) in documents {
+            self.queue_lsp_did_open_for(path, &text);
+        }
+    }
+
+    fn queue_lsp_did_close(&mut self, path: &Path) {
+        let Some(open) = self
+            .lsp_open_documents
+            .iter()
+            .find(|open| workspace_core::path_eq(open, path))
+            .cloned()
+        else {
+            return;
+        };
+        self.queue_lsp_notification(
+            "textDocument/didClose",
+            serde_json::json!({"textDocument": {"uri": Self::document_uri(&open)}}),
+        );
+        self.lsp_open_documents.remove(&open);
+        self.lsp_document_texts.remove(&open);
     }
 
     fn queue_lsp_did_change(&mut self, previous_text: String) {
         let Some(path) = self.active_path.clone() else {
             return;
         };
-        if !self
-            .lsp_open_document
-            .as_ref()
-            .is_some_and(|open| workspace_core::path_eq(open, &path))
-        {
+        let Some(open) = self
+            .lsp_open_documents
+            .iter()
+            .find(|open| workspace_core::path_eq(open, &path))
+            .cloned()
+        else {
             return;
-        }
+        };
         let current = self.buffer.snapshot().text().to_owned();
-        if self.lsp_last_text.as_deref() == Some(current.as_str()) {
+        if self.lsp_document_texts.get(&open) == Some(&current) {
             return;
         }
         let old_buffer = TextBuffer::new(&previous_text);
@@ -1654,7 +1775,7 @@ impl AppState {
             "textDocument/didChange",
             serde_json::json!({
                 "textDocument": {
-                    "uri": self.active_document_uri(),
+                    "uri": Self::document_uri(&open),
                     "version": self.buffer.snapshot().version(),
                 },
                 "contentChanges": [{
@@ -1666,7 +1787,7 @@ impl AppState {
                 }]
             }),
         );
-        self.lsp_last_text = Some(self.buffer.snapshot().text().to_owned());
+        self.lsp_document_texts.insert(open, current);
     }
 
     fn discovered_lsp_spec(&self) -> Option<ProcessSpec> {
@@ -2320,6 +2441,7 @@ impl AppState {
         self.buffer = self.tabs[self.active_tab].buffer.clone();
         self.apply_editorconfig_settings(&document_settings);
         self.refresh_explorer_entries();
+        self.queue_lsp_did_open();
         Ok(())
     }
 
@@ -2695,25 +2817,10 @@ impl AppState {
                 if let Some(tab) = self.tabs.get(index) {
                     let tab_dirty = tab.buffer.is_dirty();
                     let tab_path = tab.path.clone();
-                    if !tab_dirty
-                        && tab_path.as_ref().is_some_and(|path| {
-                            self.lsp_open_document
-                                .as_ref()
-                                .is_some_and(|open| workspace_core::path_eq(open, path))
-                        })
-                    {
+                    if !tab_dirty {
                         if let Some(path) = tab_path.as_ref() {
-                            self.queue_lsp_notification(
-                                "textDocument/didClose",
-                                serde_json::json!({
-                                    "textDocument": {
-                                        "uri": format!("file://{}", path.to_string_lossy().replace('\\', "/"))
-                                    }
-                                }),
-                            );
+                            self.queue_lsp_did_close(path);
                         }
-                        self.lsp_open_document = None;
-                        self.lsp_last_text = None;
                     }
                     if tab_dirty {
                         self.output.push(OutputMessage {
@@ -2741,6 +2848,7 @@ impl AppState {
                                 &config_core::DocumentSettings::default(),
                             );
                         }
+                        self.queue_lsp_did_open();
                     } else {
                         self.tabs[0] = TabState::untitled();
                         self.active_tab = 0;
@@ -2851,7 +2959,8 @@ impl AppState {
                     }
                     Effect::LspRequest { request, .. }
                     | Effect::LspNotification { request, .. }
-                    | Effect::LspWorkspaceEdit { request, .. } => {
+                    | Effect::LspWorkspaceEdit { request, .. }
+                    | Effect::LspApplyWorkspaceEdit { request, .. } => {
                         (*request, super::effect::ExternalProcessKind::LanguageServer)
                     }
                     Effect::LspServerResponse { .. } => unreachable!("unguarded effect"),
@@ -2902,6 +3011,7 @@ impl AppState {
                     | Effect::LspNotification { .. }
                     | Effect::LspServerResponse { .. }
                     | Effect::LspWorkspaceEdit { .. }
+                    | Effect::LspApplyWorkspaceEdit { .. }
                     | Effect::Render => {}
                 }
                 Transition {
@@ -4228,6 +4338,51 @@ impl AppState {
                     error: None,
                 });
             }
+            Event::LspWorkspaceEditApplied {
+                applied,
+                failure_reason,
+                documents,
+                ..
+            } => {
+                if applied {
+                    self.sync_active_tab();
+                    for document in documents {
+                        if let Some((index, tab)) =
+                            self.tabs.iter_mut().enumerate().find(|(_, tab)| {
+                                tab.path.as_deref().is_some_and(|path| {
+                                    workspace_core::path_eq(path, &document.path)
+                                })
+                            })
+                        {
+                            tab.buffer = TextBuffer::new(&document.text);
+                            tab.encoding = document.encoding.clone();
+                            tab.with_bom = document.had_bom;
+                            tab.line_endings = document.line_endings;
+                            if index == self.active_tab {
+                                self.buffer = tab.buffer.clone();
+                                self.active_text.clone_from(&document.text);
+                                self.active_dirty = false;
+                            }
+                        }
+                    }
+                    self.sync_buffer_projection();
+                    self.deferred_effects.push(self.syntax_effect());
+                    self.output.push(OutputMessage {
+                        subsystem: "lsp".to_owned(),
+                        operation: "workspace-edit".to_owned(),
+                        level: OutputLevel::Information,
+                        message: "language server workspace edit applied".to_owned(),
+                    });
+                } else {
+                    self.output.push(OutputMessage {
+                        subsystem: "lsp".to_owned(),
+                        operation: "workspace-edit".to_owned(),
+                        level: OutputLevel::Error,
+                        message: failure_reason
+                            .unwrap_or_else(|| "language server workspace edit failed".to_owned()),
+                    });
+                }
+            }
             Event::LspServerRequest {
                 request,
                 id,
@@ -4539,6 +4694,24 @@ mod tests {
         assert!(effects.iter().any(|effect| matches!(
             effect,
             Effect::LspNotification { method, .. } if method == "workspace/didChangeWorkspaceFolders"
+        )));
+
+        let second = directory.path().join("lib.rs");
+        std::fs::write(&second, "pub fn lib() {}").expect("second fixture");
+        let _ = state.take_deferred_effects();
+        state.open_tab(&second).expect("open second tab");
+        assert!(state.take_deferred_effects().iter().any(|effect| matches!(
+            effect,
+            Effect::LspNotification { method, params, .. }
+                if method == "textDocument/didOpen"
+                    && params["textDocument"]["uri"].as_str().is_some_and(|uri| uri.contains("lib.rs"))
+        )));
+        let _ = state.apply_action(Action::CloseTab(1));
+        assert!(state.take_deferred_effects().iter().any(|effect| matches!(
+            effect,
+            Effect::LspNotification { method, params, .. }
+                if method == "textDocument/didClose"
+                    && params["textDocument"]["uri"].as_str().is_some_and(|uri| uri.contains("lib.rs"))
         )));
     }
 
@@ -4986,6 +5159,36 @@ mod tests {
                 error: None,
             } if result["applied"] == true
         )));
+    }
+
+    #[test]
+    fn rename_with_unopened_document_uses_background_workspace_edit() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let active = directory.path().join("main.rs");
+        let unopened = directory.path().join("lib.rs");
+        std::fs::write(&active, "fn main() {}").expect("active");
+        std::fs::write(&unopened, "fn old() {}").expect("unopened");
+        let mut state = AppState::default();
+        state.open_startup_path(&active);
+        state.workspace_trusted = true;
+        let uri = format!("file:///{}", unopened.to_string_lossy().replace('\\', "/"));
+        state.lsp_results.insert(
+            "textDocument/rename".to_owned(),
+            serde_json::json!({
+                "changes": {
+                    uri: [{
+                        "range": {"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 6}},
+                        "newText": "new"
+                    }]
+                }
+            }),
+        );
+        let transition =
+            state.apply_language_action(app_ui::language::LanguageAction::AcceptRenamePreview);
+        assert!(matches!(
+            transition.effects.first(),
+            Some(Effect::LspApplyWorkspaceEdit { .. })
+        ));
     }
 
     #[test]

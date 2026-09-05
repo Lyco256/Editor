@@ -15,6 +15,8 @@ logged. Trusted language-server effects now use `lsp-client` stdio framing and i
 forwarding stderr/crash events and requesting shutdown when the dispatcher is dropped.
 Server-originated requests are forwarded to root as typed events; validated `workspace/applyEdit`
 effects run on a background worker and return a JSON-RPC response through the owning client session.
+Text edits and file resource operations use canonical trusted-root checks; failed resource
+operations roll back their journaled file changes.
 Requests and document lifecycle notifications reuse the persistent client session when available;
 the one-shot request path remains only as a startup fallback.
 Syntax refreshes run through Tokio background workers, while project search streams typed

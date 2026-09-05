@@ -25,7 +25,7 @@ Trusted language-server requests now reuse the persistent client session when av
 queues workspace-folder, didOpen, didChange, didSave, and didClose notifications; deterministic
 state coverage verifies the lifecycle notifications are emitted.
 
-The LSP implementation still rejects WorkspaceEdit resource operations and does not yet emit
-additional didOpen/didClose notifications for tabs opened or switched after startup; rename and
-code-action edits for unopened documents remain preview-only. These are release gaps, not silently
-ignored behavior.
+File resource WorkspaceEdit operations (create/rename/delete) are now applied with trusted-root
+validation and rollback on operation failure. Directory resource operations remain explicitly
+rejected. Rename and code-action edits targeting unopened documents use the same background worker
+as server-originated edits.

@@ -115,6 +115,13 @@ pub enum Effect {
         roots: Vec<PathBuf>,
         encoding: lsp_client::protocol::PositionEncoding,
     },
+    /// Applies a client-originated workspace edit that includes unopened documents.
+    LspApplyWorkspaceEdit {
+        request: RequestId,
+        edit: serde_json::Value,
+        roots: Vec<PathBuf>,
+        encoding: lsp_client::protocol::PositionEncoding,
+    },
     RefreshSyntax {
         request: RequestId,
         document: editor_types::DocumentId,
@@ -139,6 +146,7 @@ impl Effect {
                 | Self::LspRequest { .. }
                 | Self::LspNotification { .. }
                 | Self::LspWorkspaceEdit { .. }
+                | Self::LspApplyWorkspaceEdit { .. }
         )
     }
 }

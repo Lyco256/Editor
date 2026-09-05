@@ -4,7 +4,7 @@ use std::{
     convert::Infallible,
     env,
     io::IsTerminal,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
     sync::mpsc::{self, Receiver, Sender},
@@ -321,6 +321,48 @@ fn lsp_workspace_edit_paths(edit: &serde_json::Value) -> Vec<PathBuf> {
         .get("documentChanges")
         .and_then(serde_json::Value::as_array)
     {
+        paths.extend(document_changes.iter().flat_map(|change| {
+            if change.get("kind").is_some() {
+                match change.get("kind").and_then(serde_json::Value::as_str) {
+                    Some("rename") => change
+                        .get("oldUri")
+                        .and_then(serde_json::Value::as_str)
+                        .into_iter()
+                        .chain(change.get("newUri").and_then(serde_json::Value::as_str))
+                        .map(lsp_uri_path)
+                        .collect::<Vec<_>>(),
+                    _ => change
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .into_iter()
+                        .map(lsp_uri_path)
+                        .collect::<Vec<_>>(),
+                }
+            } else {
+                change
+                    .get("textDocument")
+                    .and_then(|document| document.get("uri"))
+                    .and_then(serde_json::Value::as_str)
+                    .into_iter()
+                    .map(lsp_uri_path)
+                    .collect::<Vec<_>>()
+            }
+        }));
+    }
+    paths.sort_by_key(|path| workspace_core::canonical_workspace_key(path));
+    paths.dedup_by(|left, right| workspace_core::path_eq(left, right));
+    paths
+}
+
+fn lsp_workspace_text_paths(edit: &serde_json::Value) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
+        paths.extend(changes.keys().map(|uri| lsp_uri_path(uri)));
+    }
+    if let Some(document_changes) = edit
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+    {
         paths.extend(document_changes.iter().filter_map(|change| {
             change
                 .get("textDocument")
@@ -334,12 +376,138 @@ fn lsp_workspace_edit_paths(edit: &serde_json::Value) -> Vec<PathBuf> {
     paths
 }
 
+fn lsp_path_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let candidate = if path.exists() {
+        std::fs::canonicalize(path).ok()
+    } else {
+        path.parent().and_then(|parent| {
+            std::fs::canonicalize(parent)
+                .ok()
+                .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+        })
+    };
+    let Some(candidate) = candidate else {
+        return false;
+    };
+    roots
+        .iter()
+        .any(|root| std::fs::canonicalize(root).is_ok_and(|root| candidate.starts_with(root)))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LspResourceOperation {
+    Create {
+        path: PathBuf,
+        overwrite: bool,
+        ignore_if_exists: bool,
+    },
+    Rename {
+        old_path: PathBuf,
+        new_path: PathBuf,
+        overwrite: bool,
+        ignore_if_exists: bool,
+    },
+    Delete {
+        path: PathBuf,
+        recursive: bool,
+        ignore_if_not_exists: bool,
+    },
+}
+
+fn lsp_resource_operations(edit: &serde_json::Value) -> Result<Vec<LspResourceOperation>, String> {
+    let Some(changes) = edit
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut operations = Vec::new();
+    for change in changes {
+        let Some(kind) = change.get("kind").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let options = change.get("options");
+        let bool_option = |name: &str| {
+            options
+                .and_then(|value| value.get(name))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        let operation = match kind {
+            "create" => LspResourceOperation::Create {
+                path: lsp_uri_path(
+                    change
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "create operation omitted uri".to_owned())?,
+                ),
+                overwrite: bool_option("overwrite"),
+                ignore_if_exists: bool_option("ignoreIfExists"),
+            },
+            "rename" => LspResourceOperation::Rename {
+                old_path: lsp_uri_path(
+                    change
+                        .get("oldUri")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "rename operation omitted oldUri".to_owned())?,
+                ),
+                new_path: lsp_uri_path(
+                    change
+                        .get("newUri")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "rename operation omitted newUri".to_owned())?,
+                ),
+                overwrite: bool_option("overwrite"),
+                ignore_if_exists: bool_option("ignoreIfExists"),
+            },
+            "delete" => LspResourceOperation::Delete {
+                path: lsp_uri_path(
+                    change
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "delete operation omitted uri".to_owned())?,
+                ),
+                recursive: bool_option("recursive"),
+                ignore_if_not_exists: bool_option("ignoreIfNotExists"),
+            },
+            other => return Err(format!("unsupported workspace resource operation: {other}")),
+        };
+        operations.push(operation);
+    }
+    Ok(operations)
+}
+
 fn lsp_uri_path(uri: &str) -> PathBuf {
     let path = uri
         .strip_prefix("file:///")
         .or_else(|| uri.strip_prefix("file://"))
         .unwrap_or(uri);
-    PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+    PathBuf::from(percent_decode_uri_path(path).replace('/', std::path::MAIN_SEPARATOR_STR))
+}
+
+fn percent_decode_uri_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let high = bytes[index + 1].to_ascii_lowercase();
+            let low = bytes[index + 2].to_ascii_lowercase();
+            let digit = |value: u8| match value {
+                b'0'..=b'9' => Some(value - b'0'),
+                b'a'..=b'f' => Some(value - b'a' + 10),
+                _ => None,
+            };
+            if let (Some(high), Some(low)) = (digit(high), digit(low)) {
+                decoded.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn lsp_workspace_edits_for_path(
@@ -381,6 +549,7 @@ fn lsp_workspace_edits_for_path(
     edits
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_lsp_workspace_edit(
     edit: &serde_json::Value,
     roots: &[PathBuf],
@@ -388,20 +557,131 @@ fn apply_lsp_workspace_edit(
 ) -> Result<Vec<workspace_core::TextDocument>, String> {
     let paths = lsp_workspace_edit_paths(edit);
     if paths.is_empty() {
-        return Err("workspace edit did not contain text document changes".to_owned());
+        return Err("workspace edit did not contain document or resource changes".to_owned());
     }
-    let mut prepared = Vec::new();
-    for path in paths {
-        let target = workspace_core::canonical_workspace_identity(&path);
-        let allowed = roots
-            .iter()
-            .any(|root| target.starts_with(workspace_core::canonical_workspace_identity(root)));
-        if !allowed {
+    for path in &paths {
+        if !lsp_path_within_roots(path, roots) {
             return Err(format!(
                 "workspace edit targeted an untrusted path: {}",
                 path.display()
             ));
         }
+    }
+    let resources = lsp_resource_operations(edit)?;
+    let mut backups = Vec::<(PathBuf, Option<Vec<u8>>)>::new();
+    for operation in &resources {
+        let operation_paths = match operation {
+            LspResourceOperation::Create { path, .. }
+            | LspResourceOperation::Delete { path, .. } => vec![path.clone()],
+            LspResourceOperation::Rename {
+                old_path, new_path, ..
+            } => vec![old_path.clone(), new_path.clone()],
+        };
+        for path in operation_paths {
+            if backups
+                .iter()
+                .any(|(existing, _)| workspace_core::path_eq(existing, &path))
+            {
+                continue;
+            }
+            let backup =
+                if path.exists() {
+                    if path.is_dir() {
+                        return Err(format!(
+                            "directory resource operations are not supported: {}",
+                            path.display()
+                        ));
+                    }
+                    Some(std::fs::read(&path).map_err(|error| {
+                        format!("could not back up {}: {error}", path.display())
+                    })?)
+                } else {
+                    None
+                };
+            backups.push((path, backup));
+        }
+    }
+    let rollback = |backups: &[(PathBuf, Option<Vec<u8>>)]| {
+        for (path, bytes) in backups {
+            match bytes {
+                Some(bytes) => {
+                    let _ = std::fs::write(path, bytes);
+                }
+                None if path.exists() && path.is_file() => {
+                    let _ = std::fs::remove_file(path);
+                }
+                None => {}
+            }
+        }
+    };
+    for operation in &resources {
+        let result = match operation {
+            LspResourceOperation::Create {
+                path,
+                overwrite,
+                ignore_if_exists,
+            } => {
+                if path.exists() {
+                    if *ignore_if_exists {
+                        Ok(())
+                    } else if !overwrite {
+                        Err(format!("create target already exists: {}", path.display()))
+                    } else {
+                        std::fs::write(path, []).map_err(|error| error.to_string())
+                    }
+                } else {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                    }
+                    std::fs::write(path, []).map_err(|error| error.to_string())
+                }
+            }
+            LspResourceOperation::Rename {
+                old_path,
+                new_path,
+                overwrite,
+                ignore_if_exists,
+            } => {
+                if !old_path.exists() {
+                    Err(format!(
+                        "rename source does not exist: {}",
+                        old_path.display()
+                    ))
+                } else if new_path.exists() && *ignore_if_exists {
+                    Ok(())
+                } else if new_path.exists() && !overwrite {
+                    Err(format!(
+                        "rename target already exists: {}",
+                        new_path.display()
+                    ))
+                } else {
+                    if new_path.exists() {
+                        std::fs::remove_file(new_path).map_err(|error| error.to_string())?;
+                    }
+                    std::fs::rename(old_path, new_path).map_err(|error| error.to_string())
+                }
+            }
+            LspResourceOperation::Delete {
+                path,
+                ignore_if_not_exists,
+                ..
+            } => {
+                if !path.exists() && *ignore_if_not_exists {
+                    Ok(())
+                } else if !path.exists() {
+                    Err(format!("delete target does not exist: {}", path.display()))
+                } else {
+                    std::fs::remove_file(path).map_err(|error| error.to_string())
+                }
+            }
+        };
+        if let Err(error) = result {
+            rollback(&backups);
+            return Err(format!("workspace resource operation failed: {error}"));
+        }
+    }
+    let mut prepared = Vec::new();
+    for path in lsp_workspace_text_paths(edit) {
         let document = workspace_core::load_text_document(
             &path,
             &workspace_core::DocumentLoadOptions::default(),
@@ -942,6 +1222,33 @@ impl EffectDispatcher for ServiceDispatcher {
                         Err(message) => Event::LspWorkspaceEditCompleted {
                             request,
                             id,
+                            applied: false,
+                            failure_reason: Some(message),
+                            documents: Vec::new(),
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+                return;
+            }
+            if let Effect::LspApplyWorkspaceEdit {
+                request,
+                edit,
+                roots,
+                encoding,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                self.runtime.spawn_blocking(move || {
+                    let event = match apply_lsp_workspace_edit(&edit, &roots, encoding) {
+                        Ok(documents) => Event::LspWorkspaceEditApplied {
+                            request,
+                            applied: true,
+                            failure_reason: None,
+                            documents,
+                        },
+                        Err(message) => Event::LspWorkspaceEditApplied {
+                            request,
                             applied: false,
                             failure_reason: Some(message),
                             documents: Vec::new(),
@@ -1542,5 +1849,55 @@ mod tests {
             std::fs::read_to_string(path).expect("saved source"),
             "new\n"
         );
+    }
+
+    #[test]
+    fn server_workspace_edit_worker_applies_file_resource_operations() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let source = directory.path().join("old.txt");
+        let target = directory.path().join("new.txt");
+        std::fs::write(&source, "content").expect("source");
+        let uri = |path: &std::path::Path| {
+            format!("file:///{}", path.to_string_lossy().replace('\\', "/"))
+        };
+        let edit = serde_json::json!({
+            "documentChanges": [
+                {"kind": "rename", "oldUri": uri(&source), "newUri": uri(&target)},
+                {"kind": "create", "uri": uri(&directory.path().join("created.txt"))}
+            ]
+        });
+        let documents = apply_lsp_workspace_edit(
+            &edit,
+            &[directory.path().to_path_buf()],
+            lsp_client::protocol::PositionEncoding::Utf16,
+        )
+        .expect("resource operations");
+        assert!(documents.is_empty());
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("renamed source"),
+            "content"
+        );
+        assert!(directory.path().join("created.txt").is_file());
+    }
+
+    #[test]
+    fn server_workspace_edit_worker_rejects_resource_operation_outside_root() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let edit = serde_json::json!({
+            "documentChanges": [{
+                "kind": "create",
+                "uri": format!("file:///{}", outside.path().join("escape.txt").to_string_lossy().replace('\\', "/"))
+            }]
+        });
+        let error = apply_lsp_workspace_edit(
+            &edit,
+            &[directory.path().to_path_buf()],
+            lsp_client::protocol::PositionEncoding::Utf16,
+        )
+        .expect_err("outside operation must be rejected");
+        assert!(error.contains("untrusted path"));
+        assert!(!outside.path().join("escape.txt").exists());
     }
 }

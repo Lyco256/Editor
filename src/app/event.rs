@@ -121,6 +121,12 @@ pub enum Event {
         failure_reason: Option<String>,
         documents: Vec<workspace_core::TextDocument>,
     },
+    LspWorkspaceEditApplied {
+        request: RequestId,
+        applied: bool,
+        failure_reason: Option<String>,
+        documents: Vec<workspace_core::TextDocument>,
+    },
     EffectCompleted(RequestId),
     EffectFailed {
         request: RequestId,
