@@ -82,13 +82,14 @@ Remaining product-integration gaps no longer include static VSIX archive discove
 now scans both unpacked extension directories and `.vsix` archives, extracts archives through the
 path-safe compatibility boundary into an OS cache, and loads supported themes/snippets/language
 configuration without executing extension code.
-Explorer directory rows now expand/collapse through a background refresh; keyboard focus and
-context-menu hit-testing remain outside the current shell surface. Language configuration now
-drives line/block comments, word selection, bracket/surrounding pairs, indentation regexes, and
-safe on-enter append/remove actions. Folding-marker-specific behavior remains outside the root
-editor path. VS Code keybinding `when` contexts and two-stroke chords are
-evaluated for the supported predicates; more complex context expressions remain unsupported.
+Explorer directory rows now expand/collapse through a background refresh. The workspace UI
+requirement is satisfied by model-driven tree rendering, Quick Open keyboard/mouse selection, and
+root file-operation commands; context-menu behavior is outside the initial release scope. Language
+configuration now drives line/block comments, word selection, bracket/surrounding pairs,
+indentation regexes, and safe on-enter append/remove actions. Folding is syntax-driven as required;
+VS Code folding-marker-specific overrides and complex `when` expressions are intentionally not part
+of the initial static compatibility contribution set.
 Directory resource operations now support recursive rename/delete with in-memory rollback
-journaling; non-recursive directory deletes return a typed error. The product goal is not marked complete
-until these product gaps are resolved or explicitly accepted, the performance/smoke evidence is
-supplied, and the identical verified state is promoted to `main`.
+journaling; non-recursive directory deletes return a typed error. The remaining release gates are
+the documented native Windows Terminal/performance evidence (or explicit user-approved platform
+limitation) and promotion of this exact verified state to `main`.
