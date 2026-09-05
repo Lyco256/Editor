@@ -31,3 +31,7 @@ formatter fallback when configured and rejects stale results before applying a t
 Unit tests cover editing, dirty protection, blocked and authorized paths, plus clean input shutdown.
 Workspace Quick Open and streaming project search are routed through typed root actions/effects,
 and syntax refreshes are scheduled after document-version changes.
+Language effect requests are converted to structured LSP methods and trust-gated, with negotiated
+position encoding applied to diagnostic range conversion.
+Git status events populate the pure dashboard model and successful Git mutations schedule a status
+refresh.

@@ -19,7 +19,12 @@ pub enum Event {
     },
     GitStatusUpdated {
         request: RequestId,
+        root: PathBuf,
         summary: GitStatusSummary,
+        entries: Vec<vcs_git::GitStatusEntry>,
+        branch_state: Option<String>,
+        head: Option<String>,
+        conflicts: Vec<vcs_git::GitConflictFile>,
     },
     ExplorerUpdated {
         request: RequestId,
@@ -48,6 +53,10 @@ pub enum Event {
     LanguageDiagnostics {
         request: RequestId,
         params: lsp_client::protocol::PublishDiagnosticsParams,
+    },
+    LanguageServerReady {
+        request: RequestId,
+        encoding: lsp_client::protocol::PositionEncoding,
     },
     ReplacementApplied {
         request: RequestId,
@@ -79,6 +88,12 @@ pub enum Event {
     SearchFailed {
         session_id: u64,
         message: OutputMessage,
+    },
+    LspResponse {
+        request: RequestId,
+        version: u64,
+        method: String,
+        result: serde_json::Value,
     },
     EffectCompleted(RequestId),
     EffectFailed {

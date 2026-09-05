@@ -374,6 +374,7 @@ dependencies = [
  "editor-core",
  "editor-types",
  "lsp-client",
+ "serde_json",
  "syntax-engine",
  "tempfile",
  "terminal-backend",

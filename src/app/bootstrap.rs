@@ -421,6 +421,72 @@ impl EffectDispatcher for ServiceDispatcher {
                 }
                 return;
             }
+            if let Effect::LspRequest {
+                request,
+                version,
+                spec,
+                method,
+                params,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                let method_for_event = method.clone();
+                thread::spawn(move || {
+                    let result = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| error.to_string())
+                        .and_then(|runtime| {
+                            runtime.block_on(async move {
+                                let command = lsp_client::CommandSpec {
+                                    executable: PathBuf::from(spec.executable),
+                                    args: spec.arguments,
+                                    environment: std::collections::BTreeMap::new(),
+                                    current_dir: None,
+                                };
+                                let client = lsp_client::LspClient::spawn(command)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                client
+                                    .initialize(lsp_client::protocol::InitializeParams::default())
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                client
+                                    .initialized()
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                let response = client
+                                    .request_json(&method, params)
+                                    .await
+                                    .map_err(|error| error.to_string());
+                                let _ = client.shutdown().await;
+                                response
+                            })
+                        });
+                    match result {
+                        Ok(result) => {
+                            let _ = sender.send(Event::LspResponse {
+                                request,
+                                version,
+                                method: method_for_event,
+                                result,
+                            });
+                        }
+                        Err(message) => {
+                            let _ = sender.send(Event::EffectFailed {
+                                request,
+                                message: editor_types::OutputMessage {
+                                    subsystem: "lsp".to_owned(),
+                                    operation: "request".to_owned(),
+                                    level: editor_types::OutputLevel::Error,
+                                    message,
+                                },
+                            });
+                        }
+                    }
+                });
+                return;
+            }
             if let Effect::ClipboardWrite { request, text, cut } = effect.clone() {
                 let sender = self.sender.clone();
                 thread::spawn(move || {
@@ -575,7 +641,19 @@ impl EffectDispatcher for ServiceDispatcher {
                         {
                             Ok(status) => Event::GitStatusUpdated {
                                 request,
+                                root: status.root.clone(),
                                 summary: status.summary,
+                                entries: status.entries,
+                                branch_state: status.branch_state.branch,
+                                head: status.branch_state.head,
+                                conflicts: status
+                                    .conflicts
+                                    .into_iter()
+                                    .map(|path| vcs_git::GitConflictFile {
+                                        path,
+                                        stages: vec![1, 2, 3],
+                                    })
+                                    .collect(),
                             },
                             Err(error) => Event::EffectFailed {
                                 request,
@@ -629,7 +707,7 @@ impl EffectDispatcher for ServiceDispatcher {
                                     let client = lsp_client::LspClient::spawn(command)
                                         .await
                                         .map_err(|error| error.to_string())?;
-                                    client
+                                    let initialize = client
                                         .initialize(
                                             lsp_client::protocol::InitializeParams::default(),
                                         )
@@ -640,6 +718,10 @@ impl EffectDispatcher for ServiceDispatcher {
                                         .await
                                         .map_err(|error| error.to_string())?;
                                     let mut events = client.subscribe();
+                                    let _ = event_sender.send(Event::LanguageServerReady {
+                                        request,
+                                        encoding: initialize.position_encoding,
+                                    });
                                     let _ = event_sender.send(Event::EffectCompleted(request));
                                     while !shutdown.load(Ordering::SeqCst) {
                                         let Ok(event) = tokio::time::timeout(
@@ -732,19 +814,39 @@ impl EffectDispatcher for ServiceDispatcher {
                     let result = Command::new(&spec.executable)
                         .args(&spec.arguments)
                         .stdin(Stdio::null())
-                        .stdout(Stdio::null())
+                        .stdout(Stdio::piped())
                         .stderr(Stdio::piped())
                         .spawn();
                     let event = match result {
-                        Ok(mut child) => match child.wait() {
-                            Ok(status) if status.success() => Event::EffectCompleted(request),
-                            Ok(status) => Event::EffectFailed {
+                        Ok(child) => match child.wait_with_output() {
+                            Ok(output) if output.status.success() => {
+                                if !output.stdout.is_empty() || !output.stderr.is_empty() {
+                                    let _ =
+                                        sender.send(Event::Output(editor_types::OutputMessage {
+                                            subsystem: format!("{kind:?}").to_lowercase(),
+                                            operation: "process-output".to_owned(),
+                                            level: editor_types::OutputLevel::Information,
+                                            message: format!(
+                                                "{}{}",
+                                                String::from_utf8_lossy(&output.stdout),
+                                                String::from_utf8_lossy(&output.stderr)
+                                            ),
+                                        }));
+                                }
+                                Event::EffectCompleted(request)
+                            }
+                            Ok(output) => Event::EffectFailed {
                                 request,
                                 message: editor_types::OutputMessage {
                                     subsystem: format!("{kind:?}").to_lowercase(),
                                     operation: "process".to_owned(),
                                     level: editor_types::OutputLevel::Error,
-                                    message: format!("{} exited with {status}", spec.executable),
+                                    message: format!(
+                                        "{} exited with {}: {}",
+                                        spec.executable,
+                                        output.status,
+                                        String::from_utf8_lossy(&output.stderr)
+                                    ),
                                 },
                             },
                             Err(error) => Event::EffectFailed {

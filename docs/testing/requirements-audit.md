@@ -18,19 +18,20 @@ Implemented in the integration pass:
 - root command palette plus Explorer/Output toggles;
 - root workspace-root/Explorer projections with asynchronous refresh effects, mouse selection, PATH
   LSP discovery state, and asynchronous Git status effects;
+- root syntax refresh/folding/error markers, streaming project-search events with cancellation,
+  structured trust-gated LSP request effects with negotiated position encoding, and Git dashboard
+  population/status refresh after successful mutations;
 - Windows installer (`build/editor.iss`) and packaging script (`build/package.ps1`).
 
 Still release-blocking or environment-blocked:
 
-1. Root orchestration still does not connect every app-ui action to live syntax, workspace search,
-   project replace, Git mutations, or the complete LSP request/result model; diagnostics and LSP
-   lifecycle status now have a root event path, but completion/hover/rename/etc. are not wired.
-2. Format-on-save and format-on-paste, plus full Problems/Git/LSP interactive views, remain
-   UI-service integration work. Manual formatting, clipboard commands, Save As, dirty close
-   protection, and project replacement effects are covered by root transitions and headless tests.
-3. Root now retains detected encoding/BOM/line-ending metadata in tabs, session records, status
-   rendering, and save effects; the remaining encoding UI for explicit user conversion/reopen is
-   not yet wired.
+1. Root still does not project all app-ui language/workspace/Git models into rendered views or
+   complete every LSP result (completion/hover/rename/code actions/etc.); syntax parser refresh,
+   search streaming, diagnostics, and generic request effects now have root paths.
+2. Format-on-save/paste root chaining exists behind explicit state flags, but settings/UI controls,
+   LSP-formatting precedence, and full Problems/Git/LSP interactive views remain incomplete.
+3. Root retains detected encoding/BOM/line-ending metadata in tabs, session records, status
+   rendering, and save effects; explicit user conversion/reopen commands are not yet wired.
 4. Search and native watcher workers use standard threads; the architecture target is Tokio-based
    orchestration.
 5. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated

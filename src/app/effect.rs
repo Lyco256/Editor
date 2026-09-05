@@ -70,6 +70,13 @@ pub enum Effect {
     CancelSearch {
         session_id: u64,
     },
+    LspRequest {
+        request: RequestId,
+        version: u64,
+        spec: ProcessSpec,
+        method: String,
+        params: serde_json::Value,
+    },
     RefreshSyntax {
         request: RequestId,
         document: editor_types::DocumentId,
@@ -89,6 +96,7 @@ impl Effect {
             Self::ExternalProcess { .. }
                 | Self::RefreshGitStatus { .. }
                 | Self::FormatDocument { .. }
+                | Self::LspRequest { .. }
         )
     }
 }

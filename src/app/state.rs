@@ -26,9 +26,14 @@ pub struct AppState {
     pub(crate) trust_store: workspace_core::TrustStore,
     pub frame_number: u64,
     pub language_server: LanguageServerStatus,
+    pub(crate) lsp_position_encoding: lsp_client::protocol::PositionEncoding,
     pub git_status: Option<GitStatusSummary>,
+    pub(crate) git_dashboard: Option<app_ui::git::GitDashboardState>,
+    pub(crate) git_root: Option<PathBuf>,
     pub diagnostics: Vec<editor_types::Diagnostic>,
     pub(crate) workspace_ui: app_ui::workspace::WorkspaceUiState,
+    pub(crate) language_ui: app_ui::language::LanguageModel,
+    pub(crate) lsp_results: HashMap<String, serde_json::Value>,
     pub(crate) syntax_snapshot: syntax_engine::SyntaxSnapshot,
     pub(crate) document_id: DocumentId,
     pub output: Vec<OutputMessage>,
@@ -158,9 +163,14 @@ impl Default for AppState {
             trust_store: workspace_core::TrustStore::default(),
             frame_number: 0,
             language_server: LanguageServerStatus::Stopped,
+            lsp_position_encoding: lsp_client::protocol::PositionEncoding::Utf16,
             git_status: None,
+            git_dashboard: None,
+            git_root: None,
             diagnostics: Vec::new(),
             workspace_ui: app_ui::workspace::WorkspaceUiState::default(),
+            language_ui: app_ui::language::LanguageModel::new(0),
+            lsp_results: HashMap::new(),
             syntax_snapshot: syntax_engine::SyntaxSnapshot::default(),
             document_id: DocumentId(1),
             output: Vec::new(),
@@ -323,26 +333,62 @@ impl AppState {
         &mut self,
         action: app_ui::language::LanguageAction,
     ) -> Transition {
-        if matches!(
-            action,
-            app_ui::language::LanguageAction::RestartLanguageServer
-        ) {
-            if let Some(path) = self.active_path.as_ref().filter(|path| path.is_file()) {
-                if let Some(language) = syntax_engine::SyntaxLanguage::from_path(path) {
-                    if let Some(command) = lsp_client::CommandSpec::discover_known(language.name())
-                    {
-                        return self.apply_action(Action::RequestEffect(Effect::ExternalProcess {
-                            request: RequestId(self.frame_number.saturating_add(1)),
-                            kind: super::effect::ExternalProcessKind::LanguageServer,
-                            spec: super::effect::ProcessSpec {
-                                executable: command.executable.to_string_lossy().into_owned(),
-                                arguments: command.args,
-                            },
-                        }));
-                    }
+        use app_ui::language::LanguageAction;
+        match action {
+            LanguageAction::RevealProblems => {
+                self.bottom_panel_visible = true;
+            }
+            LanguageAction::NavigateToProblem { group } => {
+                if let Some(action) = self
+                    .language_ui
+                    .diagnostics
+                    .current()
+                    .and_then(|dashboard| dashboard.problems.activate(group))
+                {
+                    return self.apply_language_action(action);
                 }
             }
-            self.language_server = LanguageServerStatus::Unavailable;
+            LanguageAction::NavigateToLocation { path, .. } => {
+                return self.apply_action(Action::OpenPath(path));
+            }
+            LanguageAction::RestartLanguageServer => {
+                if let Some(path) = self.active_path.as_ref().filter(|path| path.is_file()) {
+                    if let Some(language) = syntax_engine::SyntaxLanguage::from_path(path) {
+                        if let Some(command) =
+                            lsp_client::CommandSpec::discover_known(language.name())
+                        {
+                            return self.apply_action(Action::RequestEffect(
+                                Effect::ExternalProcess {
+                                    request: RequestId(self.frame_number.saturating_add(1)),
+                                    kind: super::effect::ExternalProcessKind::LanguageServer,
+                                    spec: super::effect::ProcessSpec {
+                                        executable: command
+                                            .executable
+                                            .to_string_lossy()
+                                            .into_owned(),
+                                        arguments: command.args,
+                                    },
+                                },
+                            ));
+                        }
+                    }
+                }
+                self.language_server = LanguageServerStatus::Unavailable;
+            }
+            LanguageAction::AcceptCompletion { index }
+            | LanguageAction::ExpandCompletionDetails { index } => {
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "completion".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!("completion item {index} selected"),
+                });
+            }
+            LanguageAction::OpenHover
+            | LanguageAction::OpenSignatureHelp
+            | LanguageAction::AcceptRenamePreview
+            | LanguageAction::AcceptCodeAction { .. }
+            | LanguageAction::DismissPopup => {}
         }
         Transition {
             render: true,
@@ -350,10 +396,150 @@ impl AppState {
         }
     }
 
+    /// Converts a language-panel request into a trust-gated JSON-RPC effect.
+    #[allow(clippy::too_many_lines)]
+    pub fn apply_language_effect_request(
+        &mut self,
+        request: app_ui::language::LanguageEffectRequest,
+    ) -> Transition {
+        use app_ui::language::LanguageEffectRequest;
+        let (method, params, version) = match request {
+            LanguageEffectRequest::RequestCompletion {
+                version, position, ..
+            } => (
+                "textDocument/completion",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestHover {
+                version, position, ..
+            } => (
+                "textDocument/hover",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestSignatureHelp {
+                version, position, ..
+            } => (
+                "textDocument/signatureHelp",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestGoTo {
+                version, position, ..
+            } => (
+                "textDocument/definition",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestReferences {
+                version, position, ..
+            } => (
+                "textDocument/references",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}, "context": {"includeDeclaration": true}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestRenamePreview {
+                version,
+                position,
+                new_name,
+                ..
+            } => (
+                "textDocument/rename",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}, "newName": new_name}),
+                version,
+            ),
+            LanguageEffectRequest::RequestCodeActions { version, .. } => (
+                "textDocument/codeAction",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0},}, "context": {"diagnostics": []}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestInlayHints { version, .. } => (
+                "textDocument/inlayHint",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestDocumentSymbols { version, .. } => (
+                "textDocument/documentSymbol",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestWorkspaceSymbols { version, query } => (
+                "workspace/symbol",
+                serde_json::json!({"query": query}),
+                version,
+            ),
+            LanguageEffectRequest::RequestFormatting { version, .. } => (
+                "textDocument/formatting",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "options": {"tabSize": 4, "insertSpaces": true}}),
+                version,
+            ),
+            LanguageEffectRequest::RefreshDiagnostics { version, .. } => (
+                "textDocument/diagnostic",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}}),
+                version,
+            ),
+            LanguageEffectRequest::RefreshSemanticTokens { version, .. } => (
+                "textDocument/semanticTokens/full",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}}),
+                version,
+            ),
+            LanguageEffectRequest::RestartLanguageServer => {
+                return self.apply_language_action(
+                    app_ui::language::LanguageAction::RestartLanguageServer,
+                );
+            }
+            LanguageEffectRequest::RefreshSyntax { .. } => {
+                return Transition {
+                    render: true,
+                    ..Transition::default()
+                };
+            }
+        };
+        let Some(spec) = self.discovered_lsp_spec() else {
+            self.language_server = LanguageServerStatus::Unavailable;
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        };
+        let request_id = RequestId(self.frame_number.saturating_add(1));
+        self.apply_action(Action::RequestEffect(Effect::LspRequest {
+            request: request_id,
+            version,
+            spec,
+            method: method.to_owned(),
+            params,
+        }))
+    }
+
+    fn active_document_uri(&self) -> String {
+        self.active_path.as_ref().map_or_else(
+            || "untitled:editor".to_owned(),
+            |path| format!("file://{}", path.to_string_lossy().replace('\\', "/")),
+        )
+    }
+
+    fn discovered_lsp_spec(&self) -> Option<ProcessSpec> {
+        let language = self
+            .active_path
+            .as_ref()
+            .and_then(syntax_engine::SyntaxLanguage::from_path)?;
+        let command = lsp_client::CommandSpec::discover_known(language.name())?;
+        Some(ProcessSpec {
+            executable: command.executable.to_string_lossy().into_owned(),
+            arguments: command.args,
+        })
+    }
+
     /// Converts Git UI intents into structured, trust-gated process effects. Destructive actions
     /// that require a confirmation remain visible but are not executed by this adapter.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_git_action(&mut self, action: app_ui::git::GitAction) -> Transition {
         use app_ui::git::GitAction;
+        if let Some(dashboard) = self.git_dashboard.as_mut() {
+            let _ = dashboard.dispatch(action.clone());
+        }
         let root = self.workspace_roots.first().cloned();
         let args = match action {
             GitAction::StageFile(path) => Some(vec![
@@ -384,7 +570,45 @@ impl AppState {
             GitAction::PopStash(reference) => {
                 Some(vec!["stash".to_owned(), "pop".to_owned(), reference])
             }
-            GitAction::Commit | GitAction::ConfirmDiscard => {
+            GitAction::Commit => {
+                let Some(form) = self
+                    .git_dashboard
+                    .as_ref()
+                    .map(|dashboard| dashboard.commit_form.clone())
+                else {
+                    self.output.push(OutputMessage {
+                        subsystem: "git".to_owned(),
+                        operation: "commit".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: "Git dashboard is not initialized".to_owned(),
+                    });
+                    return Transition {
+                        render: true,
+                        ..Transition::default()
+                    };
+                };
+                if !form.can_submit || form.message.trim().is_empty() {
+                    self.output.push(OutputMessage {
+                        subsystem: "git".to_owned(),
+                        operation: "commit".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: "commit message is required".to_owned(),
+                    });
+                    return Transition {
+                        render: true,
+                        ..Transition::default()
+                    };
+                }
+                let mut args = vec!["commit".to_owned(), "-m".to_owned(), form.message];
+                if form.amend {
+                    args.insert(1, "--amend".to_owned());
+                }
+                if form.allow_empty {
+                    args.insert(1, "--allow-empty".to_owned());
+                }
+                Some(args)
+            }
+            GitAction::ConfirmDiscard => {
                 self.output.push(OutputMessage {
                     subsystem: "git".to_owned(),
                     operation: "confirmation".to_owned(),
@@ -413,6 +637,7 @@ impl AppState {
                 ..Transition::default()
             };
         };
+        self.git_root = Some(root.clone());
         self.apply_action(Action::RequestEffect(Effect::ExternalProcess {
             request: RequestId(self.frame_number.saturating_add(1)),
             kind: super::effect::ExternalProcessKind::Git,
@@ -1140,6 +1365,9 @@ impl AppState {
                     Effect::RefreshGitStatus { request, .. } => {
                         (*request, super::effect::ExternalProcessKind::Git)
                     }
+                    Effect::LspRequest { request, .. } => {
+                        (*request, super::effect::ExternalProcessKind::LanguageServer)
+                    }
                     Effect::SaveDocument { .. }
                     | Effect::SaveDocumentAs { .. }
                     | Effect::RefreshExplorer { .. }
@@ -1179,6 +1407,7 @@ impl AppState {
                     | Effect::RefreshSyntax { .. }
                     | Effect::SearchWorkspace { .. }
                     | Effect::CancelSearch { .. }
+                    | Effect::LspRequest { .. }
                     | Effect::Render => {}
                 }
                 Transition {
@@ -1712,9 +1941,36 @@ impl AppState {
             Event::DocumentSaveFailed { message, .. } | Event::Output(message) => {
                 self.output.push(message);
             }
-            Event::GitStatusUpdated { request, summary } => {
+            Event::GitStatusUpdated {
+                request,
+                root,
+                summary,
+                entries,
+                branch_state,
+                head,
+                conflicts,
+            } => {
                 self.pending_processes.remove(&request);
-                self.git_status = Some(summary);
+                self.git_status = Some(summary.clone());
+                self.git_dashboard = Some(app_ui::git::GitDashboardState::from_repository(
+                    root,
+                    app_ui::git::GitRepositorySnapshot {
+                        summary,
+                        branch_state,
+                        head,
+                        trust: if self.workspace_trusted {
+                            app_ui::git::GitTrustState::Trusted
+                        } else {
+                            app_ui::git::GitTrustState::Untrusted
+                        },
+                        changes: entries,
+                        diff_files: Vec::new(),
+                        branches: Vec::new(),
+                        stashes: Vec::new(),
+                        history: Vec::new(),
+                        conflicts,
+                    },
+                ));
             }
             Event::ExplorerUpdated { request, entries }
                 if self.latest_explorer_request == Some(request) =>
@@ -1906,6 +2162,24 @@ impl AppState {
                 );
                 self.output.push(message);
             }
+            Event::LspResponse {
+                version,
+                method,
+                result,
+                ..
+            } => {
+                if version == self.buffer.snapshot().version() {
+                    let status_name = method.clone();
+                    self.lsp_results.insert(method, result);
+                    self.language_server = LanguageServerStatus::Running { name: status_name };
+                }
+            }
+            Event::LanguageServerReady { encoding, .. } => {
+                self.lsp_position_encoding = encoding;
+                self.language_server = LanguageServerStatus::Running {
+                    name: "language server".to_owned(),
+                };
+            }
             Event::LanguageDiagnostics { params, .. } => {
                 let snapshot = self.buffer.snapshot();
                 let mut diagnostics = Vec::new();
@@ -1913,14 +2187,14 @@ impl AppState {
                     let Ok(start) = lsp_client::protocol::lsp_position_to_editor(
                         snapshot.text(),
                         diagnostic.range.start,
-                        lsp_client::protocol::PositionEncoding::Utf16,
+                        self.lsp_position_encoding,
                     ) else {
                         continue;
                     };
                     let Ok(end) = lsp_client::protocol::lsp_position_to_editor(
                         snapshot.text(),
                         diagnostic.range.end,
-                        lsp_client::protocol::PositionEncoding::Utf16,
+                        self.lsp_position_encoding,
                     ) else {
                         continue;
                     };
@@ -1947,6 +2221,30 @@ impl AppState {
                     }
                 }
                 self.diagnostics = diagnostics;
+                let version = self.buffer.snapshot().version();
+                let records = self
+                    .diagnostics
+                    .iter()
+                    .cloned()
+                    .map(|diagnostic| app_ui::language::DiagnosticRecord {
+                        workspace: None,
+                        path: self
+                            .active_path
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from("untitled")),
+                        diagnostic,
+                        related: Vec::new(),
+                    })
+                    .collect();
+                self.language_ui.set_document_version(version);
+                let _ =
+                    self.language_ui
+                        .apply_result(app_ui::language::LanguageResult::Diagnostics(
+                            app_ui::language::Versioned::new(
+                                version,
+                                app_ui::language::DiagnosticDashboard::from_records(records),
+                            ),
+                        ));
             }
             Event::ReplacementApplied { report, .. } => {
                 self.output.push(OutputMessage {
@@ -1982,15 +2280,22 @@ impl AppState {
                 }
                 self.output.push(message);
             }
-            Event::EffectCompleted(request) => {
-                if self.pending_processes.remove(&request)
-                    == Some(super::effect::ExternalProcessKind::LanguageServer)
-                {
+            Event::EffectCompleted(request) => match self.pending_processes.remove(&request) {
+                Some(super::effect::ExternalProcessKind::LanguageServer) => {
                     self.language_server = LanguageServerStatus::Running {
                         name: "language-server".to_owned(),
                     };
                 }
-            }
+                Some(super::effect::ExternalProcessKind::Git) => {
+                    if let Some(root) = self.git_root.clone() {
+                        self.deferred_effects.push(Effect::RefreshGitStatus {
+                            request: RequestId(self.frame_number.saturating_add(1)),
+                            root,
+                        });
+                    }
+                }
+                Some(super::effect::ExternalProcessKind::Formatter) | None => {}
+            },
         }
     }
 }
@@ -2029,6 +2334,29 @@ mod tests {
             state.language_server,
             LanguageServerStatus::DisabledByPolicy
         );
+    }
+
+    #[test]
+    fn lsp_request_is_trust_gated_before_dispatch() {
+        let mut state = AppState::default();
+        let transition = state.apply_action(Action::RequestEffect(Effect::LspRequest {
+            request: RequestId(7),
+            version: 0,
+            spec: ProcessSpec {
+                executable: "fake-lsp".to_owned(),
+                arguments: Vec::new(),
+            },
+            method: "textDocument/hover".to_owned(),
+            params: serde_json::json!({}),
+        }));
+        assert!(matches!(
+            transition.events.first(),
+            Some(Event::ExternalProcessBlocked {
+                request: RequestId(7),
+                ..
+            })
+        ));
+        assert!(transition.effects.is_empty());
     }
 
     #[test]

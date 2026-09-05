@@ -12,3 +12,5 @@ adapter; cut is acknowledged before its deletion transaction is committed.
 so a failed Save As cannot retarget or dirty the active tab.
 `RefreshSyntax` and `SearchWorkspace` keep parser/search work outside the state transition path;
 search sessions can be cancelled with a typed effect.
+`LspRequest` carries a structured JSON-RPC method/parameters payload and is trust-gated before any
+server process is started.
