@@ -391,6 +391,39 @@ impl EffectDispatcher for ServiceDispatcher {
                 });
                 return;
             }
+            if let Effect::FileOperation { request, plan } = effect.clone() {
+                let sender = self.sender.clone();
+                self.runtime.spawn_blocking(move || {
+                    let result = match &plan {
+                        workspace_core::FileOperationPlan::CreateFile { path } => {
+                            workspace_core::create_file(path, &[])
+                        }
+                        workspace_core::FileOperationPlan::Rename(rename) => {
+                            workspace_core::rename_path(&rename.source, &rename.target)
+                        }
+                        workspace_core::FileOperationPlan::Move(move_plan) => {
+                            workspace_core::move_path(&move_plan.source, &move_plan.target)
+                        }
+                        workspace_core::FileOperationPlan::Delete(delete) => {
+                            workspace_core::delete_file(&delete.path)
+                        }
+                    };
+                    let event = match result {
+                        Ok(()) => Event::FileOperationCompleted { request, plan },
+                        Err(error) => Event::FileOperationFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "file-operation".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+                return;
+            }
             if let Effect::RefreshSyntax {
                 request,
                 document,
