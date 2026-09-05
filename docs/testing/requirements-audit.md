@@ -1,6 +1,6 @@
 # Requirements audit (2026-09-05)
 
-`devenv` is the current integration branch at commit `bd0a8dc`; it is not yet promoted to `main`
+`devenv` is the current integration branch at commit `abda6be`; it is not yet promoted to `main`
 because release gates remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
 all workspace tests, source/document mirrors, release build, and redirected headless startup.
 
@@ -22,7 +22,8 @@ Implemented in the integration pass:
   structured trust-gated LSP request effects with negotiated position encoding, and Git dashboard
   population/status refresh after successful mutations; Tokio scheduling for root background work;
 - root command-palette routing for Git Changes, Diff, Branches, Stashes, History, Commit, and
-  Conflicts views;
+  Conflicts views, plus document-scoped `.editorconfig` indentation, encoding, EOL, whitespace,
+  and final-newline behavior;
 - Windows installer (`build/editor.iss`) and packaging script (`build/package.ps1`).
 
 Still release-blocking or environment-blocked:
@@ -35,7 +36,8 @@ Still release-blocking or environment-blocked:
 2. The root-level headless acceptance suite now covers the fake-server initialize/request/response
    lifecycle, semantic tokens, Git projection/mutation routing, encoding round trips, and
    large-file suppression, as well as language panels, cancellation, crash notification, and
-   replacement-server startup. A Syntax effect now reaches a rendered Root framebuffer. Full
+   replacement-server startup. A Syntax effect now reaches a rendered Root framebuffer. The
+   `.editorconfig` root integration also has deterministic load and save-normalization tests. Full
    scenario breadth is still short of the release matrix, notably complete interactive UI routing
    for all language actions.
 
