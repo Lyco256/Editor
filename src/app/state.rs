@@ -987,8 +987,10 @@ impl AppState {
     fn apply_workspace_edit(&mut self, edit: &serde_json::Value) -> bool {
         let mut edits = Vec::new();
         if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
-            if let Some(document_edits) = changes.get(&self.active_document_uri()) {
-                edits.extend(document_edits.as_array().into_iter().flatten().cloned());
+            for (uri, document_edits) in changes {
+                if self.uri_targets_active(uri) {
+                    edits.extend(document_edits.as_array().into_iter().flatten().cloned());
+                }
             }
         }
         if let Some(document_changes) = edit
@@ -1003,7 +1005,7 @@ impl AppState {
                 else {
                     continue;
                 };
-                if uri == self.active_document_uri() {
+                if self.uri_targets_active(uri) {
                     edits.extend(
                         document_change
                             .get("edits")
@@ -1045,6 +1047,13 @@ impl AppState {
         self.sync_buffer_projection();
         self.deferred_effects.push(self.syntax_effect());
         true
+    }
+
+    fn uri_targets_active(&self, uri: &str) -> bool {
+        let Some(active) = self.active_path.as_deref() else {
+            return uri == self.active_document_uri();
+        };
+        uri == self.active_document_uri() || workspace_core::path_eq(&json_path(uri), active)
     }
 
     /// Converts a language-panel request into a trust-gated JSON-RPC effect.
