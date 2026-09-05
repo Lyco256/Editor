@@ -251,6 +251,41 @@ fn frame_for_state(
         })
         .collect::<Vec<_>>();
     folds.set_regions(fold_regions);
+    let syntax_spans = state
+        .syntax_snapshot
+        .highlights
+        .iter()
+        .map(|span| (span.range, span.role))
+        .collect::<Vec<_>>();
+    let bracket_matches = state
+        .syntax_snapshot
+        .pairs
+        .iter()
+        .flat_map(|pair| [pair.open, pair.close])
+        .collect::<Vec<_>>();
+    let search_matches = state
+        .workspace_ui
+        .search
+        .results
+        .iter()
+        .filter(|result| state.active_path.as_ref() == Some(&result.path))
+        .filter_map(|result| {
+            let character = result
+                .line_text
+                .find(&result.matched_text)
+                .map(|byte| result.line_text[..byte].chars().count())?;
+            let start = buffer
+                .position_to_offset(editor_types::LogicalPosition {
+                    line: u32::try_from(result.line_number.saturating_sub(1)).ok()?,
+                    character: u32::try_from(character).ok()?,
+                })
+                .ok()?;
+            let end = editor_core::CharacterOffset(
+                start.0.saturating_add(result.matched_text.chars().count()),
+            );
+            Some(editor_core::TextRange { start, end })
+        })
+        .collect::<Vec<_>>();
     let status = EditorStatusData {
         file_name: file_name.clone(),
         dirty: state.active_dirty,
@@ -287,13 +322,14 @@ fn frame_for_state(
         snapshot: buffer.snapshot(),
         viewport: app_ui::editor::TextViewport::default(),
         selections: buffer.selections().clone(),
-        folds: editor_core::FoldSet::default(),
+        folds: folds.clone(),
         markers: SemanticMarkerSet {
             language: language_markers.clone(),
             ..SemanticMarkerSet::default()
         },
-        search_matches: Vec::new(),
-        bracket_matches: Vec::new(),
+        syntax_spans,
+        search_matches,
+        bracket_matches,
         status: status.clone(),
         show_line_numbers: true,
         tab_width: 4,
@@ -367,6 +403,7 @@ fn frame_for_state(
                     language: language_markers,
                     ..SemanticMarkerSet::default()
                 },
+                syntax_spans: Vec::new(),
                 search_matches: Vec::new(),
                 bracket_matches: Vec::new(),
                 status: status.clone(),
@@ -409,13 +446,20 @@ fn frame_for_state(
             .collect(),
         root,
         bottom: BottomPanelState {
-            title: if state.diagnostics.is_empty() {
-                "Output".to_owned()
-            } else {
-                "Problems".to_owned()
-            },
+            title: match state.bottom_panel_view {
+                super::state::BottomPanelView::Output => "Output",
+                super::state::BottomPanelView::Problems => "Problems",
+                super::state::BottomPanelView::Search => "Search",
+                super::state::BottomPanelView::Git => "Source Control",
+            }
+            .to_owned(),
             entries: output_entries,
-            visible: state.bottom_panel_visible || !state.output.is_empty(),
+            visible: state.bottom_panel_visible
+                || !state.output.is_empty()
+                || !matches!(
+                    state.bottom_panel_view,
+                    super::state::BottomPanelView::Output
+                ),
         },
         palette: state.palette.clone(),
         focus: if state.palette_visible {
@@ -430,7 +474,90 @@ fn frame_for_state(
         app_ui::widgets::Rect::new(0, 0, size.0, size.1),
         capabilities,
     );
+    let layout = shell.layout(app_ui::widgets::Rect::new(0, 0, size.0, size.1));
+    if let Some(bottom) = layout.bottom {
+        let panel = match state.bottom_panel_view {
+            super::state::BottomPanelView::Output => None,
+            super::state::BottomPanelView::Problems => {
+                state.language_ui.diagnostics.current().map(|dashboard| {
+                    app_ui::language::render_diagnostic_dashboard(
+                        dashboard,
+                        bottom.width,
+                        bottom.height,
+                    )
+                })
+            }
+            super::state::BottomPanelView::Search => {
+                let mut panel = Framebuffer::new(bottom.width, bottom.height);
+                app_ui::workspace::draw_search(&mut panel, &state.workspace_ui.search);
+                Some(panel)
+            }
+            super::state::BottomPanelView::Git => state.git_dashboard.as_ref().map(|dashboard| {
+                let mut panel = Framebuffer::new(bottom.width, bottom.height);
+                dashboard.render(
+                    &mut panel,
+                    app_ui::git::Rect::new(0, 0, bottom.width, bottom.height),
+                    capabilities,
+                );
+                panel
+            }),
+        };
+        if let Some(panel) = panel {
+            blit_frame(&mut frame, &panel, bottom.x, bottom.y);
+        }
+    }
     frame
+}
+
+fn blit_frame(destination: &mut Framebuffer, source: &Framebuffer, x: u16, y: u16) {
+    let (width, height) = source.size();
+    let (destination_width, destination_height) = destination.size();
+    for row in 0..height {
+        for column in 0..width {
+            let Some(cell) = source.get(column, row).ok().cloned() else {
+                continue;
+            };
+            let target_x = x.saturating_add(column);
+            let target_y = y.saturating_add(row);
+            if target_x < destination_width && target_y < destination_height {
+                let _ = destination.set(target_x, target_y, cell);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_for_state;
+    use crate::app::state::AppState;
+    use editor_types::{DocumentId, StyleRole, TextRange};
+
+    #[test]
+    fn root_frame_projects_syntax_roles_and_folds() {
+        let mut state = AppState::default();
+        state.active_text = String::from("fn main() {\n  1\n}");
+        state.syntax_snapshot = syntax_engine::SyntaxSnapshot {
+            ticket: Some(syntax_engine::ParseTicket {
+                document: DocumentId(1),
+                version: 0,
+            }),
+            highlights: vec![syntax_engine::SyntaxSpan {
+                range: TextRange {
+                    start: editor_types::CharacterOffset(3),
+                    end: editor_types::CharacterOffset(7),
+                },
+                role: StyleRole::SyntaxKeyword,
+            }],
+            ..syntax_engine::SyntaxSnapshot::default()
+        };
+        let frame = frame_for_state(
+            &state,
+            (80, 24),
+            editor_types::TerminalCapabilities::default(),
+        );
+        let cell = frame.get(31, 1).expect("syntax editor cell");
+        assert_eq!(cell.foreground, StyleRole::SyntaxKeyword);
+    }
 }
 
 /// Runs the production event loop with one terminal adapter for rendering and input.

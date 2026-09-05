@@ -246,6 +246,50 @@ fn adding_workspace_roots_updates_explorer_projection() {
 }
 
 #[test]
+fn git_status_projection_routes_dashboard_mutations_through_root_effects() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let root = directory.path().to_path_buf();
+    let mut state = editor::app::state::AppState::default();
+    state.workspace_roots.push(root.clone());
+    let _ = state.apply_action(Action::SetWorkspaceTrust(true));
+    state.apply_event(Event::GitStatusUpdated {
+        request: editor_types::RequestId(1),
+        root: root.clone(),
+        summary: editor_types::GitStatusSummary::default(),
+        entries: vec![vcs_git::GitStatusEntry {
+            status: " M".to_owned(),
+            path: std::path::PathBuf::from("src/main.rs"),
+            previous_path: None,
+            staged: false,
+            unstaged: true,
+            untracked: false,
+            conflicted: false,
+        }],
+        branch_state: Some("main".to_owned()),
+        head: Some("deadbeef".to_owned()),
+        conflicts: Vec::new(),
+        diff_files: Vec::new(),
+        branches: Vec::new(),
+        stashes: Vec::new(),
+        history: Vec::new(),
+    });
+
+    let transition = state.apply_git_action(app_ui::git::GitAction::StageFile(
+        std::path::PathBuf::from("src/main.rs"),
+    ));
+    assert!(matches!(
+        transition.effects.first(),
+        Some(Effect::ExternalProcess { spec, .. })
+            if spec.arguments.iter().any(|argument| argument == "add")
+                && spec.arguments.iter().any(|argument| argument == "--")
+    ));
+    assert_eq!(
+        state.git_status,
+        Some(editor_types::GitStatusSummary::default())
+    );
+}
+
+#[test]
 fn multiple_tabs_and_active_tab_survive_session_restore() {
     use editor_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
     let directory = tempfile::tempdir().expect("workspace");

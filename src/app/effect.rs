@@ -37,6 +37,18 @@ pub enum Effect {
         kind: ExternalProcessKind,
         spec: ProcessSpec,
     },
+    GitHunk {
+        request: RequestId,
+        root: PathBuf,
+        hunk: vcs_git::GitDiffHunk,
+        reverse: bool,
+    },
+    GitDiscard {
+        request: RequestId,
+        root: PathBuf,
+        plan: vcs_git::GitDiscardPlan,
+        confirmed: bool,
+    },
     RefreshGitStatus {
         request: RequestId,
         root: PathBuf,
@@ -94,6 +106,8 @@ impl Effect {
         matches!(
             self,
             Self::ExternalProcess { .. }
+                | Self::GitHunk { .. }
+                | Self::GitDiscard { .. }
                 | Self::RefreshGitStatus { .. }
                 | Self::FormatDocument { .. }
                 | Self::LspRequest { .. }

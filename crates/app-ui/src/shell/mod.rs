@@ -848,6 +848,7 @@ mod tests {
                     kind: MarkerKind::Match,
                 }],
             },
+            syntax_spans: Vec::new(),
             search_matches: vec![editor_core::TextRange {
                 start: CharacterOffset(24),
                 end: CharacterOffset(28),

@@ -487,6 +487,91 @@ impl EffectDispatcher for ServiceDispatcher {
                 });
                 return;
             }
+            if let Effect::GitHunk {
+                request,
+                root,
+                hunk,
+                reverse,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let outcome = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| error.to_string())
+                        .and_then(|runtime| {
+                            runtime
+                                .block_on(async {
+                                    if reverse {
+                                        vcs_git::GitClient::default()
+                                            .unstage_hunk(&root, &hunk, None)
+                                            .await
+                                    } else {
+                                        vcs_git::GitClient::default()
+                                            .stage_hunk(&root, &hunk, None)
+                                            .await
+                                    }
+                                })
+                                .map_err(|error| error.to_string())
+                        });
+                    let event = outcome.map_or_else(
+                        |message| Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "git".to_owned(),
+                                operation: if reverse {
+                                    "unstage-hunk".to_owned()
+                                } else {
+                                    "stage-hunk".to_owned()
+                                },
+                                level: editor_types::OutputLevel::Error,
+                                message,
+                            },
+                        },
+                        |_| Event::EffectCompleted(request),
+                    );
+                    let _ = sender.send(event);
+                });
+                return;
+            }
+            if let Effect::GitDiscard {
+                request,
+                root,
+                plan,
+                confirmed,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let outcome = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| error.to_string())
+                        .and_then(|runtime| {
+                            runtime
+                                .block_on(
+                                    vcs_git::GitClient::default()
+                                        .execute_discard(&root, &plan, confirmed, None),
+                                )
+                                .map_err(|error| error.to_string())
+                        });
+                    let event = outcome.map_or_else(
+                        |message| Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "git".to_owned(),
+                                operation: "discard".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message,
+                            },
+                        },
+                        |_| Event::EffectCompleted(request),
+                    );
+                    let _ = sender.send(event);
+                });
+                return;
+            }
             if let Effect::ClipboardWrite { request, text, cut } = effect.clone() {
                 let sender = self.sender.clone();
                 thread::spawn(move || {
@@ -636,25 +721,42 @@ impl EffectDispatcher for ServiceDispatcher {
                         .enable_all()
                         .build()
                     {
-                        Ok(runtime) => match runtime
-                            .block_on(vcs_git::GitClient::default().status(&root, None))
-                        {
-                            Ok(status) => Event::GitStatusUpdated {
-                                request,
-                                root: status.root.clone(),
-                                summary: status.summary,
-                                entries: status.entries,
-                                branch_state: status.branch_state.branch,
-                                head: status.branch_state.head,
-                                conflicts: status
-                                    .conflicts
-                                    .into_iter()
-                                    .map(|path| vcs_git::GitConflictFile {
-                                        path,
-                                        stages: vec![1, 2, 3],
-                                    })
-                                    .collect(),
-                            },
+                        Ok(runtime) => match runtime.block_on(async {
+                            let client = vcs_git::GitClient::default();
+                            let status = client.status(&root, None).await?;
+                            let diff_files = client
+                                .diff(&root, vcs_git::DiffTarget::WorkingTree, &[], None)
+                                .await
+                                .unwrap_or_default();
+                            let branches = client.branches(&root, None).await.unwrap_or_default();
+                            let stashes = client.stash_list(&root, None).await.unwrap_or_default();
+                            let history = client.log(&root, 50, None).await.unwrap_or_default();
+                            Ok::<_, vcs_git::GitError>((
+                                status, diff_files, branches, stashes, history,
+                            ))
+                        }) {
+                            Ok((status, diff_files, branches, stashes, history)) => {
+                                Event::GitStatusUpdated {
+                                    request,
+                                    root: status.root.clone(),
+                                    summary: status.summary,
+                                    entries: status.entries,
+                                    branch_state: status.branch_state.branch,
+                                    head: status.branch_state.head,
+                                    conflicts: status
+                                        .conflicts
+                                        .into_iter()
+                                        .map(|path| vcs_git::GitConflictFile {
+                                            path,
+                                            stages: vec![1, 2, 3],
+                                        })
+                                        .collect(),
+                                    diff_files,
+                                    branches,
+                                    stashes,
+                                    history,
+                                }
+                            }
                             Err(error) => Event::EffectFailed {
                                 request,
                                 message: editor_types::OutputMessage {

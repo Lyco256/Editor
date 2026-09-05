@@ -15,4 +15,6 @@ logged. Trusted language-server effects now use `lsp-client` stdio framing and i
 forwarding stderr/crash events and requesting shutdown when the dispatcher is dropped.
 Syntax refreshes run through a persistent syntax-engine worker, while project search streams typed
 matches and supports cancellation through a cloneable service handle. Structured LSP request effects
-use a bounded current-thread Tokio runtime and never concatenate shell commands.
+use a bounded current-thread Tokio runtime and never concatenate shell commands. Git hunk and
+confirmation-bound discard effects invoke the typed `vcs-git` APIs with patch data on stdin and
+return `EffectCompleted` or structured failure output.

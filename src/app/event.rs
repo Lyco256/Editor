@@ -25,6 +25,10 @@ pub enum Event {
         branch_state: Option<String>,
         head: Option<String>,
         conflicts: Vec<vcs_git::GitConflictFile>,
+        diff_files: Vec<vcs_git::GitDiffFile>,
+        branches: Vec<vcs_git::GitBranchInfo>,
+        stashes: Vec<vcs_git::GitStashEntry>,
+        history: Vec<vcs_git::GitLogEntry>,
     },
     ExplorerUpdated {
         request: RequestId,

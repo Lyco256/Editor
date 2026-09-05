@@ -142,6 +142,9 @@ pub struct EditorViewportState {
     pub selections: SelectionSet,
     pub folds: FoldSet,
     pub markers: SemanticMarkerSet,
+    /// Syntax/semantic foreground roles keyed by logical character ranges. The root application
+    /// supplies this immutable projection; the viewport never performs parsing itself.
+    pub syntax_spans: Vec<(TextRange, StyleRole)>,
     pub search_matches: Vec<TextRange>,
     pub bracket_matches: Vec<TextRange>,
     pub status: EditorStatusData,
@@ -573,6 +576,13 @@ impl EditorViewportState {
         if self.range_hits_any_ranges(&range, &self.bracket_matches) {
             return GlyphStyle::new(StyleRole::SyntaxKeyword, row_background, true);
         }
+        if let Some((_, role)) = self
+            .syntax_spans
+            .iter()
+            .find(|(candidate, _)| intersects(range, *candidate))
+        {
+            return GlyphStyle::new(*role, row_background, false);
+        }
         GlyphStyle::new(StyleRole::EditorText, row_background, false)
     }
 
@@ -888,6 +898,7 @@ mod tests {
                     kind: MarkerKind::Match,
                 }],
             },
+            syntax_spans: Vec::new(),
             search_matches: vec![TextRange {
                 start: CharacterOffset(24),
                 end: CharacterOffset(28),

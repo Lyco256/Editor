@@ -7,7 +7,7 @@ use std::{
 };
 
 use app_ui::widgets::{CommandEntry, CommandPaletteState};
-use editor_core::{PairConfig, TextBuffer};
+use editor_core::{Edit, PairConfig, TextBuffer, Transaction};
 use editor_types::{
     CharacterOffset, DocumentId, GitStatusSummary, InputEvent, KeyCode, LanguageServerStatus,
     LogicalPosition, Modifier, MouseAction, MouseButton, OutputLevel, OutputMessage, RequestId,
@@ -44,6 +44,7 @@ pub struct AppState {
     pub active_dirty: bool,
     pub explorer_visible: bool,
     pub bottom_panel_visible: bool,
+    pub(crate) bottom_panel_view: BottomPanelView,
     pub palette_visible: bool,
     pub(crate) palette: CommandPaletteState,
     pub(crate) tabs: Vec<TabState>,
@@ -54,6 +55,8 @@ pub struct AppState {
     pending_processes: HashMap<RequestId, super::effect::ExternalProcessKind>,
     pending_clipboard: HashMap<RequestId, PendingClipboard>,
     pending_format: HashMap<RequestId, PendingFormat>,
+    pending_lsp_format: HashMap<RequestId, PendingFormat>,
+    pending_git_discard: Option<vcs_git::GitDiscardPlan>,
     deferred_effects: Vec<Effect>,
     pub(crate) format_on_save: bool,
     pub(crate) format_on_paste: bool,
@@ -63,6 +66,14 @@ pub struct AppState {
     /// Persistent editor buffer backing the active document. The public text fields remain a
     /// lightweight projection for views and recovery serialization.
     pub(crate) buffer: TextBuffer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BottomPanelView {
+    Output,
+    Problems,
+    Search,
+    Git,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +120,283 @@ enum PendingClipboard {
 struct PendingFormat {
     version: u64,
     save_after: bool,
+}
+
+fn panel_glyphs(text: &str) -> Vec<app_ui::language::Glyph> {
+    text.chars()
+        .map(|character| app_ui::language::Glyph::plain(character.to_string()))
+        .collect()
+}
+
+fn panel_row(text: impl AsRef<str>) -> app_ui::language::PanelRow {
+    app_ui::language::PanelRow::new(panel_glyphs(text.as_ref()))
+}
+
+fn json_label(value: &serde_json::Value) -> String {
+    value.as_str().map_or_else(
+        || serde_json::to_string(value).unwrap_or_else(|_| String::from("<invalid result>")),
+        ToOwned::to_owned,
+    )
+}
+
+fn json_position(value: &serde_json::Value) -> Option<LogicalPosition> {
+    Some(LogicalPosition {
+        line: value
+            .get("line")?
+            .as_u64()
+            .and_then(|line| u32::try_from(line).ok())?,
+        character: value
+            .get("character")?
+            .as_u64()
+            .and_then(|character| u32::try_from(character).ok())?,
+    })
+}
+
+fn json_path(uri: &str) -> PathBuf {
+    let path = uri
+        .strip_prefix("file:///")
+        .or_else(|| uri.strip_prefix("file://"))
+        .unwrap_or(uri);
+    PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+}
+
+fn location_choice(
+    value: &serde_json::Value,
+    document: DocumentId,
+) -> Option<app_ui::language::LocationChoice> {
+    let uri = value.get("uri").and_then(serde_json::Value::as_str)?;
+    let range = value.get("range")?;
+    let position = json_position(range.get("start")?)?;
+    let path = json_path(uri);
+    let label = value
+        .get("name")
+        .or_else(|| value.get("targetUri"))
+        .map_or_else(|| path.display().to_string(), json_label);
+    Some(app_ui::language::LocationChoice {
+        label: panel_glyphs(&label),
+        document,
+        path,
+        position,
+    })
+}
+
+fn location_choices(
+    value: &serde_json::Value,
+    document: DocumentId,
+) -> Vec<app_ui::language::LocationChoice> {
+    let values = value
+        .as_array()
+        .cloned()
+        .or_else(|| {
+            value
+                .get("items")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default();
+    values
+        .iter()
+        .filter_map(|item| {
+            location_choice(item, document).or_else(|| {
+                let target = item.get("targetSelectionRange").and_then(|_| {
+                    Some(serde_json::json!({
+                        "uri": item.get("targetUri")?,
+                        "range": item.get("targetSelectionRange")?
+                    }))
+                })?;
+                location_choice(&target, document)
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_lines)]
+fn language_result_from_response(
+    method: &str,
+    result: &serde_json::Value,
+    version: u64,
+    document: DocumentId,
+) -> Option<app_ui::language::LanguageResult> {
+    use app_ui::language::{
+        CodeActionView, CompletionView, FormattingFeedbackView, HoverView, InlayHintsView,
+        LanguageResult, LocationChooserView, PanelState, RenamePreviewView, SignatureView,
+        SymbolsView, Versioned,
+    };
+
+    let result = match method {
+        "textDocument/completion" => {
+            let values = result
+                .as_array()
+                .cloned()
+                .or_else(|| {
+                    result
+                        .get("items")
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                })
+                .unwrap_or_default();
+            let rows = values
+                .iter()
+                .map(|item| {
+                    let label = item
+                        .get("label")
+                        .map_or_else(|| json_label(item), json_label);
+                    panel_row(label)
+                })
+                .collect();
+            LanguageResult::Completion(Versioned::new(
+                version,
+                CompletionView {
+                    list: PanelState::new(panel_glyphs("Completion"))
+                        .with_rows(rows)
+                        .with_selected(Some(0)),
+                    details: PanelState::new(panel_glyphs("Details")),
+                },
+            ))
+        }
+        "textDocument/hover" => LanguageResult::Hover(Versioned::new(
+            version,
+            HoverView {
+                card: PanelState::new(panel_glyphs("Hover")).with_rows(vec![panel_row(
+                    result
+                        .get("contents")
+                        .map_or_else(|| json_label(result), json_label),
+                )]),
+            },
+        )),
+        "textDocument/signatureHelp" => {
+            let rows = result
+                .get("signatures")
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            panel_row(
+                                value
+                                    .get("label")
+                                    .map_or_else(|| json_label(value), json_label),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            LanguageResult::Signature(Versioned::new(
+                version,
+                SignatureView {
+                    card: PanelState::new(panel_glyphs("Signature Help")).with_rows(rows),
+                },
+            ))
+        }
+        "textDocument/definition"
+        | "textDocument/declaration"
+        | "textDocument/implementation"
+        | "textDocument/references" => {
+            let choices = location_choices(result, document);
+            let view = LocationChooserView {
+                title: panel_glyphs(if method.ends_with("references") {
+                    "References"
+                } else {
+                    "Go to definition"
+                }),
+                selected: (!choices.is_empty()).then_some(0),
+                choices,
+            };
+            if method.ends_with("references") {
+                LanguageResult::References(Versioned::new(version, view))
+            } else {
+                LanguageResult::GoTo(Versioned::new(version, view))
+            }
+        }
+        "textDocument/rename" => {
+            let changes = result
+                .get("changes")
+                .and_then(serde_json::Value::as_object)
+                .map_or(0, serde_json::Map::len);
+            LanguageResult::Rename(Versioned::new(
+                version,
+                RenamePreviewView {
+                    title: panel_glyphs("Rename preview"),
+                    before: PanelState::new(panel_glyphs("Before"))
+                        .with_rows(vec![panel_row(format!("{changes} file(s)"))]),
+                    after: PanelState::new(panel_glyphs("After")),
+                    conflicts: PanelState::new(panel_glyphs("Conflicts")),
+                },
+            ))
+        }
+        "textDocument/codeAction" => {
+            let rows = result
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            panel_row(
+                                value
+                                    .get("title")
+                                    .map_or_else(|| json_label(value), json_label),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            LanguageResult::CodeActions(Versioned::new(
+                version,
+                CodeActionView {
+                    list: PanelState::new(panel_glyphs("Code Actions"))
+                        .with_rows(rows)
+                        .with_selected(Some(0)),
+                },
+            ))
+        }
+        "textDocument/inlayHint" => {
+            let rows = result
+                .as_array()
+                .map(|values| values.iter().map(json_label).map(panel_row).collect())
+                .unwrap_or_default();
+            LanguageResult::InlayHints(Versioned::new(
+                version,
+                InlayHintsView {
+                    list: PanelState::new(panel_glyphs("Inlay Hints")).with_rows(rows),
+                },
+            ))
+        }
+        "textDocument/documentSymbol" | "workspace/symbol" => {
+            let rows = result
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            panel_row(
+                                value
+                                    .get("name")
+                                    .map_or_else(|| json_label(value), json_label),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            LanguageResult::Symbols(Versioned::new(
+                version,
+                SymbolsView {
+                    list: PanelState::new(panel_glyphs("Symbols")).with_rows(rows),
+                },
+            ))
+        }
+        "textDocument/formatting" | "textDocument/rangeFormatting" => {
+            let edits = result.as_array().map_or(0, Vec::len);
+            LanguageResult::Formatting(Versioned::new(
+                version,
+                FormattingFeedbackView {
+                    card: PanelState::new(panel_glyphs("Formatting"))
+                        .with_rows(vec![panel_row(format!("{edits} edit(s) received"))]),
+                },
+            ))
+        }
+        _ => return None,
+    };
+    Some(result)
 }
 
 fn config_encoding_to_workspace(value: &config_core::EncodingKind) -> workspace_core::EncodingKind {
@@ -181,6 +469,7 @@ impl Default for AppState {
             active_dirty: false,
             explorer_visible: true,
             bottom_panel_visible: false,
+            bottom_panel_view: BottomPanelView::Output,
             palette_visible: false,
             palette: CommandPaletteState::new(vec![
                 CommandEntry::available("editor.save", "Save"),
@@ -193,6 +482,9 @@ impl Default for AppState {
                 CommandEntry::available("workbench.splitVertical", "Split Editor Vertical"),
                 CommandEntry::available("workbench.splitHorizontal", "Split Editor Horizontal"),
                 CommandEntry::available("workbench.closeSplit", "Close Editor Split"),
+                CommandEntry::available("workbench.showProblems", "Show Problems"),
+                CommandEntry::available("workbench.showGit", "Show Source Control"),
+                CommandEntry::available("workbench.showOutput", "Show Output"),
                 CommandEntry::available("editor.quit", "Quit"),
                 CommandEntry::available("git.refresh", "Refresh Git Status"),
             ]),
@@ -204,6 +496,8 @@ impl Default for AppState {
             pending_processes: HashMap::new(),
             pending_clipboard: HashMap::new(),
             pending_format: HashMap::new(),
+            pending_lsp_format: HashMap::new(),
+            pending_git_discard: None,
             deferred_effects: Vec::new(),
             format_on_save: false,
             format_on_paste: false,
@@ -541,6 +835,83 @@ impl AppState {
             let _ = dashboard.dispatch(action.clone());
         }
         let root = self.workspace_roots.first().cloned();
+        let request = RequestId(self.frame_number.saturating_add(1));
+        if let GitAction::RequestDiscard(plan) = &action {
+            self.pending_git_discard = Some(plan.clone());
+        }
+        if matches!(&action, GitAction::ConfirmDiscard) {
+            if let (Some(root), Some(plan)) = (root.clone(), self.pending_git_discard.take()) {
+                return self.apply_action(Action::RequestEffect(Effect::GitDiscard {
+                    request,
+                    root,
+                    plan,
+                    confirmed: true,
+                }));
+            }
+        }
+        if matches!(&action, GitAction::CancelDiscard) {
+            self.pending_git_discard = None;
+        }
+        if let GitAction::OpenDiffFile(path) | GitAction::OpenConflict(path) = &action {
+            let target = if path.is_absolute() {
+                path.clone()
+            } else {
+                root.as_ref()
+                    .map_or_else(|| path.clone(), |repository| repository.join(path))
+            };
+            if let Err(error) = self.open_tab(target.clone()) {
+                self.output.push(OutputMessage {
+                    subsystem: "git".to_owned(),
+                    operation: "open-diff".to_owned(),
+                    level: OutputLevel::Warning,
+                    message: format!("could not open {}: {error}", target.display()),
+                });
+            } else {
+                self.output.push(OutputMessage {
+                    subsystem: "git".to_owned(),
+                    operation: "open-diff".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!("opened {}", target.display()),
+                });
+            }
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        }
+        if let GitAction::StageHunk { path, hunk } | GitAction::UnstageHunk { path, hunk } = &action
+        {
+            let reverse = matches!(&action, GitAction::UnstageHunk { .. });
+            let hunk_value = self
+                .git_dashboard
+                .as_ref()
+                .and_then(|dashboard| {
+                    dashboard
+                        .diff_files
+                        .iter()
+                        .find(|file| &file.path == path)
+                        .and_then(|file| file.hunks.get(*hunk))
+                })
+                .cloned();
+            if let (Some(root), Some(hunk_value)) = (root.clone(), hunk_value) {
+                return self.apply_action(Action::RequestEffect(Effect::GitHunk {
+                    request,
+                    root,
+                    hunk: hunk_value,
+                    reverse,
+                }));
+            }
+            self.output.push(OutputMessage {
+                subsystem: "git".to_owned(),
+                operation: "hunk".to_owned(),
+                level: OutputLevel::Warning,
+                message: format!("could not find hunk {hunk} for {}", path.display()),
+            });
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        }
         let args = match action {
             GitAction::StageFile(path) => Some(vec![
                 "add".to_owned(),
@@ -619,8 +990,6 @@ impl AppState {
             }
             GitAction::RequestDiscard(_)
             | GitAction::CancelDiscard
-            | GitAction::UnstageHunk { .. }
-            | GitAction::StageHunk { .. }
             | GitAction::SwitchView(_)
             | GitAction::ToggleChangeMode
             | GitAction::SelectChange(_)
@@ -629,7 +998,9 @@ impl AppState {
             | GitAction::ToggleAmend
             | GitAction::ToggleAllowEmpty
             | GitAction::OpenDiffFile(_)
-            | GitAction::OpenConflict(_) => None,
+            | GitAction::OpenConflict(_)
+            | GitAction::StageHunk { .. }
+            | GitAction::UnstageHunk { .. } => None,
         };
         let Some((root, args)) = root.zip(args) else {
             return Transition {
@@ -704,6 +1075,8 @@ impl AppState {
                 query: query.clone(),
                 options,
             });
+        self.bottom_panel_view = BottomPanelView::Search;
+        self.bottom_panel_visible = true;
         Transition {
             effects: vec![Effect::SearchWorkspace {
                 session_id,
@@ -1138,6 +1511,8 @@ impl AppState {
         let before_version = self.buffer.snapshot().version();
         let mut transition = self.apply_action_inner(action);
         if self.buffer.snapshot().version() != before_version {
+            self.language_ui
+                .set_document_version(self.buffer.snapshot().version());
             transition.effects.push(self.syntax_effect());
         }
         transition
@@ -1362,7 +1737,9 @@ impl AppState {
             {
                 let (request, kind) = match &effect {
                     Effect::ExternalProcess { request, kind, .. } => (*request, *kind),
-                    Effect::RefreshGitStatus { request, .. } => {
+                    Effect::RefreshGitStatus { request, .. }
+                    | Effect::GitHunk { request, .. }
+                    | Effect::GitDiscard { request, .. } => {
                         (*request, super::effect::ExternalProcessKind::Git)
                     }
                     Effect::LspRequest { request, .. } => {
@@ -1393,7 +1770,9 @@ impl AppState {
                     Effect::ExternalProcess { request, kind, .. } => {
                         self.pending_processes.insert(*request, *kind);
                     }
-                    Effect::RefreshGitStatus { request, .. } => {
+                    Effect::RefreshGitStatus { request, .. }
+                    | Effect::GitHunk { request, .. }
+                    | Effect::GitDiscard { request, .. } => {
                         self.pending_processes
                             .insert(*request, super::effect::ExternalProcessKind::Git);
                     }
@@ -1683,6 +2062,170 @@ impl AppState {
         })
     }
 
+    fn start_lsp_format(&mut self, save_after: bool) -> Option<Effect> {
+        if !self.workspace_trusted
+            || !matches!(self.language_server, LanguageServerStatus::Running { .. })
+        {
+            return None;
+        }
+        let spec = self.discovered_lsp_spec()?;
+        let request = RequestId(self.frame_number.saturating_add(1));
+        let version = self.buffer.snapshot().version();
+        self.pending_lsp_format.insert(
+            request,
+            PendingFormat {
+                version,
+                save_after,
+            },
+        );
+        Some(Effect::LspRequest {
+            request,
+            version,
+            spec,
+            method: String::from("textDocument/formatting"),
+            params: serde_json::json!({
+                "textDocument": {"uri": self.active_document_uri()},
+                "options": {"tabSize": 4, "insertSpaces": true}
+            }),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn apply_lsp_format_result(&mut self, request: RequestId, result: &serde_json::Value) {
+        let Some(pending) = self.pending_lsp_format.remove(&request) else {
+            return;
+        };
+        if pending.version != self.buffer.snapshot().version() {
+            return;
+        }
+        let edits = result.as_array().cloned().unwrap_or_default();
+        let text = self.buffer.snapshot().text().to_owned();
+        let mut converted = Vec::with_capacity(edits.len());
+        for edit in edits {
+            let Some(range) = edit.get("range") else {
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "formatting".to_owned(),
+                    level: OutputLevel::Error,
+                    message: String::from("formatting response omitted an edit range"),
+                });
+                return;
+            };
+            let Ok(range) = serde_json::from_value::<lsp_client::protocol::Range>(range.clone())
+            else {
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "formatting".to_owned(),
+                    level: OutputLevel::Error,
+                    message: String::from("formatting response contained an invalid range"),
+                });
+                return;
+            };
+            let Ok(start_position) = lsp_client::protocol::lsp_position_to_editor(
+                &text,
+                range.start,
+                self.lsp_position_encoding,
+            ) else {
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "formatting".to_owned(),
+                    level: OutputLevel::Error,
+                    message: String::from("formatting response range could not be mapped"),
+                });
+                return;
+            };
+            let Ok(start) = self.buffer.position_to_offset(start_position) else {
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "formatting".to_owned(),
+                    level: OutputLevel::Error,
+                    message: String::from("formatting response range could not be mapped"),
+                });
+                return;
+            };
+            let Ok(end_position) = lsp_client::protocol::lsp_position_to_editor(
+                &text,
+                range.end,
+                self.lsp_position_encoding,
+            ) else {
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "formatting".to_owned(),
+                    level: OutputLevel::Error,
+                    message: String::from("formatting response range could not be mapped"),
+                });
+                return;
+            };
+            let Ok(end) = self.buffer.position_to_offset(end_position) else {
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "formatting".to_owned(),
+                    level: OutputLevel::Error,
+                    message: String::from("formatting response range could not be mapped"),
+                });
+                return;
+            };
+            let Some(new_text) = edit.get("newText").and_then(serde_json::Value::as_str) else {
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "formatting".to_owned(),
+                    level: OutputLevel::Error,
+                    message: String::from("formatting response omitted replacement text"),
+                });
+                return;
+            };
+            converted.push(Edit::replace(
+                editor_types::TextRange { start, end },
+                new_text,
+            ));
+        }
+        let changed = if converted.is_empty() {
+            false
+        } else {
+            match Transaction::new(converted).and_then(|transaction| {
+                self.buffer
+                    .apply_transaction(transaction)
+                    .map(|applied| applied.changed)
+            }) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    self.output.push(OutputMessage {
+                        subsystem: "lsp".to_owned(),
+                        operation: "formatting".to_owned(),
+                        level: OutputLevel::Error,
+                        message: format!("could not apply formatting edits: {error}"),
+                    });
+                    false
+                }
+            }
+        };
+        if changed {
+            self.language_ui
+                .set_document_version(self.buffer.snapshot().version());
+            self.sync_buffer_projection();
+            self.deferred_effects.push(self.syntax_effect());
+        }
+        if pending.save_after {
+            self.queue_save_after_format();
+        }
+    }
+
+    fn queue_save_after_format(&mut self) {
+        if let Some(path) = self.active_path.clone() {
+            let (encoding, with_bom, line_endings) = {
+                let tab = self.active_tab_state();
+                (tab.encoding.clone(), tab.with_bom, tab.line_endings)
+            };
+            self.deferred_effects.push(Effect::SaveDocument {
+                path,
+                text: self.active_text.clone(),
+                encoding,
+                with_bom,
+                line_endings,
+            });
+        }
+    }
+
     #[allow(clippy::too_many_lines, clippy::needless_return)]
     fn apply_command(&mut self, command: &str) -> Option<Effect> {
         match command {
@@ -1695,6 +2238,9 @@ impl AppState {
             "editor.quit" if !self.active_dirty => self.running = false,
             "editor.save" if self.active_dirty => {
                 if self.format_on_save {
+                    if let Some(effect) = self.start_lsp_format(true) {
+                        return Some(effect);
+                    }
                     if let Some(effect) = self.start_format(true) {
                         return Some(effect);
                     }
@@ -1767,6 +2313,9 @@ impl AppState {
                     self.sync_buffer_projection();
                     return None;
                 }
+                if let Some(effect) = self.start_lsp_format(false) {
+                    return Some(effect);
+                }
                 if let Some(effect) = self.start_format(false) {
                     return Some(effect);
                 }
@@ -1796,6 +2345,18 @@ impl AppState {
             "workbench.closeSplit" => {
                 self.split_axis = None;
                 self.split_secondary_tab = None;
+            }
+            "workbench.showProblems" => {
+                self.bottom_panel_view = BottomPanelView::Problems;
+                self.bottom_panel_visible = true;
+            }
+            "workbench.showGit" => {
+                self.bottom_panel_view = BottomPanelView::Git;
+                self.bottom_panel_visible = true;
+            }
+            "workbench.showOutput" => {
+                self.bottom_panel_view = BottomPanelView::Output;
+                self.bottom_panel_visible = true;
             }
             "git.refresh" if self.workspace_trusted => {
                 if let Some(root) = self.workspace_roots.first().cloned() {
@@ -1949,6 +2510,10 @@ impl AppState {
                 branch_state,
                 head,
                 conflicts,
+                diff_files,
+                branches,
+                stashes,
+                history,
             } => {
                 self.pending_processes.remove(&request);
                 self.git_status = Some(summary.clone());
@@ -1964,10 +2529,10 @@ impl AppState {
                             app_ui::git::GitTrustState::Untrusted
                         },
                         changes: entries,
-                        diff_files: Vec::new(),
-                        branches: Vec::new(),
-                        stashes: Vec::new(),
-                        history: Vec::new(),
+                        diff_files,
+                        branches,
+                        stashes,
+                        history,
                         conflicts,
                     },
                 ));
@@ -2163,14 +2728,22 @@ impl AppState {
                 self.output.push(message);
             }
             Event::LspResponse {
+                request,
                 version,
                 method,
                 result,
-                ..
             } => {
                 if version == self.buffer.snapshot().version() {
                     let status_name = method.clone();
-                    self.lsp_results.insert(method, result);
+                    self.lsp_results.insert(method.clone(), result.clone());
+                    if method == "textDocument/formatting" {
+                        self.apply_lsp_format_result(request, &result);
+                    }
+                    if let Some(language_result) =
+                        language_result_from_response(&method, &result, version, self.document_id)
+                    {
+                        let _ = self.language_ui.apply_result(language_result);
+                    }
                     self.language_server = LanguageServerStatus::Running { name: status_name };
                 }
             }
@@ -2304,7 +2877,7 @@ impl AppState {
 mod tests {
     use editor_types::{InputEvent, KeyCode, KeyEvent, LanguageServerStatus, RequestId};
 
-    use super::AppState;
+    use super::{AppState, PendingFormat};
     use crate::app::{
         action::Action,
         effect::{Effect, ExternalProcessKind, ProcessSpec},
@@ -2405,6 +2978,37 @@ mod tests {
         let _ = state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.undo")));
         assert_eq!(state.active_text, "h");
         assert!(state.active_dirty);
+    }
+
+    #[test]
+    fn large_file_mode_keeps_editing_and_suppresses_lsp_effects() {
+        let mut state = AppState {
+            buffer: TextBuffer::with_large_file_threshold("1234", 5),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        assert!(!state.buffer.is_large_file());
+
+        let transition = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('5'),
+            modifiers: editor_types::Modifiers::default(),
+            repeat: false,
+        })));
+        assert!(state.buffer.is_large_file());
+        assert_eq!(state.active_text, "51234");
+        let syntax = transition.effects.iter().find_map(|effect| {
+            let Effect::RefreshSyntax { large_file, .. } = effect else {
+                return None;
+            };
+            Some(*large_file)
+        });
+        assert_eq!(syntax, Some(true));
+        assert!(
+            transition
+                .effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::LspRequest { .. }))
+        );
     }
 
     #[test]
@@ -2729,5 +3333,133 @@ mod tests {
         });
         assert_eq!(state.diagnostics.len(), 1);
         assert_eq!(state.diagnostics[0].range.end.0, 4);
+    }
+
+    #[test]
+    fn lsp_results_update_versioned_language_views() {
+        let mut state = AppState::default();
+        let version = state.buffer.snapshot().version();
+        state.apply_event(Event::LspResponse {
+            request: RequestId(10),
+            version,
+            method: String::from("textDocument/completion"),
+            result: serde_json::json!({
+                "items": [{"label": "println!"}, {"label": "print!"}]
+            }),
+        });
+        let completion = state
+            .language_ui
+            .completion
+            .current()
+            .expect("completion view should be populated");
+        assert_eq!(completion.list.rows.len(), 2);
+        assert_eq!(completion.list.selected, Some(0));
+    }
+
+    #[test]
+    fn git_hunk_and_confirmed_discard_dispatch_typed_effects() {
+        let root = std::path::PathBuf::from("repo");
+        let path = root.join("src/main.rs");
+        let hunk = vcs_git::GitDiffHunk {
+            header: String::from("@@ -1 +1 @@"),
+            old_range: (1, 1),
+            new_range: (1, 1),
+            lines: Vec::new(),
+            patch: String::from("@@ -1 +1 @@\n-old\n+new\n"),
+        };
+        let snapshot = app_ui::git::GitRepositorySnapshot {
+            summary: editor_types::GitStatusSummary::default(),
+            branch_state: Some(String::from("main")),
+            head: None,
+            trust: app_ui::git::GitTrustState::Trusted,
+            changes: Vec::new(),
+            diff_files: vec![vcs_git::GitDiffFile {
+                change: vcs_git::GitFileChange::Modified,
+                path: path.clone(),
+                previous_path: None,
+                binary: false,
+                hunks: vec![hunk.clone()],
+                status: String::from(" M"),
+            }],
+            branches: Vec::new(),
+            stashes: Vec::new(),
+            history: Vec::new(),
+            conflicts: Vec::new(),
+        };
+        let mut state = AppState {
+            workspace_trusted: true,
+            workspace_roots: vec![root.clone()],
+            git_dashboard: Some(app_ui::git::GitDashboardState::from_repository(
+                root.clone(),
+                snapshot,
+            )),
+            ..AppState::default()
+        };
+        let transition = state.apply_git_action(app_ui::git::GitAction::StageHunk {
+            path: path.clone(),
+            hunk: 0,
+        });
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [Effect::GitHunk {
+                reverse: false,
+                hunk: selected,
+                ..
+            }] if selected == &hunk
+        ));
+
+        let plan = vcs_git::GitDiscardPlan {
+            path,
+            target: vcs_git::DiffTarget::WorkingTree,
+            scope: vcs_git::GitDiscardScope::File,
+            requires_confirmation: true,
+            reason: String::from("discard local edits"),
+            untracked: false,
+            hunk: None,
+        };
+        let request = app_ui::git::GitAction::RequestDiscard(plan.clone());
+        assert!(state.apply_git_action(request).effects.is_empty());
+        let confirmed = state.apply_git_action(app_ui::git::GitAction::ConfirmDiscard);
+        assert!(matches!(
+            confirmed.effects.as_slice(),
+            [Effect::GitDiscard {
+                confirmed: true,
+                plan: selected,
+                ..
+            }] if selected == &plan
+        ));
+    }
+
+    #[test]
+    fn lsp_formatting_edits_are_one_undoable_transaction() {
+        let mut state = AppState {
+            buffer: TextBuffer::new("foo\n"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        let version = state.buffer.snapshot().version();
+        let request = RequestId(88);
+        state.pending_lsp_format.insert(
+            request,
+            PendingFormat {
+                version,
+                save_after: false,
+            },
+        );
+        state.apply_event(Event::LspResponse {
+            request,
+            version,
+            method: String::from("textDocument/formatting"),
+            result: serde_json::json!([{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 3}
+                },
+                "newText": "bar"
+            }]),
+        });
+        assert_eq!(state.active_text, "bar\n");
+        let _ = state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.undo")));
+        assert_eq!(state.active_text, "foo\n");
     }
 }

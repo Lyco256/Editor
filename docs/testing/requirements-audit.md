@@ -27,11 +27,13 @@ Still release-blocking or environment-blocked:
 
 1. Root still does not project all app-ui editor/language/workspace/Git models into rendered views:
    the runtime leaves syntax/semantic highlight spans, bracket matches, search-match markers, and
-   several panel models unpopulated, and it does not complete every LSP result
-   (completion/hover/rename/code actions/etc.). Syntax parser refresh, search streaming,
+   several panel models unpopulated. LSP responses now populate versioned language models, but the
+   shell still does not display every result interactively. Syntax parser refresh, search streaming,
    diagnostics, and generic request effects now have root paths.
 2. Format-on-save/paste root chaining exists behind explicit state flags, but settings/UI controls,
    LSP-formatting precedence, and full Problems/Git/LSP interactive views remain incomplete.
+   Git hunk staging/unstaging and confirmation-bound discard now dispatch typed effects; branch,
+   stash, diff navigation, and the remaining dashboard actions still lack complete root/view wiring.
 3. Root retains detected encoding/BOM/line-ending metadata in tabs, session records, status
    rendering, and save effects; explicit user conversion/reopen commands are not yet wired.
 4. Search and native watcher workers use standard threads; the architecture target is Tokio-based
@@ -42,10 +44,10 @@ Still release-blocking or environment-blocked:
    approval before treating those missing measurements as an exception.
 6. Inno Setup (`iscc`) is not installed in this environment, so the installer definition has not
    been compiled; the release binary and staging package script are verified.
-7. The required root-level headless acceptance coverage is incomplete: `tests/headless_runtime.rs`
-   does not yet exercise Syntax output, the fake-server LSP request lifecycle, Git dashboard
-   mutations, or large-file semantic-service suppression end to end. Crate-level tests cover parts
-   of these behaviors, but they do not prove the integrated root event/effect path.
+7. The required root-level headless acceptance coverage is still incomplete: `tests/headless_runtime.rs`
+   now exercises Git status projection/mutation routing, while root unit coverage verifies
+   large-file edit/suppression behavior. It still does not exercise Syntax output rendering or the
+   fake-server LSP request lifecycle end to end; crate-level tests cover parts of those behaviors.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining service wiring, root acceptance coverage, and Windows performance/smoke

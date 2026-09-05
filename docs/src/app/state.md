@@ -20,6 +20,13 @@ Workspace roots and Explorer entries are retained in root state; `OpenPath` and 
 actions refresh the projection without letting views perform filesystem I/O.
 `apply_editor_action`, `apply_language_action`, and `apply_git_action` are typed adapters for the
 app-ui models; Git and language-process requests are converted to trust-gated structured effects.
+Git hunk staging/unstaging and confirmed discard retain their typed patch/plan payloads through
+dedicated effects rather than lossy shell command strings. LSP responses are retained by method and
+also projected into versioned app-ui completion, hover, navigation, rename, code-action, hint,
+symbol, and formatting models.
+Git diff/conflict navigation resolves repository-relative paths through the root tab-opening path,
+so the dashboard never performs filesystem access itself. Large-file mode remains editable while
+syntax refresh effects carry an explicit suppression flag and no semantic LSP request is emitted.
 `open_tab`, `SwitchTab`, and the session serializer retain each open buffer, detected encoding/BOM/
 line-ending metadata, and active-tab index,
 including an optional horizontal/vertical split, split ratio, and secondary tab. Session restore

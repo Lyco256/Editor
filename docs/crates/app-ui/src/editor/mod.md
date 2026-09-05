@@ -3,8 +3,8 @@
 Role: pure editor viewport rendering and editor-local action types.
 
 This module owns the text-viewport state used by the UI shell, including line numbers, gutter
-markers, selections, multiple cursors, fold presentation, bracket/search highlighting, overview
-ruler markers, and status-bar summary data.
+markers, selections, multiple cursors, fold presentation, syntax/semantic spans, bracket/search
+highlighting, overview ruler markers, and status-bar summary data.
 
 Important types:
 
@@ -25,6 +25,8 @@ Data flow:
 
 - `TextSnapshot` provides read-only text access and display-column calculations.
 - Selections, folds, and semantic markers are projected onto the visible viewport.
+- Syntax/semantic foreground roles are projected from immutable logical ranges and are layered
+  below selections, search matches, and bracket emphasis.
 - The renderer writes semantic `Cell` values into the framebuffer for the shell to compose.
 
 Concurrency:

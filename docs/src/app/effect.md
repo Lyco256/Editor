@@ -14,3 +14,6 @@ so a failed Save As cannot retarget or dirty the active tab.
 search sessions can be cancelled with a typed effect.
 `LspRequest` carries a structured JSON-RPC method/parameters payload and is trust-gated before any
 server process is started.
+`GitHunk` carries a parsed diff hunk to the Git adapter over stdin for stage/unstage, while
+`GitDiscard` carries a confirmation-bound discard plan. Both are trust-gated and report completion
+or typed failure events without constructing shell command strings.
