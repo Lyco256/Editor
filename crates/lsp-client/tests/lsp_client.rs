@@ -304,6 +304,47 @@ async fn lsp_lifecycle_and_requests_round_trip() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn server_workspace_edit_request_can_be_acknowledged() {
+    let client = LspClient::spawn(lsp_command("server_workspace_edit", "utf8"))
+        .await
+        .expect("spawn client");
+    let mut events = client.subscribe();
+    client
+        .initialize(initialize_params(PositionEncoding::Utf8))
+        .await
+        .expect("initialize");
+    client.initialized().await.expect("initialized");
+    let (id, method, params) = time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let ClientEvent::ServerRequest { id, method, params } =
+                events.recv().await.expect("event")
+            {
+                break (id, method, params);
+            }
+        }
+    })
+    .await
+    .expect("server request arrives");
+    assert_eq!(method, "workspace/applyEdit");
+    assert!(params.is_some());
+    client
+        .respond(id, Some(json!({"applied": true})), None)
+        .await
+        .expect("server request response");
+    client.shutdown().await.expect("shutdown");
+    let stopped = time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(client.status().await, lsp_client::ClientStatus::Stopped) {
+                break;
+            }
+            time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(stopped.is_ok(), "fake server should observe the response");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cancellation_suppresses_late_completion_response() {
     let client = initialize_client("slow_completion", "utf16").await;
     let ticket = client

@@ -13,6 +13,8 @@ filesystem traversal is not performed by the renderer. Clipboard reads and write
 the system adapter on a worker and return typed success/failure events; clipboard contents are not
 logged. Trusted language-server effects now use `lsp-client` stdio framing and initialization,
 forwarding stderr/crash events and requesting shutdown when the dispatcher is dropped.
+Server-originated requests are forwarded to root as typed events; validated `workspace/applyEdit`
+effects run on a background worker and return a JSON-RPC response through the owning client session.
 Syntax refreshes run through Tokio background workers, while project search streams typed
 matches and supports cancellation through a cloneable service handle. Structured LSP request effects
 use a bounded current-thread Tokio runtime and never concatenate shell commands. Git hunk and

@@ -16,5 +16,6 @@ language-result panels are blitted from pure renderers after shell layout comput
 production, editing, quit, cleanup, and split/session round trips.
 Deferred effects emitted while applying asynchronous events are dispatched by the runtime, allowing
 format-on-save/paste and other service chains to remain outside the UI update path.
+The same deferred-effect dispatch applies to responses for persistent language-server requests.
 Filesystem operation prompts are projected into the Output panel with explicit Command Palette
 confirm/cancel actions; only a confirmed plan reaches the background dispatcher.

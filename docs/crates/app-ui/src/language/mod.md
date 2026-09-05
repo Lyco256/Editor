@@ -18,6 +18,9 @@ Important types:
 - `LanguageAction`, `LanguageEffectRequest`, `LanguageResult`, and `LanguageModel` provide the
   normalized action/effect/result boundary used by the UI layer.
 
+Requests include completion resolve, prepare rename, declaration/implementation navigation, and
+range formatting so those protocol capabilities remain reachable without direct process access.
+
 Invariants and flow:
 
 - All versioned results are compared against the active document version before being accepted.

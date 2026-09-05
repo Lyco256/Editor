@@ -171,6 +171,104 @@ fn json_path(uri: &str) -> PathBuf {
     PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
+fn workspace_edits_for_path(edit: &serde_json::Value, path: &Path) -> Vec<serde_json::Value> {
+    let mut edits = Vec::new();
+    if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
+        for (uri, document_edits) in changes {
+            if workspace_core::path_eq(&json_path(uri), path) {
+                edits.extend(document_edits.as_array().into_iter().flatten().cloned());
+            }
+        }
+    }
+    if let Some(document_changes) = edit
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+    {
+        for document_change in document_changes {
+            let Some(uri) = document_change
+                .get("textDocument")
+                .and_then(|document| document.get("uri"))
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            if workspace_core::path_eq(&json_path(uri), path) {
+                edits.extend(
+                    document_change
+                        .get("edits")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+            }
+        }
+    }
+    edits
+}
+
+fn workspace_edit_target_paths(edit: &serde_json::Value) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
+        paths.extend(changes.keys().map(|uri| json_path(uri)));
+    }
+    if let Some(document_changes) = edit
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+    {
+        paths.extend(document_changes.iter().filter_map(|change| {
+            change
+                .get("textDocument")
+                .and_then(|document| document.get("uri"))
+                .and_then(serde_json::Value::as_str)
+                .map(json_path)
+        }));
+    }
+    paths.sort_by_key(|path| workspace_core::canonical_workspace_key(path));
+    paths.dedup_by(|left, right| workspace_core::path_eq(left, right));
+    paths
+}
+
+fn convert_workspace_edits(
+    buffer: &TextBuffer,
+    edits: &[serde_json::Value],
+    encoding: lsp_client::protocol::PositionEncoding,
+) -> Result<Vec<Edit>, ()> {
+    let snapshot = buffer.snapshot();
+    let text = snapshot.text();
+    edits
+        .iter()
+        .map(|edit| {
+            let range = edit.get("range").ok_or(())?;
+            let start = range
+                .get("start")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .ok_or(())
+                .and_then(|position: lsp_client::protocol::Position| {
+                    lsp_client::protocol::lsp_position_to_editor(text, position, encoding)
+                        .map_err(|_| ())
+                })
+                .and_then(|position| buffer.position_to_offset(position).map_err(|_| ()))?;
+            let end = range
+                .get("end")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .ok_or(())
+                .and_then(|position: lsp_client::protocol::Position| {
+                    lsp_client::protocol::lsp_position_to_editor(text, position, encoding)
+                        .map_err(|_| ())
+                })
+                .and_then(|position| buffer.position_to_offset(position).map_err(|_| ()))?;
+            let text = edit
+                .get("newText")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(())?;
+            Ok(Edit::replace(TextRange { start, end }, text))
+        })
+        .collect()
+}
+
 fn location_choice(
     value: &serde_json::Value,
     document: DocumentId,
@@ -265,6 +363,18 @@ fn language_result_from_response(
                 },
             ))
         }
+        "completionItem/resolve" => LanguageResult::Completion(Versioned::new(
+            version,
+            CompletionView {
+                list: PanelState::new(panel_glyphs("Completion")),
+                details: PanelState::new(panel_glyphs("Details")).with_rows(vec![panel_row(
+                    result
+                        .get("documentation")
+                        .or_else(|| result.get("detail"))
+                        .map_or_else(|| json_label(result), json_label),
+                )]),
+            },
+        )),
         "textDocument/hover" => LanguageResult::Hover(Versioned::new(
             version,
             HoverView {
@@ -307,6 +417,10 @@ fn language_result_from_response(
             let view = LocationChooserView {
                 title: panel_glyphs(if method.ends_with("references") {
                     "References"
+                } else if method.ends_with("declaration") {
+                    "Go to declaration"
+                } else if method.ends_with("implementation") {
+                    "Go to implementation"
                 } else {
                     "Go to definition"
                 }),
@@ -335,6 +449,16 @@ fn language_result_from_response(
                 },
             ))
         }
+        "textDocument/prepareRename" => LanguageResult::Rename(Versioned::new(
+            version,
+            RenamePreviewView {
+                title: panel_glyphs("Prepare rename"),
+                before: PanelState::new(panel_glyphs("Range"))
+                    .with_rows(vec![panel_row(json_label(result))]),
+                after: PanelState::new(panel_glyphs("New name")),
+                conflicts: PanelState::new(panel_glyphs("Conflicts")),
+            },
+        )),
         "textDocument/codeAction" => {
             let rows = result
                 .as_array()
@@ -570,6 +694,7 @@ impl Default for AppState {
                 CommandEntry::available("editor.copy", "Copy"),
                 CommandEntry::available("editor.cut", "Cut"),
                 CommandEntry::available("editor.paste", "Paste"),
+                CommandEntry::available("editor.expandSelection", "Expand Selection"),
                 CommandEntry::available("editor.format", "Format Document"),
                 CommandEntry::available("editor.reopenUtf8", "Reopen with UTF-8"),
                 CommandEntry::available("editor.reopenUtf16Le", "Reopen with UTF-16 LE"),
@@ -600,13 +725,17 @@ impl Default for AppState {
                 CommandEntry::available("language.openHover", "Show Hover"),
                 CommandEntry::available("language.openSignature", "Show Signature Help"),
                 CommandEntry::available("language.acceptCompletion", "Accept Completion"),
+                CommandEntry::available("language.resolveCompletion", "Resolve Completion Details"),
                 CommandEntry::available("language.acceptCodeAction", "Accept Code Action"),
+                CommandEntry::available("language.prepareRename", "Prepare Rename"),
                 CommandEntry::available("language.restart", "Restart Language Server"),
                 CommandEntry::available("language.dismiss", "Dismiss Language Popup"),
                 CommandEntry::available("language.requestCompletion", "Request Completion"),
                 CommandEntry::available("language.requestHover", "Request Hover"),
                 CommandEntry::available("language.requestSignature", "Request Signature Help"),
                 CommandEntry::available("language.goToDefinition", "Go to Definition"),
+                CommandEntry::available("language.goToDeclaration", "Go to Declaration"),
+                CommandEntry::available("language.goToImplementation", "Go to Implementation"),
                 CommandEntry::available("language.findReferences", "Find References"),
                 CommandEntry::available("language.requestRename", "Preview Rename"),
                 CommandEntry::available("language.requestCodeActions", "Request Code Actions"),
@@ -617,6 +746,10 @@ impl Default for AppState {
                     "Request Workspace Symbols",
                 ),
                 CommandEntry::available("language.requestFormatting", "Request Formatting"),
+                CommandEntry::available(
+                    "language.requestRangeFormatting",
+                    "Request Range Formatting",
+                ),
             ]),
             tabs: vec![TabState::untitled()],
             active_tab: 0,
@@ -700,6 +833,32 @@ impl AppState {
                         editor_core::Selection::new(range.start, range.end),
                     ));
                 self.sync_buffer_projection();
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            EditorAction::ExpandSelection => {
+                let current = self.buffer.selections().primary().range();
+                let candidate = self
+                    .syntax_snapshot
+                    .symbols
+                    .iter()
+                    .map(|symbol| symbol.range)
+                    .filter(|range| {
+                        range.start <= current.start
+                            && range.end >= current.end
+                            && (range.start < current.start || range.end > current.end)
+                    })
+                    .min_by_key(|range| range.end.0.saturating_sub(range.start.0));
+                if let Some(range) = candidate {
+                    let _ = self
+                        .buffer
+                        .set_selections(editor_core::SelectionSet::single(
+                            editor_core::Selection::new(range.start, range.end),
+                        ));
+                    self.sync_buffer_projection();
+                }
                 Transition {
                     render: true,
                     ..Transition::default()
@@ -877,12 +1036,34 @@ impl AppState {
                 self.last_language_method = Some("textDocument/completion".to_owned());
                 self.bottom_panel_view = BottomPanelView::Language;
                 self.bottom_panel_visible = true;
+                let transition = self.apply_language_effect_request(
+                    app_ui::language::LanguageEffectRequest::RequestCompletionResolve {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        index,
+                    },
+                );
+                if !transition.effects.is_empty() {
+                    return transition;
+                }
                 self.output.push(OutputMessage {
                     subsystem: "lsp".to_owned(),
                     operation: "completion".to_owned(),
                     level: OutputLevel::Information,
                     message: format!("completion details expanded for item {index}"),
                 });
+            }
+            LanguageAction::PrepareRename => {
+                self.last_language_method = Some("textDocument/prepareRename".to_owned());
+                self.bottom_panel_view = BottomPanelView::Language;
+                self.bottom_panel_visible = true;
+                return self.apply_language_effect_request(
+                    app_ui::language::LanguageEffectRequest::RequestPrepareRename {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                    },
+                );
             }
             LanguageAction::OpenHover => {
                 self.last_language_method = Some("textDocument/hover".to_owned());
@@ -1002,63 +1183,45 @@ impl AppState {
     }
 
     fn apply_workspace_edit(&mut self, edit: &serde_json::Value) -> bool {
-        let mut edits = Vec::new();
-        if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
-            for (uri, document_edits) in changes {
-                if self.uri_targets_active(uri) {
-                    edits.extend(document_edits.as_array().into_iter().flatten().cloned());
-                }
+        self.sync_active_tab();
+        let mut prepared = Vec::with_capacity(self.tabs.len());
+        let mut changed = false;
+        for tab in &self.tabs {
+            let Some(path) = tab.path.as_deref() else {
+                prepared.push(tab.buffer.clone());
+                continue;
+            };
+            if !self.path_is_within_workspace(path) {
+                prepared.push(tab.buffer.clone());
+                continue;
             }
-        }
-        if let Some(document_changes) = edit
-            .get("documentChanges")
-            .and_then(serde_json::Value::as_array)
-        {
-            for document_change in document_changes {
-                let Some(uri) = document_change
-                    .get("textDocument")
-                    .and_then(|document| document.get("uri"))
-                    .and_then(serde_json::Value::as_str)
-                else {
-                    continue;
-                };
-                if self.uri_targets_active(uri) {
-                    edits.extend(
-                        document_change
-                            .get("edits")
-                            .and_then(serde_json::Value::as_array)
-                            .into_iter()
-                            .flatten()
-                            .cloned(),
-                    );
-                }
+            let edits = workspace_edits_for_path(edit, path);
+            if edits.is_empty() {
+                prepared.push(tab.buffer.clone());
+                continue;
             }
+            let converted =
+                convert_workspace_edits(&tab.buffer, &edits, self.lsp_position_encoding);
+            let Ok(converted) = converted else {
+                return false;
+            };
+            let Ok(transaction) = Transaction::new(converted) else {
+                return false;
+            };
+            let mut buffer = tab.buffer.clone();
+            if buffer.apply_transaction(transaction).is_err() {
+                return false;
+            }
+            changed = true;
+            prepared.push(buffer);
         }
-        let converted = edits
-            .iter()
-            .filter_map(|edit| {
-                let range = edit.get("range")?;
-                let start = self
-                    .buffer
-                    .position_to_offset(json_position(range.get("start")?)?)
-                    .ok()?;
-                let end = self
-                    .buffer
-                    .position_to_offset(json_position(range.get("end")?)?)
-                    .ok()?;
-                let text = edit.get("newText")?.as_str()?.to_owned();
-                Some(Edit::replace(TextRange { start, end }, text))
-            })
-            .collect::<Vec<_>>();
-        if converted.is_empty() {
+        if !changed {
             return false;
         }
-        let Ok(transaction) = Transaction::new(converted) else {
-            return false;
-        };
-        if self.buffer.apply_transaction(transaction).is_err() {
-            return false;
+        for (tab, buffer) in self.tabs.iter_mut().zip(prepared) {
+            tab.buffer = buffer;
         }
+        self.buffer = self.tabs[self.active_tab].buffer.clone();
         self.language_ui
             .set_document_version(self.buffer.snapshot().version());
         self.sync_buffer_projection();
@@ -1066,11 +1229,11 @@ impl AppState {
         true
     }
 
-    fn uri_targets_active(&self, uri: &str) -> bool {
-        let Some(active) = self.active_path.as_deref() else {
-            return uri == self.active_document_uri();
-        };
-        uri == self.active_document_uri() || workspace_core::path_eq(&json_path(uri), active)
+    fn path_is_within_workspace(&self, path: &Path) -> bool {
+        let target = workspace_core::canonical_workspace_identity(path);
+        self.workspace_roots
+            .iter()
+            .any(|root| target.starts_with(workspace_core::canonical_workspace_identity(root)))
     }
 
     /// Converts a language-panel request into a trust-gated JSON-RPC effect.
@@ -1123,6 +1286,20 @@ impl AppState {
                 serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}}),
                 version,
             ),
+            LanguageEffectRequest::RequestDeclaration {
+                version, position, ..
+            } => (
+                "textDocument/declaration",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestImplementation {
+                version, position, ..
+            } => (
+                "textDocument/implementation",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}}),
+                version,
+            ),
             LanguageEffectRequest::RequestReferences {
                 version, position, ..
             } => (
@@ -1140,6 +1317,34 @@ impl AppState {
                 serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}, "newName": new_name}),
                 version,
             ),
+            LanguageEffectRequest::RequestPrepareRename {
+                version, position, ..
+            } => (
+                "textDocument/prepareRename",
+                serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "position": {"line": position.line, "character": position.character}}),
+                version,
+            ),
+            LanguageEffectRequest::RequestCompletionResolve { version, index, .. } => {
+                let Some(item) = self
+                    .lsp_results
+                    .get("textDocument/completion")
+                    .and_then(|value| value.as_array().or_else(|| value.get("items")?.as_array()))
+                    .and_then(|items| items.get(index))
+                    .cloned()
+                else {
+                    self.output.push(OutputMessage {
+                        subsystem: "lsp".to_owned(),
+                        operation: "completion-resolve".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: format!("completion item {index} is no longer available"),
+                    });
+                    return Transition {
+                        render: true,
+                        ..Transition::default()
+                    };
+                };
+                ("completionItem/resolve", item, version)
+            }
             LanguageEffectRequest::RequestCodeActions { version, .. } => (
                 "textDocument/codeAction",
                 serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0},}, "context": {"diagnostics": []}}),
@@ -1165,6 +1370,32 @@ impl AppState {
                 serde_json::json!({"textDocument": {"uri": self.active_document_uri()}, "options": {"tabSize": self.tab_width, "insertSpaces": self.insert_spaces}}),
                 version,
             ),
+            LanguageEffectRequest::RequestRangeFormatting { version, range, .. } => {
+                let Ok(start) = self.buffer.offset_to_position(range.start) else {
+                    return Transition {
+                        render: true,
+                        ..Transition::default()
+                    };
+                };
+                let Ok(end) = self.buffer.offset_to_position(range.end) else {
+                    return Transition {
+                        render: true,
+                        ..Transition::default()
+                    };
+                };
+                (
+                    "textDocument/rangeFormatting",
+                    serde_json::json!({
+                        "textDocument": {"uri": self.active_document_uri()},
+                        "range": {
+                            "start": {"line": start.line, "character": start.character},
+                            "end": {"line": end.line, "character": end.character}
+                        },
+                        "options": {"tabSize": self.tab_width, "insertSpaces": self.insert_spaces}
+                    }),
+                    version,
+                )
+            }
             LanguageEffectRequest::RefreshDiagnostics { version, .. } => (
                 "textDocument/diagnostic",
                 serde_json::json!({"textDocument": {"uri": self.active_document_uri()}}),
@@ -1195,6 +1426,18 @@ impl AppState {
             };
         };
         let request_id = RequestId(self.frame_number.saturating_add(1));
+        if matches!(
+            method,
+            "textDocument/formatting" | "textDocument/rangeFormatting"
+        ) {
+            self.pending_lsp_format.insert(
+                request_id,
+                PendingFormat {
+                    version,
+                    save_after: false,
+                },
+            );
+        }
         self.apply_action(Action::RequestEffect(Effect::LspRequest {
             request: request_id,
             version,
@@ -2496,9 +2739,11 @@ impl AppState {
                     | Effect::GitDiscard { request, .. } => {
                         (*request, super::effect::ExternalProcessKind::Git)
                     }
-                    Effect::LspRequest { request, .. } => {
+                    Effect::LspRequest { request, .. }
+                    | Effect::LspWorkspaceEdit { request, .. } => {
                         (*request, super::effect::ExternalProcessKind::LanguageServer)
                     }
+                    Effect::LspServerResponse { .. } => unreachable!("unguarded effect"),
                     Effect::SaveDocument { .. }
                     | Effect::SaveDocumentAs { .. }
                     | Effect::FileOperation { .. }
@@ -2543,6 +2788,8 @@ impl AppState {
                     | Effect::SearchWorkspace { .. }
                     | Effect::CancelSearch { .. }
                     | Effect::LspRequest { .. }
+                    | Effect::LspServerResponse { .. }
+                    | Effect::LspWorkspaceEdit { .. }
                     | Effect::Render => {}
                 }
                 Transition {
@@ -3059,6 +3306,9 @@ impl AppState {
                 );
                 return Some(Effect::ClipboardRead { request });
             }
+            "editor.expandSelection" => {
+                let _ = self.apply_editor_action(app_ui::editor::EditorAction::ExpandSelection);
+            }
             "editor.format" => {
                 if !self.workspace_trusted {
                     self.output.push(OutputMessage {
@@ -3180,6 +3430,11 @@ impl AppState {
                     app_ui::language::LanguageAction::AcceptCompletion { index: 0 },
                 );
             }
+            "language.resolveCompletion" => {
+                return self.apply_language_command(
+                    app_ui::language::LanguageAction::ExpandCompletionDetails { index: 0 },
+                );
+            }
             "language.acceptCodeAction" => {
                 return self.apply_language_command(
                     app_ui::language::LanguageAction::AcceptCodeAction { index: 0 },
@@ -3229,6 +3484,24 @@ impl AppState {
                     },
                 );
             }
+            "language.goToDeclaration" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestDeclaration {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                    },
+                );
+            }
+            "language.goToImplementation" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestImplementation {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        position: self.primary_language_position(),
+                    },
+                );
+            }
             "language.findReferences" => {
                 return self.apply_language_effect_command(
                     app_ui::language::LanguageEffectRequest::RequestReferences {
@@ -3247,6 +3520,10 @@ impl AppState {
                         new_name: "renamed".to_owned(),
                     },
                 );
+            }
+            "language.prepareRename" => {
+                return self
+                    .apply_language_command(app_ui::language::LanguageAction::PrepareRename);
             }
             "language.requestCodeActions" => {
                 return self.apply_language_effect_command(
@@ -3285,6 +3562,15 @@ impl AppState {
                     app_ui::language::LanguageEffectRequest::RequestFormatting {
                         document: self.document_id,
                         version: self.buffer.snapshot().version(),
+                    },
+                );
+            }
+            "language.requestRangeFormatting" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestRangeFormatting {
+                        document: self.document_id,
+                        version: self.buffer.snapshot().version(),
+                        range: self.buffer.selections().primary().range(),
                     },
                 );
             }
@@ -3733,7 +4019,10 @@ impl AppState {
                     let status_name = method.clone();
                     self.lsp_results.insert(method.clone(), result.clone());
                     self.last_language_method = Some(method.clone());
-                    if method == "textDocument/formatting" {
+                    if matches!(
+                        method.as_str(),
+                        "textDocument/formatting" | "textDocument/rangeFormatting"
+                    ) {
                         self.apply_lsp_format_result(request, &result);
                     }
                     if method == "textDocument/semanticTokens/full"
@@ -3762,6 +4051,140 @@ impl AppState {
                         self.bottom_panel_visible = true;
                     }
                     self.language_server = LanguageServerStatus::Running { name: status_name };
+                }
+            }
+            Event::LspWorkspaceEditCompleted {
+                request,
+                id,
+                applied,
+                failure_reason,
+                documents,
+            } => {
+                if applied {
+                    self.sync_active_tab();
+                    for document in documents {
+                        if let Some((index, tab)) =
+                            self.tabs.iter_mut().enumerate().find(|(_, tab)| {
+                                tab.path.as_deref().is_some_and(|path| {
+                                    workspace_core::path_eq(path, &document.path)
+                                })
+                            })
+                        {
+                            tab.path = Some(document.path.clone());
+                            tab.buffer = TextBuffer::new(&document.text);
+                            tab.encoding = document.encoding.clone();
+                            tab.with_bom = document.had_bom;
+                            tab.line_endings = document.line_endings;
+                            if index == self.active_tab {
+                                self.buffer = tab.buffer.clone();
+                                self.active_path = tab.path.clone();
+                            }
+                        }
+                    }
+                    self.sync_buffer_projection();
+                    self.deferred_effects.push(self.syntax_effect());
+                    self.output.push(OutputMessage {
+                        subsystem: "lsp".to_owned(),
+                        operation: "workspace-edit".to_owned(),
+                        level: OutputLevel::Information,
+                        message: "language server workspace edit applied".to_owned(),
+                    });
+                } else if let Some(reason) = &failure_reason {
+                    self.output.push(OutputMessage {
+                        subsystem: "lsp".to_owned(),
+                        operation: "workspace-edit".to_owned(),
+                        level: OutputLevel::Error,
+                        message: reason.clone(),
+                    });
+                }
+                self.deferred_effects.push(Effect::LspServerResponse {
+                    request,
+                    id,
+                    result: Some(serde_json::json!({
+                        "applied": applied,
+                        "failureReason": failure_reason,
+                    })),
+                    error: None,
+                });
+            }
+            Event::LspServerRequest {
+                request,
+                id,
+                method,
+                params,
+            } => {
+                if method == "workspace/applyEdit" {
+                    let edit = params
+                        .as_ref()
+                        .and_then(|value| value.get("edit").or(Some(value)))
+                        .cloned();
+                    let failure = edit.as_ref().and_then(|edit| {
+                        let paths = workspace_edit_target_paths(edit);
+                        if paths.is_empty() {
+                            return Some(
+                                "workspace edit did not contain text document changes".to_owned(),
+                            );
+                        }
+                        if paths
+                            .iter()
+                            .any(|path| !self.path_is_within_workspace(path))
+                        {
+                            return Some(
+                                "workspace edit targeted a path outside the trusted workspace"
+                                    .to_owned(),
+                            );
+                        }
+                        if self.tabs.iter().any(|tab| {
+                            tab.path.as_deref().is_some_and(|path| {
+                                tab.buffer.is_dirty()
+                                    && paths
+                                        .iter()
+                                        .any(|target| workspace_core::path_eq(target, path))
+                            })
+                        }) {
+                            return Some(
+                                "workspace edit would overwrite an unsaved buffer".to_owned(),
+                            );
+                        }
+                        None
+                    });
+                    if failure.is_none() {
+                        if let Some(edit) = edit {
+                            self.deferred_effects.push(Effect::LspWorkspaceEdit {
+                                request,
+                                id,
+                                edit,
+                                roots: self.workspace_roots.clone(),
+                                encoding: self.lsp_position_encoding,
+                            });
+                            return;
+                        }
+                    }
+                    self.deferred_effects.push(Effect::LspServerResponse {
+                        request,
+                        id,
+                        result: Some(serde_json::json!({
+                            "applied": false,
+                            "failureReason": failure.as_deref().unwrap_or("invalid workspace edit"),
+                        })),
+                        error: None,
+                    });
+                } else {
+                    self.output.push(OutputMessage {
+                        subsystem: "lsp".to_owned(),
+                        operation: "server-request".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: format!("unsupported language-server request: {method}"),
+                    });
+                    self.deferred_effects.push(Effect::LspServerResponse {
+                        request,
+                        id,
+                        result: Some(serde_json::json!({
+                            "applied": false,
+                            "failureReason": format!("unsupported server request: {method}"),
+                        })),
+                        error: None,
+                    });
                 }
             }
             Event::LanguageServerReady { encoding, .. } => {
@@ -4320,6 +4743,114 @@ mod tests {
             panic!("save effect expected");
         };
         assert_eq!(text, "fn main() {  }");
+    }
+
+    #[test]
+    fn server_workspace_edit_applies_to_all_matching_open_tabs_and_queues_response() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let first = directory.path().join("first.rs");
+        let second = directory.path().join("second.rs");
+        std::fs::write(&first, "one\n").expect("first source");
+        std::fs::write(&second, "two\n").expect("second source");
+        let mut state = AppState::default();
+        state.open_startup_path(&first);
+        state.open_tab(&second).expect("second tab");
+        let first_uri = format!("file:///{}", first.to_string_lossy().replace('\\', "/"));
+        let second_uri = format!("file:///{}", second.to_string_lossy().replace('\\', "/"));
+        let edit = serde_json::json!({
+            "changes": {
+                first_uri: [{
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                    "newText": "ONE"
+                }],
+                second_uri: [{
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                    "newText": "TWO"
+                }]
+            }
+        });
+        let _ = state.take_deferred_effects();
+        state.apply_event(Event::LspServerRequest {
+            request: RequestId(91),
+            id: lsp_client::protocol::RequestId::Number(7),
+            method: "workspace/applyEdit".to_owned(),
+            params: Some(serde_json::json!({"edit": edit})),
+        });
+        let effects = state.take_deferred_effects();
+        assert!(effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::LspWorkspaceEdit {
+                    request: RequestId(91),
+                    id: lsp_client::protocol::RequestId::Number(7),
+                    edit: _,
+                    roots: _,
+                    encoding: lsp_client::protocol::PositionEncoding::Utf16,
+                }
+            )
+        }));
+        state.apply_event(Event::LspWorkspaceEditCompleted {
+            request: RequestId(91),
+            id: lsp_client::protocol::RequestId::Number(7),
+            applied: true,
+            failure_reason: None,
+            documents: vec![
+                workspace_core::TextDocument {
+                    path: first,
+                    text: "ONE\n".to_owned(),
+                    encoding: workspace_core::EncodingKind::Utf8,
+                    had_bom: false,
+                    line_endings: workspace_core::LineEndings::Lf,
+                    large_file: false,
+                },
+                workspace_core::TextDocument {
+                    path: second,
+                    text: "TWO\n".to_owned(),
+                    encoding: workspace_core::EncodingKind::Utf8,
+                    had_bom: false,
+                    line_endings: workspace_core::LineEndings::Lf,
+                    large_file: false,
+                },
+            ],
+        });
+        assert_eq!(state.active_text, "TWO\n");
+        assert_eq!(state.tabs[0].buffer.snapshot().text(), "ONE\n");
+        assert!(state.take_deferred_effects().iter().any(|effect| matches!(
+            effect,
+            Effect::LspServerResponse {
+                request: RequestId(91),
+                id: lsp_client::protocol::RequestId::Number(7),
+                result: Some(result),
+                error: None,
+            } if result["applied"] == true
+        )));
+    }
+
+    #[test]
+    fn structural_selection_expands_to_next_syntax_symbol_range() {
+        let mut state = AppState {
+            buffer: TextBuffer::new("fn main() { value(); }"),
+            syntax_snapshot: syntax_engine::SyntaxSnapshot {
+                symbols: vec![syntax_engine::SyntaxSymbol {
+                    kind: syntax_engine::SyntaxSymbolKind::Function,
+                    name: "main".to_owned(),
+                    range: editor_types::TextRange {
+                        start: editor_types::CharacterOffset(0),
+                        end: editor_types::CharacterOffset(22),
+                    },
+                    selection_range: editor_types::TextRange {
+                        start: editor_types::CharacterOffset(3),
+                        end: editor_types::CharacterOffset(7),
+                    },
+                }],
+                ..syntax_engine::SyntaxSnapshot::default()
+            },
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        let _ = state.apply_editor_action(app_ui::editor::EditorAction::ExpandSelection);
+        assert_eq!(state.buffer.selections().primary().range().start.0, 0);
+        assert_eq!(state.buffer.selections().primary().range().end.0, 22);
     }
 
     #[test]

@@ -42,11 +42,16 @@ worker or view direct process access.
 `syntax_snapshot` exposes the latest parser snapshot for deterministic host-level validation.
 Language panel actions (completion, hover, signature help, navigation, rename, code actions,
 inlay hints, symbols, formatting, restart, and dismissal) are routed through root state; request
-commands include document and workspace symbols.
+commands include document and workspace symbols, completion resolve, prepare rename,
+declaration/implementation navigation, and range formatting. `editor.expandSelection` uses
+syntax-produced symbol ranges to grow the primary selection.
 Selecting a completion item applies its LSP `textEdit`/`insertText` as one undoable transaction when
 the server supplied an applicable edit.
 Rename previews and code actions likewise apply applicable active-document workspace edits as one
 undoable transaction; edits targeting other documents remain preview-only.
+Server-originated `workspace/applyEdit` requests are validated against trusted workspace roots and
+open buffers, then answered through a typed response effect. Structural selection expansion uses
+syntax-produced symbol ranges.
 Navigation results reuse an already active tab and place the cursor at the selected LSP location
 instead of opening duplicate tabs.
 Formatting requests pass the active document's resolved tab width and spaces/tabs policy to LSP.

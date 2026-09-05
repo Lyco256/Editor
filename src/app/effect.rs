@@ -94,6 +94,21 @@ pub enum Effect {
         method: String,
         params: serde_json::Value,
     },
+    /// Responds to a server-originated JSON-RPC request after root policy has handled it.
+    LspServerResponse {
+        request: RequestId,
+        id: lsp_client::protocol::RequestId,
+        result: Option<serde_json::Value>,
+        error: Option<lsp_client::protocol::JsonRpcErrorObject>,
+    },
+    /// Applies a server-originated `WorkspaceEdit` on a background worker.
+    LspWorkspaceEdit {
+        request: RequestId,
+        id: lsp_client::protocol::RequestId,
+        edit: serde_json::Value,
+        roots: Vec<PathBuf>,
+        encoding: lsp_client::protocol::PositionEncoding,
+    },
     RefreshSyntax {
         request: RequestId,
         document: editor_types::DocumentId,
@@ -116,6 +131,7 @@ impl Effect {
                 | Self::RefreshGitStatus { .. }
                 | Self::FormatDocument { .. }
                 | Self::LspRequest { .. }
+                | Self::LspWorkspaceEdit { .. }
         )
     }
 }

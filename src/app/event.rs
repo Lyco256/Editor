@@ -107,6 +107,20 @@ pub enum Event {
         method: String,
         result: serde_json::Value,
     },
+    /// A request initiated by the persistent language server, awaiting a root-policy response.
+    LspServerRequest {
+        request: RequestId,
+        id: lsp_client::protocol::RequestId,
+        method: String,
+        params: Option<serde_json::Value>,
+    },
+    LspWorkspaceEditCompleted {
+        request: RequestId,
+        id: lsp_client::protocol::RequestId,
+        applied: bool,
+        failure_reason: Option<String>,
+        documents: Vec<workspace_core::TextDocument>,
+    },
     EffectCompleted(RequestId),
     EffectFailed {
         request: RequestId,

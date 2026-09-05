@@ -44,18 +44,11 @@ Still release-blocking or environment-blocked:
    replacement-server startup. A Syntax effect now reaches a rendered Root framebuffer. The
    `.editorconfig` root integration also has deterministic load and save-normalization tests.
 
-3. LSP server-originated requests are surfaced by `lsp-client` but the root bootstrap currently
-   ignores `ClientEvent::ServerRequest`. The required server-requested `workspace/applyEdit` path
-   therefore remains unimplemented; only client-originated rename/code-action edits targeting the
-   active document are applied today (cross-document edits remain preview-only). This is a
-   functional release blocker until root policy, safe multi-document edit application, and the
-   JSON-RPC response path are wired and covered by an integration test.
-
-4. Several protocol capabilities are available in the standalone `lsp-client` API but are not
-   exposed through root actions yet: completion resolve, prepare-rename negotiation,
-   declaration/implementation navigation, and range formatting. Structural selection ranges are
-   likewise produced by the syntax engine but are not connected to an editor action. These are
-   functional integration gaps against the master LSP/editing requirements.
+3. Server-originated `workspace/applyEdit` requests now pass through root validation, a background
+   atomic-save worker, open-tab refresh, and a typed JSON-RPC response. Multi-document edits,
+   dirty-buffer rejection, and the fake-server response path have deterministic tests.
+4. Root language commands now expose completion resolve, prepare rename, declaration/implementation
+   navigation, range formatting, and syntax-aware structural selection expansion.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining performance/smoke evidence and promotion to an identical verified

@@ -8,7 +8,8 @@ use std::{
 
 use lsp_client::protocol::{
     self, DidChangeTextDocumentParams, DidOpenTextDocumentParams, IncomingMessage,
-    JsonRpcNotification, JsonRpcResponse, PositionEncoding, PublishDiagnosticsParams, RequestId,
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, PositionEncoding,
+    PublishDiagnosticsParams, RequestId,
 };
 use serde_json::{Value as JsonValue, json};
 use tokio::{
@@ -33,6 +34,7 @@ enum Scenario {
     FormatterSleep,
     FormatterNonZero,
     FormatterInvalidUtf8,
+    ServerWorkspaceEdit,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -58,6 +60,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("formatter_sleep") => Scenario::FormatterSleep,
         Some("formatter_nonzero") => Scenario::FormatterNonZero,
         Some("formatter_invalid_utf8") => Scenario::FormatterInvalidUtf8,
+        Some("server_workspace_edit") => Scenario::ServerWorkspaceEdit,
         _ => Scenario::Normal,
     };
     match kind {
@@ -108,6 +111,7 @@ async fn run_lsp(
     };
     let mut documents: HashMap<String, String> = HashMap::new();
     let mut cancelled: HashSet<u64> = HashSet::new();
+    let mut workspace_edit_acknowledged = false;
     if matches!(scenario, Scenario::Stderr) {
         eprintln!("fake server stderr line");
     }
@@ -210,9 +214,35 @@ async fn run_lsp(
                         error: None,
                     };
                     protocol::write_message(&mut stdout, &response).await?;
+                    if matches!(scenario, Scenario::ServerWorkspaceEdit) {
+                        protocol::write_message(
+                            &mut stdout,
+                            &JsonRpcRequest {
+                                jsonrpc: "2.0".to_owned(),
+                                id: RequestId::Number(77),
+                                method: "workspace/applyEdit".to_owned(),
+                                params: Some(json!({
+                                    "edit": {
+                                        "changes": {
+                                            "file:///workspace/main.rs": [{
+                                                "range": symbol_range(),
+                                                "newText": "server-applied"
+                                            }]
+                                        }
+                                    }
+                                })),
+                            },
+                        )
+                        .await?;
+                    }
                     continue;
                 }
                 if request.method == "shutdown" {
+                    if matches!(scenario, Scenario::ServerWorkspaceEdit)
+                        && !workspace_edit_acknowledged
+                    {
+                        return Err("workspace edit response was not acknowledged".into());
+                    }
                     respond_json(&mut stdout, request.id, JsonValue::Null).await?;
                     continue;
                 }
@@ -383,7 +413,17 @@ async fn run_lsp(
                 }
                 respond_json(&mut stdout, request.id, JsonValue::Null).await?;
             }
-            IncomingMessage::Response(_) => {}
+            IncomingMessage::Response(response) => {
+                if matches!(scenario, Scenario::ServerWorkspaceEdit)
+                    && response.id == RequestId::Number(77)
+                    && response
+                        .result
+                        .as_ref()
+                        .is_some_and(|value| value["applied"] == true)
+                {
+                    workspace_edit_acknowledged = true;
+                }
+            }
         }
     }
     Ok(())

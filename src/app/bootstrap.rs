@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use editor_types::TerminalCapabilities;
+use editor_types::{RequestId, TerminalCapabilities};
 use terminal_backend::{Framebuffer, TerminalAdapter};
 
 use super::{
@@ -312,6 +312,174 @@ fn vscode_settings_layer(layer: vscode_compat::SettingsLayer) -> config_core::Se
     }
 }
 
+fn lsp_workspace_edit_paths(edit: &serde_json::Value) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
+        paths.extend(changes.keys().map(|uri| lsp_uri_path(uri)));
+    }
+    if let Some(document_changes) = edit
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+    {
+        paths.extend(document_changes.iter().filter_map(|change| {
+            change
+                .get("textDocument")
+                .and_then(|document| document.get("uri"))
+                .and_then(serde_json::Value::as_str)
+                .map(lsp_uri_path)
+        }));
+    }
+    paths.sort_by_key(|path| workspace_core::canonical_workspace_key(path));
+    paths.dedup_by(|left, right| workspace_core::path_eq(left, right));
+    paths
+}
+
+fn lsp_uri_path(uri: &str) -> PathBuf {
+    let path = uri
+        .strip_prefix("file:///")
+        .or_else(|| uri.strip_prefix("file://"))
+        .unwrap_or(uri);
+    PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+}
+
+fn lsp_workspace_edits_for_path(
+    edit: &serde_json::Value,
+    path: &std::path::Path,
+) -> Vec<serde_json::Value> {
+    let mut edits = Vec::new();
+    if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
+        for (uri, document_edits) in changes {
+            if workspace_core::path_eq(&lsp_uri_path(uri), path) {
+                edits.extend(document_edits.as_array().into_iter().flatten().cloned());
+            }
+        }
+    }
+    if let Some(document_changes) = edit
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+    {
+        for document_change in document_changes {
+            let Some(uri) = document_change
+                .get("textDocument")
+                .and_then(|document| document.get("uri"))
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            if workspace_core::path_eq(&lsp_uri_path(uri), path) {
+                edits.extend(
+                    document_change
+                        .get("edits")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+            }
+        }
+    }
+    edits
+}
+
+fn apply_lsp_workspace_edit(
+    edit: &serde_json::Value,
+    roots: &[PathBuf],
+    encoding: lsp_client::protocol::PositionEncoding,
+) -> Result<Vec<workspace_core::TextDocument>, String> {
+    let paths = lsp_workspace_edit_paths(edit);
+    if paths.is_empty() {
+        return Err("workspace edit did not contain text document changes".to_owned());
+    }
+    let mut prepared = Vec::new();
+    for path in paths {
+        let target = workspace_core::canonical_workspace_identity(&path);
+        let allowed = roots
+            .iter()
+            .any(|root| target.starts_with(workspace_core::canonical_workspace_identity(root)));
+        if !allowed {
+            return Err(format!(
+                "workspace edit targeted an untrusted path: {}",
+                path.display()
+            ));
+        }
+        let document = workspace_core::load_text_document(
+            &path,
+            &workspace_core::DocumentLoadOptions::default(),
+        )
+        .map_err(|error| format!("could not load {}: {error}", path.display()))?;
+        let edits = lsp_workspace_edits_for_path(edit, &path);
+        if edits.is_empty() {
+            return Err(format!(
+                "workspace edit contained no text edits for {}",
+                path.display()
+            ));
+        }
+        let snapshot = lsp_client::TextSnapshot::new(document.text.clone());
+        let mut converted = Vec::new();
+        for value in edits {
+            let range = value
+                .get("range")
+                .ok_or_else(|| "workspace edit omitted a range".to_owned())?;
+            let start: lsp_client::protocol::Position = serde_json::from_value(
+                range
+                    .get("start")
+                    .cloned()
+                    .ok_or_else(|| "workspace edit omitted a start position".to_owned())?,
+            )
+            .map_err(|error| format!("invalid workspace edit start position: {error}"))?;
+            let end: lsp_client::protocol::Position = serde_json::from_value(
+                range
+                    .get("end")
+                    .cloned()
+                    .ok_or_else(|| "workspace edit omitted an end position".to_owned())?,
+            )
+            .map_err(|error| format!("invalid workspace edit end position: {error}"))?;
+            let start = lsp_client::PositionMapper::new(&snapshot, encoding)
+                .from_lsp(start)
+                .map_err(|error| format!("could not map workspace edit start: {error}"))?;
+            let end = lsp_client::PositionMapper::new(&snapshot, encoding)
+                .from_lsp(end)
+                .map_err(|error| format!("could not map workspace edit end: {error}"))?;
+            let buffer = editor_core::TextBuffer::new(&document.text);
+            let start = buffer
+                .position_to_offset(start)
+                .map_err(|error| format!("invalid workspace edit start: {error}"))?;
+            let end = buffer
+                .position_to_offset(end)
+                .map_err(|error| format!("invalid workspace edit end: {error}"))?;
+            let replacement = value
+                .get("newText")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "workspace edit omitted replacement text".to_owned())?;
+            converted.push(editor_core::Edit::replace(
+                editor_types::TextRange { start, end },
+                replacement,
+            ));
+        }
+        let transaction = editor_core::Transaction::new(converted)
+            .map_err(|error| format!("invalid workspace edit transaction: {error}"))?;
+        let mut buffer = editor_core::TextBuffer::new(&document.text);
+        buffer
+            .apply_transaction(transaction)
+            .map_err(|error| format!("could not apply workspace edit: {error}"))?;
+        let mut updated = document;
+        updated.text = buffer.to_string();
+        workspace_core::save_text_document(
+            &updated.path,
+            &updated.text,
+            &workspace_core::DocumentSaveOptions {
+                encoding: updated.encoding.clone(),
+                with_bom: updated.had_bom,
+                line_endings: updated.line_endings,
+                ..workspace_core::DocumentSaveOptions::default()
+            },
+        )
+        .map_err(|error| format!("could not save {}: {error}", updated.path.display()))?;
+        prepared.push(updated);
+    }
+    Ok(prepared)
+}
+
 struct ServiceDispatcher {
     events: Receiver<Event>,
     sender: Sender<Event>,
@@ -319,6 +487,7 @@ struct ServiceDispatcher {
     runtime: tokio::runtime::Runtime,
     syntax: Arc<Mutex<syntax_engine::SyntaxEngine>>,
     searches: Arc<Mutex<std::collections::HashMap<u64, workspace_core::SearchCancellation>>>,
+    lsp_clients: Arc<Mutex<std::collections::HashMap<RequestId, lsp_client::LspClient>>>,
 }
 
 impl ServiceDispatcher {
@@ -335,6 +504,7 @@ impl ServiceDispatcher {
             runtime,
             syntax: Arc::new(Mutex::new(syntax_engine::SyntaxEngine::default())),
             searches: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            lsp_clients: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 }
@@ -642,6 +812,78 @@ impl EffectDispatcher for ServiceDispatcher {
                 });
                 return;
             }
+            if let Effect::LspServerResponse {
+                request,
+                id,
+                result,
+                error,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                let clients = self.lsp_clients.clone();
+                self.runtime.spawn(async move {
+                    let client = clients
+                        .lock()
+                        .ok()
+                        .and_then(|map| map.get(&request).cloned());
+                    let Some(client) = client else {
+                        let _ = sender.send(Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "lsp".to_owned(),
+                                operation: "server-response".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: "language server session is no longer available"
+                                    .to_owned(),
+                            },
+                        });
+                        return;
+                    };
+                    if let Err(error) = client.respond(id, result, error).await {
+                        let _ = sender.send(Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "lsp".to_owned(),
+                                operation: "server-response".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        });
+                    }
+                });
+                return;
+            }
+            if let Effect::LspWorkspaceEdit {
+                request,
+                id,
+                edit,
+                roots,
+                encoding,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                self.runtime.spawn_blocking(move || {
+                    let outcome = apply_lsp_workspace_edit(&edit, &roots, encoding);
+                    let event = match outcome {
+                        Ok(documents) => Event::LspWorkspaceEditCompleted {
+                            request,
+                            id,
+                            applied: true,
+                            failure_reason: None,
+                            documents,
+                        },
+                        Err(message) => Event::LspWorkspaceEditCompleted {
+                            request,
+                            id,
+                            applied: false,
+                            failure_reason: Some(message),
+                            documents: Vec::new(),
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+                return;
+            }
             if let Effect::GitHunk {
                 request,
                 root,
@@ -945,6 +1187,7 @@ impl EffectDispatcher for ServiceDispatcher {
                 let sender = self.sender.clone();
                 let shutdown = self.shutdown.clone();
                 if matches!(kind, super::effect::ExternalProcessKind::LanguageServer) {
+                    let clients = self.lsp_clients.clone();
                     self.runtime.spawn_blocking(move || {
                         let event_sender = sender.clone();
                         let shutdown = shutdown.clone();
@@ -974,6 +1217,9 @@ impl EffectDispatcher for ServiceDispatcher {
                                         .initialized()
                                         .await
                                         .map_err(|error| error.to_string())?;
+                                    if let Ok(mut sessions) = clients.lock() {
+                                        sessions.insert(request, client.clone());
+                                    }
                                     let mut events = client.subscribe();
                                     let _ = event_sender.send(Event::LanguageServerReady {
                                         request,
@@ -1046,9 +1292,24 @@ impl EffectDispatcher for ServiceDispatcher {
                                                         params,
                                                     });
                                             }
-                                            lsp_client::ClientEvent::Notification { .. }
-                                            | lsp_client::ClientEvent::ServerRequest { .. } => {}
+                                            lsp_client::ClientEvent::Notification { .. } => {}
+                                            lsp_client::ClientEvent::ServerRequest {
+                                                id,
+                                                method,
+                                                params,
+                                            } => {
+                                                let _ =
+                                                    event_sender.send(Event::LspServerRequest {
+                                                        request,
+                                                        id,
+                                                        method,
+                                                        params,
+                                                    });
+                                            }
                                         }
+                                    }
+                                    if let Ok(mut sessions) = clients.lock() {
+                                        sessions.remove(&request);
                                     }
                                     Ok::<(), String>(())
                                 })
@@ -1153,7 +1414,7 @@ impl EffectDispatcher for ServiceDispatcher {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{StartupRequest, apply_workspace_settings};
+    use super::{StartupRequest, apply_lsp_workspace_edit, apply_workspace_settings};
 
     #[test]
     fn parses_file_and_directory_as_one_positional_path() {
@@ -1186,5 +1447,33 @@ mod tests {
         apply_workspace_settings(&mut state);
         assert!(state.format_on_save);
         assert_eq!(state.tab_width, 2);
+    }
+
+    #[test]
+    fn server_workspace_edit_worker_applies_unopened_document_atomically() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("server.rs");
+        std::fs::write(&path, "old\n").expect("source");
+        let uri = format!("file:///{}", path.to_string_lossy().replace('\\', "/"));
+        let edit = serde_json::json!({
+            "changes": {
+                uri: [{
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                    "newText": "new"
+                }]
+            }
+        });
+        let documents = apply_lsp_workspace_edit(
+            &edit,
+            &[directory.path().to_path_buf()],
+            lsp_client::protocol::PositionEncoding::Utf16,
+        )
+        .expect("workspace edit");
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].text, "new\n");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("saved source"),
+            "new\n"
+        );
     }
 }

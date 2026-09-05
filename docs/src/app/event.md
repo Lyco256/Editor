@@ -19,3 +19,5 @@ Syntax updates are accepted only for the active document/version, while search r
 by session id before entering the pure workspace UI model.
 LSP responses retain method and document version so stale results are ignored before updating root
 language state; initialization also records the negotiated position encoding.
+Persistent language-server requests are represented by `LspServerRequest` and are answered only
+after root policy applies a safe workspace edit.

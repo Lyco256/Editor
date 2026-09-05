@@ -14,6 +14,8 @@ Important types:
 - `EditorViewportState` for deterministic framebuffer rendering.
 - `EditorAction` for normalized viewport intents.
 
+`EditorAction::ExpandSelection` lets root state grow a primary selection using syntax-aware ranges.
+
 Invariants:
 
 - The module never performs filesystem, Git, LSP, or terminal I/O.

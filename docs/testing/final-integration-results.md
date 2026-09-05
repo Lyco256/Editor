@@ -15,12 +15,8 @@ Windows Terminal 10 MiB process-level open/force-close sample, and successful In
 are recorded in the smoke/performance documents; native 10 MiB typing-latency and clean interactive
 open/close profiling remain outstanding.
 
-The LSP client exposes server-originated requests, but root bootstrap does not yet handle
-`workspace/applyEdit`; only active-document edits from client-originated rename/code-action results
-are applied (cross-document edits remain preview-only). Server-requested workspace edits remain a
-release-blocking implementation gap in addition to the native profiling and promotion gates.
-
-The standalone LSP client also has protocol methods that are not yet reachable from root actions
-(completion resolve, prepare rename, declaration/implementation navigation, and range formatting),
-and syntax structural-selection ranges are not wired to an editor action. These remain functional
-integration gaps.
+Server-originated `workspace/applyEdit` requests now pass through root validation, a background
+atomic-save worker, open-tab refresh, and a typed JSON-RPC response. Multi-document edits and
+dirty-buffer rejection are covered by deterministic tests. Root commands also expose completion
+resolve, prepare rename, declaration/implementation navigation, range formatting, and
+syntax-aware structural selection expansion.

@@ -818,6 +818,9 @@ where
             self.persist_checkpoint();
             for event in self.dispatcher.poll_events() {
                 self.state.apply_event(event);
+                for effect in self.state.take_deferred_effects() {
+                    self.dispatcher.dispatch(effect);
+                }
             }
             if transition.render {
                 self.render()?;
