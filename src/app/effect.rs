@@ -21,10 +21,16 @@ pub enum Effect {
     SaveDocument {
         path: PathBuf,
         text: String,
+        encoding: workspace_core::EncodingKind,
+        with_bom: bool,
+        line_endings: workspace_core::LineEndings,
     },
     SaveDocumentAs {
         path: PathBuf,
         text: String,
+        encoding: workspace_core::EncodingKind,
+        with_bom: bool,
+        line_endings: workspace_core::LineEndings,
     },
     ExternalProcess {
         request: RequestId,

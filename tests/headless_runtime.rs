@@ -24,12 +24,30 @@ struct SaveDispatcher {
 impl EffectDispatcher for SaveDispatcher {
     fn dispatch(&mut self, effect: Effect) {
         let save_as = matches!(&effect, Effect::SaveDocumentAs { .. });
-        if let Effect::SaveDocument { path, text } | Effect::SaveDocumentAs { path, text } = effect
+        if let Effect::SaveDocument {
+            path,
+            text,
+            encoding,
+            with_bom,
+            line_endings,
+        }
+        | Effect::SaveDocumentAs {
+            path,
+            text,
+            encoding,
+            with_bom,
+            line_endings,
+        } = effect
         {
             workspace_core::save_text_document(
                 &path,
                 &text,
-                &workspace_core::DocumentSaveOptions::default(),
+                &workspace_core::DocumentSaveOptions {
+                    encoding,
+                    with_bom,
+                    line_endings,
+                    ..workspace_core::DocumentSaveOptions::default()
+                },
             )
             .expect("save effect should write atomically");
             self.events.push(if save_as {
@@ -319,6 +337,61 @@ fn missing_original_file_keeps_recovered_unsaved_text() {
     restored.restore_session(&session);
     assert_eq!(restored.active_text, "recovered");
     assert!(restored.active_dirty);
+}
+
+#[test]
+fn encoding_and_line_endings_survive_root_save_and_session_round_trip() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let path = directory.path().join("unicode.txt");
+    let bytes = workspace_core::encode_text_document(
+        "日本語\r\n",
+        &workspace_core::EncodingKind::Utf16Le,
+        true,
+        workspace_core::DecodePolicy::Strict,
+    )
+    .expect("encode fixture");
+    std::fs::write(&path, bytes).expect("write fixture");
+
+    let mut state = editor::app::state::AppState::default();
+    state.open_startup_path(&path);
+    let session = state.session_state();
+    assert_eq!(
+        session.editors[0].original_encoding,
+        Some(config_core::EncodingKind::Utf16Le)
+    );
+    assert!(session.editors[0].original_bom);
+    assert_eq!(
+        session.editors[0].original_line_ending,
+        Some(config_core::LineEndings::Crlf)
+    );
+
+    let mut restored = editor::app::state::AppState::default();
+    restored.restore_session(&session);
+    let transition = restored.apply_action(Action::Input(editor_types::InputEvent::Key(
+        editor_types::KeyEvent {
+            code: editor_types::KeyCode::Character('!'),
+            modifiers: editor_types::Modifiers::default(),
+            repeat: false,
+        },
+    )));
+    let save = transition
+        .effects
+        .into_iter()
+        .find(|effect| matches!(effect, Effect::SaveDocument { .. }));
+    assert!(save.is_none(), "typing alone does not save automatically");
+    let save = restored.apply_action(Action::Invoke(editor_types::CommandId::new("editor.save")));
+    let Effect::SaveDocument {
+        encoding,
+        with_bom,
+        line_endings,
+        ..
+    } = save.effects.into_iter().next().expect("save effect")
+    else {
+        panic!("expected save effect");
+    };
+    assert_eq!(encoding, workspace_core::EncodingKind::Utf16Le);
+    assert!(with_bom);
+    assert_eq!(line_endings, workspace_core::LineEndings::Crlf);
 }
 
 #[test]

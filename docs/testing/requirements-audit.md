@@ -28,9 +28,9 @@ Still release-blocking or environment-blocked:
 2. Format-on-save and format-on-paste, plus full Problems/Git/LSP interactive views, remain
    UI-service integration work. Manual formatting, clipboard commands, Save As, dirty close
    protection, and project replacement effects are covered by root transitions and headless tests.
-3. Root document tabs do not yet retain detected encoding/BOM and line-ending metadata: session
-   serialization emits `None` for the original encoding/EOL and ordinary saves use UTF-8/LF
-   defaults. Encoding-preserving reopen/save and the status-bar values are therefore incomplete.
+3. Root now retains detected encoding/BOM/line-ending metadata in tabs, session records, status
+   rendering, and save effects; the remaining encoding UI for explicit user conversion/reopen is
+   not yet wired.
 4. Search and native watcher workers use standard threads; the architecture target is Tokio-based
    orchestration.
 5. `docs/testing/performance.md` lacks resident-memory, idle-CPU, 10 MiB latency, and repeated

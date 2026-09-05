@@ -224,6 +224,22 @@ fn frame_for_state(
     let status = EditorStatusData {
         file_name: file_name.clone(),
         dirty: state.active_dirty,
+        encoding: state
+            .tabs
+            .get(state.active_tab)
+            .map(|tab| tab.encoding.canonical_name().to_ascii_lowercase())
+            .unwrap_or_else(|| "utf-8".to_owned()),
+        line_ending: state
+            .tabs
+            .get(state.active_tab)
+            .map(|tab| match tab.line_endings {
+                workspace_core::LineEndings::None => "none",
+                workspace_core::LineEndings::Lf => "lf",
+                workspace_core::LineEndings::Crlf => "crlf",
+                workspace_core::LineEndings::Mixed => "mixed",
+            })
+            .unwrap_or("lf")
+            .to_owned(),
         branch: state
             .git_status
             .as_ref()

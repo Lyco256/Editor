@@ -63,6 +63,7 @@ pub struct EditorSession {
     pub editor_id: String,
     pub original_path: Option<PathBuf>,
     pub original_encoding: Option<EncodingKind>,
+    pub original_bom: bool,
     pub original_line_ending: Option<LineEndings>,
     pub cursor: CursorState,
     pub selections: Vec<SelectionState>,
@@ -368,6 +369,7 @@ mod tests {
                 editor_id: "editor-1".to_owned(),
                 original_path: Some(original_path),
                 original_encoding: Some(EncodingKind::Utf16Le),
+                original_bom: false,
                 original_line_ending: Some(LineEndings::Crlf),
                 cursor: CursorState {
                     line: 3,

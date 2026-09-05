@@ -20,7 +20,8 @@ Workspace roots and Explorer entries are retained in root state; `OpenPath` and 
 actions refresh the projection without letting views perform filesystem I/O.
 `apply_editor_action`, `apply_language_action`, and `apply_git_action` are typed adapters for the
 app-ui models; Git and language-process requests are converted to trust-gated structured effects.
-`open_tab`, `SwitchTab`, and the session serializer retain each open buffer and active-tab index,
+`open_tab`, `SwitchTab`, and the session serializer retain each open buffer, detected encoding/BOM/
+line-ending metadata, and active-tab index,
 including an optional horizontal/vertical split, split ratio, and secondary tab. Session restore
 honors persisted tab order, all selections, and recovered text even when the original file is
 temporarily missing. Split/close/resize actions remain pure state transitions.

@@ -66,6 +66,21 @@ pub struct ExplorerProjection {
 pub struct TabState {
     pub path: Option<PathBuf>,
     pub buffer: TextBuffer,
+    pub encoding: workspace_core::EncodingKind,
+    pub with_bom: bool,
+    pub line_endings: workspace_core::LineEndings,
+}
+
+impl TabState {
+    fn untitled() -> Self {
+        Self {
+            path: None,
+            buffer: TextBuffer::default(),
+            encoding: workspace_core::EncodingKind::Utf8,
+            with_bom: false,
+            line_endings: workspace_core::LineEndings::Lf,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +92,50 @@ enum PendingClipboard {
     Paste {
         range: editor_types::TextRange,
     },
+}
+
+fn config_encoding_to_workspace(value: &config_core::EncodingKind) -> workspace_core::EncodingKind {
+    match value {
+        config_core::EncodingKind::Utf8 => workspace_core::EncodingKind::Utf8,
+        config_core::EncodingKind::Utf16Le => workspace_core::EncodingKind::Utf16Le,
+        config_core::EncodingKind::Utf16Be => workspace_core::EncodingKind::Utf16Be,
+        config_core::EncodingKind::Legacy(name) => {
+            workspace_core::EncodingKind::Legacy(name.clone())
+        }
+    }
+}
+
+fn workspace_encoding_to_config(value: &workspace_core::EncodingKind) -> config_core::EncodingKind {
+    match value {
+        workspace_core::EncodingKind::Utf8 => config_core::EncodingKind::Utf8,
+        workspace_core::EncodingKind::Utf16Le => config_core::EncodingKind::Utf16Le,
+        workspace_core::EncodingKind::Utf16Be => config_core::EncodingKind::Utf16Be,
+        workspace_core::EncodingKind::Legacy(name) => {
+            config_core::EncodingKind::Legacy(name.clone())
+        }
+    }
+}
+
+fn config_line_endings_to_workspace(
+    value: &config_core::LineEndings,
+) -> workspace_core::LineEndings {
+    match value {
+        config_core::LineEndings::None => workspace_core::LineEndings::None,
+        config_core::LineEndings::Lf => workspace_core::LineEndings::Lf,
+        config_core::LineEndings::Crlf => workspace_core::LineEndings::Crlf,
+        config_core::LineEndings::Mixed => workspace_core::LineEndings::Mixed,
+    }
+}
+
+fn workspace_line_endings_to_config(
+    value: workspace_core::LineEndings,
+) -> config_core::LineEndings {
+    match value {
+        workspace_core::LineEndings::None => config_core::LineEndings::None,
+        workspace_core::LineEndings::Lf => config_core::LineEndings::Lf,
+        workspace_core::LineEndings::Crlf => config_core::LineEndings::Crlf,
+        workspace_core::LineEndings::Mixed => config_core::LineEndings::Mixed,
+    }
 }
 
 impl Default for AppState {
@@ -112,10 +171,7 @@ impl Default for AppState {
                 CommandEntry::available("editor.quit", "Quit"),
                 CommandEntry::available("git.refresh", "Refresh Git Status"),
             ]),
-            tabs: vec![TabState {
-                path: None,
-                buffer: TextBuffer::default(),
-            }],
+            tabs: vec![TabState::untitled()],
             active_tab: 0,
             split_axis: None,
             split_ratio_percent: 50,
@@ -377,8 +433,9 @@ impl AppState {
                 config_core::EditorSession {
                     editor_id: format!("tab-{index}"),
                     original_path: tab.path.clone(),
-                    original_encoding: None,
-                    original_line_ending: None,
+                    original_encoding: Some(workspace_encoding_to_config(&tab.encoding)),
+                    original_bom: tab.with_bom,
+                    original_line_ending: Some(workspace_line_endings_to_config(tab.line_endings)),
                     cursor: config_core::CursorState {
                         line: cursor.line,
                         character: cursor.character,
@@ -454,17 +511,54 @@ impl AppState {
         };
         for editor in &ordered_editors {
             let editor = *editor;
-            let (path, disk_text) = if let Some(path) = &editor.original_path {
-                match workspace_core::load_text_document(
-                    path,
-                    &workspace_core::DocumentLoadOptions::default(),
-                ) {
-                    Ok(document) => (Some(path.clone()), document.text),
-                    Err(_) => (Some(path.clone()), String::new()),
-                }
-            } else {
-                (None, String::new())
-            };
+            let (path, disk_text, encoding, with_bom, line_endings) =
+                if let Some(path) = &editor.original_path {
+                    match workspace_core::load_text_document(
+                        path,
+                        &workspace_core::DocumentLoadOptions::default(),
+                    ) {
+                        Ok(document) => (
+                            Some(path.clone()),
+                            document.text,
+                            editor
+                                .original_encoding
+                                .as_ref()
+                                .map_or(document.encoding, config_encoding_to_workspace),
+                            editor.original_bom || document.had_bom,
+                            editor
+                                .original_line_ending
+                                .as_ref()
+                                .map_or(document.line_endings, config_line_endings_to_workspace),
+                        ),
+                        Err(_) => (
+                            Some(path.clone()),
+                            String::new(),
+                            editor.original_encoding.as_ref().map_or(
+                                workspace_core::EncodingKind::Utf8,
+                                config_encoding_to_workspace,
+                            ),
+                            editor.original_bom,
+                            editor.original_line_ending.as_ref().map_or(
+                                workspace_core::LineEndings::Lf,
+                                config_line_endings_to_workspace,
+                            ),
+                        ),
+                    }
+                } else {
+                    (
+                        None,
+                        String::new(),
+                        editor.original_encoding.as_ref().map_or(
+                            workspace_core::EncodingKind::Utf8,
+                            config_encoding_to_workspace,
+                        ),
+                        editor.original_bom,
+                        editor.original_line_ending.as_ref().map_or(
+                            workspace_core::LineEndings::Lf,
+                            config_line_endings_to_workspace,
+                        ),
+                    )
+                };
             let text = editor.unsaved_text.as_deref().unwrap_or(&disk_text);
             let mut buffer = TextBuffer::new(text);
             if editor.dirty {
@@ -501,7 +595,13 @@ impl AppState {
                     editor_core::Selection::cursor(position),
                 ));
             }
-            self.tabs.push(TabState { path, buffer });
+            self.tabs.push(TabState {
+                path,
+                buffer,
+                encoding,
+                with_bom,
+                line_endings,
+            });
         }
         if self.tabs.is_empty() {
             return;
@@ -574,10 +674,7 @@ impl AppState {
         let path = path.as_ref().to_path_buf();
         if path.is_dir() {
             self.active_path = Some(path);
-            self.tabs = vec![TabState {
-                path: None,
-                buffer: TextBuffer::default(),
-            }];
+            self.tabs = vec![TabState::untitled()];
             self.active_tab = 0;
             self.workspace_roots = self.active_path.iter().cloned().collect();
             self.refresh_workspace_trust();
@@ -596,6 +693,9 @@ impl AppState {
                 self.tabs = vec![TabState {
                     path: self.active_path.clone(),
                     buffer: TextBuffer::new(&document.text),
+                    encoding: document.encoding,
+                    with_bom: document.had_bom,
+                    line_endings: document.line_endings,
                 }];
                 self.active_tab = 0;
                 self.workspace_roots = self
@@ -637,6 +737,9 @@ impl AppState {
         self.tabs.push(TabState {
             path: Some(document.path.clone()),
             buffer: TextBuffer::new(&document.text),
+            encoding: document.encoding,
+            with_bom: document.had_bom,
+            line_endings: document.line_endings,
         });
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.active_path = Some(document.path);
@@ -674,6 +777,10 @@ impl AppState {
             tab.path.clone_from(&self.active_path);
             tab.buffer = self.buffer.clone();
         }
+    }
+
+    fn active_tab_state(&self) -> &TabState {
+        &self.tabs[self.active_tab]
     }
 
     fn refresh_workspace_trust(&mut self) {
@@ -807,10 +914,7 @@ impl AppState {
                         self.buffer = tab.buffer;
                         self.sync_buffer_projection();
                     } else {
-                        self.tabs[0] = TabState {
-                            path: None,
-                            buffer: TextBuffer::default(),
-                        };
+                        self.tabs[0] = TabState::untitled();
                         self.active_tab = 0;
                         self.active_path = None;
                         self.buffer = TextBuffer::default();
@@ -826,6 +930,9 @@ impl AppState {
                 effects: vec![Effect::SaveDocumentAs {
                     path,
                     text: self.active_text.clone(),
+                    encoding: self.active_tab_state().encoding.clone(),
+                    with_bom: self.active_tab_state().with_bom,
+                    line_endings: self.active_tab_state().line_endings,
                 }],
                 render: true,
                 ..Transition::default()
@@ -1199,6 +1306,9 @@ impl AppState {
                     return Some(Effect::SaveDocument {
                         path,
                         text: self.active_text.clone(),
+                        encoding: self.active_tab_state().encoding.clone(),
+                        with_bom: self.active_tab_state().with_bom,
+                        line_endings: self.active_tab_state().line_endings,
                     });
                 }
                 self.output.push(OutputMessage {
