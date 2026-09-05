@@ -63,5 +63,6 @@ Still release-blocking or environment-blocked:
    workspace edits, with deterministic root-state coverage.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
-complete until the remaining performance/smoke evidence and promotion to an identical verified
-`main` state are supplied.
+complete until directory resource-operation semantics are implemented or explicitly scoped out,
+the remaining performance/smoke evidence is supplied, and the identical verified state is promoted
+to `main`.

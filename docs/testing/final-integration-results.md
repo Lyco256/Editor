@@ -23,7 +23,8 @@ syntax-aware structural selection expansion.
 
 Trusted language-server requests now reuse the persistent client session when available. Root
 queues workspace-folder, didOpen, didChange, didSave, and didClose notifications; deterministic
-state coverage verifies the lifecycle notifications are emitted.
+state coverage verifies the lifecycle notifications are emitted. Directory resource operations
+remain explicitly rejected and are still outside the complete WorkspaceEdit surface.
 
 File resource WorkspaceEdit operations (create/rename/delete) are now applied with trusted-root
 validation and rollback on operation failure. Directory resource operations remain explicitly
