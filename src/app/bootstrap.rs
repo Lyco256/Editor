@@ -1107,8 +1107,13 @@ fn apply_lsp_workspace_edit(
                         Ok(())
                     } else if !overwrite {
                         Err(format!("create target already exists: {}", path.display()))
+                    } else if path.is_dir() {
+                        Err(format!(
+                            "create target is a directory and cannot be overwritten as a file: {}",
+                            path.display()
+                        ))
                     } else {
-                        remove_resource(path).map_err(|error| error.to_string())?;
+                        std::fs::remove_file(path).map_err(|error| error.to_string())?;
                         std::fs::write(path, []).map_err(|error| error.to_string())
                     }
                 } else {
@@ -2620,6 +2625,27 @@ mod tests {
         )
         .expect("directory delete");
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn server_workspace_edit_create_does_not_overwrite_directory() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let target = directory.path().join("existing");
+        std::fs::create_dir(&target).expect("directory");
+        let uri = lsp_client::protocol::DocumentUri::from_path(&target).0;
+        let edit = serde_json::json!({
+            "documentChanges": [{
+                "kind": "create", "uri": uri, "options": {"overwrite": true}
+            }]
+        });
+        let error = apply_lsp_workspace_edit(
+            &edit,
+            &[directory.path().to_path_buf()],
+            lsp_client::protocol::PositionEncoding::Utf16,
+        )
+        .expect_err("directory must not be replaced by CreateFile");
+        assert!(error.contains("cannot be overwritten"));
+        assert!(target.is_dir());
     }
 
     #[test]
