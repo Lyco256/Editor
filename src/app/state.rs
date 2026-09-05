@@ -2098,6 +2098,9 @@ impl AppState {
         } else if final_newline == Some(false) {
             while normalized.ends_with('\n') {
                 normalized.pop();
+                if normalized.ends_with('\r') {
+                    normalized.pop();
+                }
             }
         }
         if normalized == original {
