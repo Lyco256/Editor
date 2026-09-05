@@ -40,6 +40,9 @@ The last interactive language result selects a rendered language panel through t
 `language_model` exposes that immutable versioned view to host integrations without granting any
 worker or view direct process access.
 `syntax_snapshot` exposes the latest parser snapshot for deterministic host-level validation.
+Language panel actions (completion, hover, signature help, navigation, rename, code actions,
+inlay hints, symbols, formatting, restart, and dismissal) are routed through root state; request
+commands include document and workspace symbols.
 Opening or switching to a document loads applicable `.editorconfig` sections; indentation, charset
 fallback, end-of-line policy, trailing-whitespace trimming, and final-newline policy are applied to
 the active document while invalid properties surface typed warnings. Save normalization is recorded

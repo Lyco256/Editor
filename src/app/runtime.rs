@@ -412,6 +412,34 @@ fn frame_for_state(
             editor_types::DiagnosticSeverity::Hint => StyleRole::Hint,
         },
     }));
+    if let Some(prompt) = &state.workspace_ui.prompt {
+        let label = match prompt {
+            app_ui::workspace::WorkspacePrompt::CreateFile { path } => {
+                format!("Create file? {}", path.display())
+            }
+            app_ui::workspace::WorkspacePrompt::Rename { source, target } => {
+                format!("Rename? {} -> {}", source.display(), target.display())
+            }
+            app_ui::workspace::WorkspacePrompt::Move { source, target } => {
+                format!("Move? {} -> {}", source.display(), target.display())
+            }
+            app_ui::workspace::WorkspacePrompt::Delete {
+                path,
+                recursive,
+                byte_len,
+            } => format!(
+                "Delete? {}{} ({} byte(s))",
+                path.display(),
+                if *recursive { " recursively" } else { "" },
+                byte_len
+            ),
+        };
+        output_entries.push(PanelEntry {
+            label,
+            detail: Some("Confirm or Cancel File Operation from Command Palette".to_owned()),
+            level: StyleRole::Warning,
+        });
+    }
     let second_viewport = state
         .split_secondary_tab
         .and_then(|index| state.tabs.get(index))

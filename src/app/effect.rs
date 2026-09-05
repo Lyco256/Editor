@@ -32,6 +32,11 @@ pub enum Effect {
         with_bom: bool,
         line_endings: workspace_core::LineEndings,
     },
+    /// Executes a previously planned filesystem operation after explicit UI confirmation.
+    FileOperation {
+        request: RequestId,
+        plan: workspace_core::FileOperationPlan,
+    },
     ExternalProcess {
         request: RequestId,
         kind: ExternalProcessKind,

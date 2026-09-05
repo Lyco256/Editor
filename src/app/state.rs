@@ -59,6 +59,7 @@ pub struct AppState {
     pending_format: HashMap<RequestId, PendingFormat>,
     pending_lsp_format: HashMap<RequestId, PendingFormat>,
     pending_git_discard: Option<vcs_git::GitDiscardPlan>,
+    pending_file_operation: Option<workspace_core::FileOperationPlan>,
     deferred_effects: Vec<Effect>,
     pub(crate) format_on_save: bool,
     pub(crate) format_on_paste: bool,
@@ -584,6 +585,8 @@ impl Default for AppState {
                 CommandEntry::available("workbench.showProblems", "Show Problems"),
                 CommandEntry::available("workbench.showGit", "Show Source Control"),
                 CommandEntry::available("workbench.showOutput", "Show Output"),
+                CommandEntry::available("workspace.confirmFileOperation", "Confirm File Operation"),
+                CommandEntry::available("workspace.cancelFileOperation", "Cancel File Operation"),
                 CommandEntry::available("editor.quit", "Quit"),
                 CommandEntry::available("git.refresh", "Refresh Git Status"),
                 CommandEntry::available("git.showChanges", "Show Git Changes"),
@@ -609,6 +612,10 @@ impl Default for AppState {
                 CommandEntry::available("language.requestCodeActions", "Request Code Actions"),
                 CommandEntry::available("language.requestInlayHints", "Request Inlay Hints"),
                 CommandEntry::available("language.requestSymbols", "Request Document Symbols"),
+                CommandEntry::available(
+                    "language.requestWorkspaceSymbols",
+                    "Request Workspace Symbols",
+                ),
                 CommandEntry::available("language.requestFormatting", "Request Formatting"),
             ]),
             tabs: vec![TabState::untitled()],
@@ -621,6 +628,7 @@ impl Default for AppState {
             pending_format: HashMap::new(),
             pending_lsp_format: HashMap::new(),
             pending_git_discard: None,
+            pending_file_operation: None,
             deferred_effects: Vec::new(),
             format_on_save: false,
             format_on_paste: false,
@@ -792,6 +800,7 @@ impl AppState {
         use app_ui::language::LanguageAction;
         match action {
             LanguageAction::RevealProblems => {
+                self.bottom_panel_view = BottomPanelView::Problems;
                 self.bottom_panel_visible = true;
             }
             LanguageAction::NavigateToProblem { group } => {
@@ -833,6 +842,9 @@ impl AppState {
             }
             LanguageAction::AcceptCompletion { index }
             | LanguageAction::ExpandCompletionDetails { index } => {
+                self.last_language_method = Some("textDocument/completion".to_owned());
+                self.bottom_panel_view = BottomPanelView::Language;
+                self.bottom_panel_visible = true;
                 self.output.push(OutputMessage {
                     subsystem: "lsp".to_owned(),
                     operation: "completion".to_owned(),
@@ -840,11 +852,45 @@ impl AppState {
                     message: format!("completion item {index} selected"),
                 });
             }
-            LanguageAction::OpenHover
-            | LanguageAction::OpenSignatureHelp
-            | LanguageAction::AcceptRenamePreview
-            | LanguageAction::AcceptCodeAction { .. }
-            | LanguageAction::DismissPopup => {}
+            LanguageAction::OpenHover => {
+                self.last_language_method = Some("textDocument/hover".to_owned());
+                self.bottom_panel_view = BottomPanelView::Language;
+                self.bottom_panel_visible = true;
+            }
+            LanguageAction::OpenSignatureHelp => {
+                self.last_language_method = Some("textDocument/signatureHelp".to_owned());
+                self.bottom_panel_view = BottomPanelView::Language;
+                self.bottom_panel_visible = true;
+            }
+            LanguageAction::AcceptRenamePreview => {
+                self.last_language_method = Some("textDocument/rename".to_owned());
+                self.bottom_panel_view = BottomPanelView::Language;
+                self.bottom_panel_visible = true;
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "rename".to_owned(),
+                    level: OutputLevel::Information,
+                    message: "rename preview selected; apply through the confirmation action"
+                        .to_owned(),
+                });
+            }
+            LanguageAction::AcceptCodeAction { index } => {
+                self.last_language_method = Some("textDocument/codeAction".to_owned());
+                self.bottom_panel_view = BottomPanelView::Language;
+                self.bottom_panel_visible = true;
+                self.output.push(OutputMessage {
+                    subsystem: "lsp".to_owned(),
+                    operation: "code-action".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!(
+                        "code action {index} selected; apply through the confirmation action"
+                    ),
+                });
+            }
+            LanguageAction::DismissPopup => {
+                self.last_language_method = None;
+                self.bottom_panel_visible = false;
+            }
         }
         Transition {
             render: true,
@@ -981,6 +1027,133 @@ impl AppState {
             method: method.to_owned(),
             params,
         }))
+    }
+
+    fn request_file_operation(&mut self, plan: workspace_core::FileOperationPlan) -> Transition {
+        if let workspace_core::FileOperationPlan::Delete(delete) = &plan
+            && self.active_dirty
+            && self.active_path.as_ref() == Some(&delete.path)
+        {
+            self.output.push(OutputMessage {
+                subsystem: "workspace".to_owned(),
+                operation: "delete".to_owned(),
+                level: OutputLevel::Warning,
+                message: "save or close the dirty buffer before deleting its file".to_owned(),
+            });
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        }
+        if !self.file_operation_is_in_workspace(&plan) {
+            self.output.push(OutputMessage {
+                subsystem: "workspace".to_owned(),
+                operation: "file-operation".to_owned(),
+                level: OutputLevel::Warning,
+                message: "file operation target is outside the active workspace".to_owned(),
+            });
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        }
+        self.workspace_ui.prompt = Some(match &plan {
+            workspace_core::FileOperationPlan::CreateFile { path } => {
+                app_ui::workspace::WorkspacePrompt::CreateFile { path: path.clone() }
+            }
+            workspace_core::FileOperationPlan::Rename(rename) => {
+                app_ui::workspace::WorkspacePrompt::Rename {
+                    source: rename.source.clone(),
+                    target: rename.target.clone(),
+                }
+            }
+            workspace_core::FileOperationPlan::Move(move_plan) => {
+                app_ui::workspace::WorkspacePrompt::Move {
+                    source: move_plan.source.clone(),
+                    target: move_plan.target.clone(),
+                }
+            }
+            workspace_core::FileOperationPlan::Delete(delete) => {
+                app_ui::workspace::WorkspacePrompt::Delete {
+                    path: delete.path.clone(),
+                    recursive: delete.recursive,
+                    byte_len: delete.byte_len,
+                }
+            }
+        });
+        self.pending_file_operation = Some(plan);
+        self.bottom_panel_view = BottomPanelView::Output;
+        self.bottom_panel_visible = true;
+        Transition {
+            render: true,
+            ..Transition::default()
+        }
+    }
+
+    fn confirmed_file_operation_effect(&mut self) -> Option<Effect> {
+        let Some(plan) = self.pending_file_operation.take() else {
+            self.output.push(OutputMessage {
+                subsystem: "workspace".to_owned(),
+                operation: "file-operation".to_owned(),
+                level: OutputLevel::Warning,
+                message: "no file operation is waiting for confirmation".to_owned(),
+            });
+            return None;
+        };
+        self.workspace_ui.prompt = None;
+        Some(Effect::FileOperation {
+            request: RequestId(self.frame_number.saturating_add(1)),
+            plan,
+        })
+    }
+
+    fn confirm_file_operation(&mut self) -> Transition {
+        Transition {
+            effects: self.confirmed_file_operation_effect().into_iter().collect(),
+            render: true,
+            ..Transition::default()
+        }
+    }
+
+    fn cancel_file_operation(&mut self) -> Transition {
+        self.pending_file_operation = None;
+        self.workspace_ui.prompt = None;
+        Transition {
+            render: true,
+            ..Transition::default()
+        }
+    }
+
+    fn file_operation_is_in_workspace(&self, plan: &workspace_core::FileOperationPlan) -> bool {
+        match plan {
+            workspace_core::FileOperationPlan::CreateFile { path }
+            | workspace_core::FileOperationPlan::Delete(workspace_core::DeletePlan {
+                path, ..
+            }) => self.path_is_in_workspace(path),
+            workspace_core::FileOperationPlan::Rename(rename) => {
+                self.path_is_in_workspace(&rename.source)
+                    && self.path_is_in_workspace(&rename.target)
+            }
+            workspace_core::FileOperationPlan::Move(move_plan) => {
+                self.path_is_in_workspace(&move_plan.source)
+                    && self.path_is_in_workspace(&move_plan.target)
+            }
+        }
+    }
+
+    fn path_is_in_workspace(&self, path: &Path) -> bool {
+        let candidate = if path.exists() {
+            std::fs::canonicalize(path).ok()
+        } else {
+            path.parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok())
+        };
+        let Some(candidate) = candidate else {
+            return false;
+        };
+        self.workspace_roots
+            .iter()
+            .any(|root| std::fs::canonicalize(root).is_ok_and(|root| candidate.starts_with(root)))
     }
 
     fn active_document_uri(&self) -> String {
@@ -2125,6 +2298,9 @@ impl AppState {
                 render: true,
                 ..Transition::default()
             },
+            Action::RequestFileOperation(plan) => self.request_file_operation(plan),
+            Action::ConfirmFileOperation => self.confirm_file_operation(),
+            Action::CancelFileOperation => self.cancel_file_operation(),
             Action::QuickOpen(action) => self.apply_workspace_action(action),
             Action::StartSearch { query, options } => self.start_workspace_search(query, options),
             Action::CancelSearch(session_id) => Transition {
@@ -2147,6 +2323,7 @@ impl AppState {
                     }
                     Effect::SaveDocument { .. }
                     | Effect::SaveDocumentAs { .. }
+                    | Effect::FileOperation { .. }
                     | Effect::RefreshExplorer { .. }
                     | Effect::ClipboardWrite { .. }
                     | Effect::ClipboardRead { .. }
@@ -2178,6 +2355,7 @@ impl AppState {
                     }
                     Effect::SaveDocument { .. }
                     | Effect::SaveDocumentAs { .. }
+                    | Effect::FileOperation { .. }
                     | Effect::RefreshExplorer { .. }
                     | Effect::ClipboardWrite { .. }
                     | Effect::ClipboardRead { .. }
@@ -2916,6 +3094,14 @@ impl AppState {
                     },
                 );
             }
+            "language.requestWorkspaceSymbols" => {
+                return self.apply_language_effect_command(
+                    app_ui::language::LanguageEffectRequest::RequestWorkspaceSymbols {
+                        version: self.buffer.snapshot().version(),
+                        query: String::new(),
+                    },
+                );
+            }
             "language.requestFormatting" => {
                 return self.apply_language_effect_command(
                     app_ui::language::LanguageEffectRequest::RequestFormatting {
@@ -2927,6 +3113,11 @@ impl AppState {
             "workbench.showOutput" => {
                 self.bottom_panel_view = BottomPanelView::Output;
                 self.bottom_panel_visible = true;
+            }
+            "workspace.confirmFileOperation" => return self.confirmed_file_operation_effect(),
+            "workspace.cancelFileOperation" => {
+                self.cancel_file_operation();
+                return None;
             }
             "git.refresh" if self.workspace_trusted => {
                 if let Some(root) = self.workspace_roots.first().cloned() {
@@ -3103,8 +3294,55 @@ impl AppState {
                     message: format!("saved {}", path.display()),
                 });
             }
-            Event::DocumentSaveFailed { message, .. } | Event::Output(message) => {
+            Event::DocumentSaveFailed { message, .. }
+            | Event::Output(message)
+            | Event::ReplacementFailed { message, .. }
+            | Event::FileOperationFailed { message, .. } => {
                 self.output.push(message);
+            }
+            Event::FileOperationCompleted { plan, .. } => {
+                let operation = match &plan {
+                    workspace_core::FileOperationPlan::CreateFile { .. } => "create-file",
+                    workspace_core::FileOperationPlan::Rename(_) => "rename",
+                    workspace_core::FileOperationPlan::Move(_) => "move",
+                    workspace_core::FileOperationPlan::Delete(_) => "delete",
+                };
+                match &plan {
+                    workspace_core::FileOperationPlan::Rename(rename) => {
+                        if self.active_path.as_ref() == Some(&rename.source) {
+                            self.active_path = Some(rename.target.clone());
+                            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                                tab.path = Some(rename.target.clone());
+                            }
+                        }
+                    }
+                    workspace_core::FileOperationPlan::Move(move_plan) => {
+                        if self.active_path.as_ref() == Some(&move_plan.source) {
+                            self.active_path = Some(move_plan.target.clone());
+                            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                                tab.path = Some(move_plan.target.clone());
+                            }
+                        }
+                    }
+                    workspace_core::FileOperationPlan::Delete(delete)
+                        if self.active_path.as_ref() == Some(&delete.path) =>
+                    {
+                        self.active_path = None;
+                        self.buffer = TextBuffer::default();
+                        self.active_text.clear();
+                        self.active_dirty = false;
+                    }
+                    _ => {}
+                }
+                self.sync_active_tab();
+                let refresh = self.explorer_refresh_transition();
+                self.deferred_effects.extend(refresh.effects);
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: operation.to_owned(),
+                    level: OutputLevel::Information,
+                    message: "filesystem operation completed".to_owned(),
+                });
             }
             Event::GitStatusUpdated {
                 request,
@@ -3432,7 +3670,6 @@ impl AppState {
                     ),
                 });
             }
-            Event::ReplacementFailed { message, .. } => self.output.push(message),
             Event::ExternalProcessBlocked { kind, .. } => {
                 if matches!(kind, super::effect::ExternalProcessKind::LanguageServer) {
                     self.language_server = LanguageServerStatus::DisabledByPolicy;
@@ -3718,6 +3955,98 @@ mod tests {
         )));
         assert!(git.render);
         assert_eq!(state.bottom_panel_view, super::BottomPanelView::Git);
+    }
+
+    #[test]
+    fn every_language_panel_action_updates_root_visibility_and_selection_state() {
+        let mut state = AppState::default();
+        let cases = [
+            (
+                app_ui::language::LanguageAction::OpenHover,
+                Some("textDocument/hover"),
+            ),
+            (
+                app_ui::language::LanguageAction::OpenSignatureHelp,
+                Some("textDocument/signatureHelp"),
+            ),
+            (
+                app_ui::language::LanguageAction::AcceptCompletion { index: 0 },
+                Some("textDocument/completion"),
+            ),
+            (
+                app_ui::language::LanguageAction::ExpandCompletionDetails { index: 0 },
+                Some("textDocument/completion"),
+            ),
+            (
+                app_ui::language::LanguageAction::AcceptRenamePreview,
+                Some("textDocument/rename"),
+            ),
+            (
+                app_ui::language::LanguageAction::AcceptCodeAction { index: 0 },
+                Some("textDocument/codeAction"),
+            ),
+        ];
+        for (action, method) in cases {
+            let transition = state.apply_language_action(action);
+            assert!(transition.render);
+            assert!(state.bottom_panel_visible);
+            assert_eq!(state.bottom_panel_view, super::BottomPanelView::Language);
+            assert_eq!(state.last_language_method.as_deref(), method);
+        }
+        let transition =
+            state.apply_language_action(app_ui::language::LanguageAction::DismissPopup);
+        assert!(transition.render);
+        assert!(!state.bottom_panel_visible);
+        assert_eq!(state.last_language_method, None);
+    }
+
+    #[test]
+    fn file_operations_require_confirmation_and_refresh_active_path() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let source = directory.path().join("old.rs");
+        let target = directory.path().join("new.rs");
+        std::fs::write(&source, "fn main() {}\n").expect("source");
+        let mut state = AppState::default();
+        state.open_startup_path(&source);
+        let plan = workspace_core::FileOperationPlan::Rename(
+            workspace_core::plan_rename(&source, &target).expect("rename plan"),
+        );
+        let prompt = state.apply_action(Action::RequestFileOperation(plan));
+        assert!(prompt.effects.is_empty());
+        assert!(state.workspace_ui.prompt.is_some());
+        let confirmed = state.apply_action(Action::ConfirmFileOperation);
+        let Some(Effect::FileOperation { request, plan }) = confirmed.effects.first().cloned()
+        else {
+            panic!("confirmed file operation effect expected");
+        };
+        state.apply_event(Event::FileOperationCompleted { request, plan });
+        assert_eq!(state.active_path.as_deref(), Some(target.as_path()));
+        assert!(
+            state
+                .deferred_effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RefreshExplorer { .. }))
+        );
+    }
+
+    #[test]
+    fn dirty_active_file_cannot_be_deleted_by_file_operation() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("dirty.rs");
+        std::fs::write(&path, "fn main() {}\n").expect("source");
+        let mut state = AppState::default();
+        state.open_startup_path(&path);
+        state.buffer.mark_recovered_dirty();
+        state.sync_buffer_projection();
+        let plan = workspace_core::FileOperationPlan::Delete(
+            workspace_core::plan_delete(&path).expect("delete plan"),
+        );
+        let transition = state.apply_action(Action::RequestFileOperation(plan));
+        assert!(transition.effects.is_empty());
+        assert!(state.workspace_ui.prompt.is_none());
+        assert!(state.output.iter().any(|message| {
+            message.operation == "delete" && message.level == editor_types::OutputLevel::Warning
+        }));
     }
 
     #[test]

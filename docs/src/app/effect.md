@@ -10,6 +10,10 @@ typed event. `RefreshExplorer` carries workspace roots to a background filesyste
 adapter; cut is acknowledged before its deletion transaction is committed.
 `SaveDocumentAs` uses the same atomic workspace writer and metadata while reporting a distinct completion event
 so a failed Save As cannot retarget or dirty the active tab.
+`FileOperation` carries a planned create/rename/move/delete operation and is emitted only after the
+root state receives explicit confirmation; execution remains on the background dispatcher.
+`FileOperation` carries a planned create/rename/move/delete operation and is emitted only after the
+root state receives explicit confirmation; execution remains on the background dispatcher.
 `RefreshSyntax` and `SearchWorkspace` keep parser/search work outside the state transition path;
 search sessions can be cancelled with a typed effect.
 `LspRequest` carries a structured JSON-RPC method/parameters payload and is trust-gated before any

@@ -33,6 +33,12 @@ pub enum Action {
     SetSplitRatio(u16),
     AddWorkspaceRoot(PathBuf),
     ApplyReplacementPlan(workspace_core::ReplacementPlan),
+    /// Starts a create/rename/move/delete confirmation flow for a planned filesystem operation.
+    RequestFileOperation(workspace_core::FileOperationPlan),
+    /// Confirms the currently displayed filesystem operation prompt.
+    ConfirmFileOperation,
+    /// Cancels the currently displayed filesystem operation prompt.
+    CancelFileOperation,
     QuickOpen(app_ui::workspace::QuickOpenAction),
     StartSearch {
         query: String,

@@ -17,6 +17,14 @@ pub enum Event {
         path: PathBuf,
         message: OutputMessage,
     },
+    FileOperationCompleted {
+        request: RequestId,
+        plan: workspace_core::FileOperationPlan,
+    },
+    FileOperationFailed {
+        request: RequestId,
+        message: OutputMessage,
+    },
     GitStatusUpdated {
         request: RequestId,
         root: PathBuf,

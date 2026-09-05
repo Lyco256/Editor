@@ -14,3 +14,9 @@ explicit and keep them in the same state transition path as tab changes.
 change the active path until the asynchronous atomic write reports success.
 `QuickOpen`, `StartSearch`, and `CancelSearch` route workspace UI intent without allowing views to
 perform filesystem I/O.
+`RequestFileOperation` creates a typed create/rename/move/delete confirmation prompt;
+`ConfirmFileOperation` is the only action that emits the corresponding background filesystem
+effect, while `CancelFileOperation` drops the pending plan.
+`RequestFileOperation` creates a typed create/rename/move/delete confirmation prompt;
+`ConfirmFileOperation` is the only action that emits the corresponding background filesystem
+effect, while `CancelFileOperation` drops the pending plan.
