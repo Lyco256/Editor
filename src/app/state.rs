@@ -1953,12 +1953,27 @@ impl AppState {
     }
 
     fn path_is_in_workspace(&self, path: &Path) -> bool {
-        let candidate = if path.exists() {
-            std::fs::canonicalize(path).ok()
-        } else {
-            path.parent()
-                .and_then(|parent| std::fs::canonicalize(parent).ok())
-        };
+        let mut unresolved = Vec::new();
+        let mut probe = path.to_path_buf();
+        while !probe.exists() {
+            let Some(name) = probe.file_name() else {
+                return false;
+            };
+            unresolved.push(name.to_owned());
+            let Some(parent) = probe.parent() else {
+                return false;
+            };
+            if parent == probe {
+                return false;
+            }
+            probe = parent.to_path_buf();
+        }
+        let candidate = std::fs::canonicalize(probe).ok().map(|mut path| {
+            for component in unresolved.iter().rev() {
+                path.push(component);
+            }
+            path
+        });
         let Some(candidate) = candidate else {
             return false;
         };

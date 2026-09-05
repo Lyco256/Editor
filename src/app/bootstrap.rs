@@ -780,15 +780,27 @@ fn lsp_workspace_text_paths(edit: &serde_json::Value) -> Vec<PathBuf> {
 }
 
 fn lsp_path_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
-    let candidate = if path.exists() {
-        std::fs::canonicalize(path).ok()
-    } else {
-        path.parent().and_then(|parent| {
-            std::fs::canonicalize(parent)
-                .ok()
-                .and_then(|parent| path.file_name().map(|name| parent.join(name)))
-        })
-    };
+    let mut unresolved = Vec::new();
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        let Some(name) = probe.file_name() else {
+            return false;
+        };
+        unresolved.push(name.to_owned());
+        let Some(parent) = probe.parent() else {
+            return false;
+        };
+        if parent == probe {
+            return false;
+        }
+        probe = parent.to_path_buf();
+    }
+    let candidate = std::fs::canonicalize(probe).ok().map(|mut path| {
+        for component in unresolved.iter().rev() {
+            path.push(component);
+        }
+        path
+    });
     let Some(candidate) = candidate else {
         return false;
     };
@@ -2599,10 +2611,11 @@ mod tests {
         let uri = |path: &std::path::Path| {
             format!("file:///{}", path.to_string_lossy().replace('\\', "/"))
         };
+        let created = directory.path().join("nested").join("created.txt");
         let edit = serde_json::json!({
             "documentChanges": [
                 {"kind": "rename", "oldUri": uri(&source), "newUri": uri(&target)},
-                {"kind": "create", "uri": uri(&directory.path().join("created.txt"))}
+                {"kind": "create", "uri": uri(&created)}
             ]
         });
         let documents = apply_lsp_workspace_edit(
@@ -2617,7 +2630,7 @@ mod tests {
             std::fs::read_to_string(&target).expect("renamed source"),
             "content"
         );
-        assert!(directory.path().join("created.txt").is_file());
+        assert!(created.is_file());
     }
 
     #[test]

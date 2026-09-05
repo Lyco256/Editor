@@ -15,7 +15,8 @@ logged. Trusted language-server effects now use `lsp-client` stdio framing and i
 forwarding stderr/crash events and requesting shutdown when the dispatcher is dropped.
 Server-originated requests are forwarded to root as typed events; validated `workspace/applyEdit`
 effects run on a background worker and return a JSON-RPC response through the owning client session.
-Text edits and file/directory resource operations use canonical trusted-root checks; failed
+Text edits and file/directory resource operations use canonical trusted-root checks (including
+new paths below the nearest existing trusted ancestor); failed
 resource operations roll back their journaled changes, and rollback failures are returned as part
 of the typed error instead of being silently ignored.
 Trust revocation drains and cleanly shuts down all persistent language-server sessions.
