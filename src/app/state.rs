@@ -881,25 +881,39 @@ impl AppState {
                 self.last_language_method = Some("textDocument/rename".to_owned());
                 self.bottom_panel_view = BottomPanelView::Language;
                 self.bottom_panel_visible = true;
+                let applied = self
+                    .lsp_results
+                    .get("textDocument/rename")
+                    .cloned()
+                    .and_then(|result| result.get("changes").cloned())
+                    .is_some_and(|changes| {
+                        self.apply_workspace_edit(&serde_json::json!({"changes": changes}))
+                    });
                 self.output.push(OutputMessage {
                     subsystem: "lsp".to_owned(),
                     operation: "rename".to_owned(),
                     level: OutputLevel::Information,
-                    message: "rename preview selected; apply through the confirmation action"
-                        .to_owned(),
+                    message: if applied {
+                        "rename preview applied".to_owned()
+                    } else {
+                        "rename preview selected; no applicable edit was supplied".to_owned()
+                    },
                 });
             }
             LanguageAction::AcceptCodeAction { index } => {
                 self.last_language_method = Some("textDocument/codeAction".to_owned());
                 self.bottom_panel_view = BottomPanelView::Language;
                 self.bottom_panel_visible = true;
+                let applied = self.apply_code_action(index);
                 self.output.push(OutputMessage {
                     subsystem: "lsp".to_owned(),
                     operation: "code-action".to_owned(),
                     level: OutputLevel::Information,
-                    message: format!(
-                        "code action {index} selected; apply through the confirmation action"
-                    ),
+                    message: if applied {
+                        format!("code action {index} applied")
+                    } else {
+                        format!("code action {index} selected; no applicable edit was supplied")
+                    },
                 });
             }
             LanguageAction::DismissPopup => {
@@ -956,6 +970,81 @@ impl AppState {
             })
             .unwrap_or_else(|| self.buffer.selections().primary().range());
         Some((range, text))
+    }
+
+    fn apply_code_action(&mut self, index: usize) -> bool {
+        let Some(result) = self.lsp_results.get("textDocument/codeAction").cloned() else {
+            return false;
+        };
+        let Some(action) = result.as_array().and_then(|actions| actions.get(index)) else {
+            return false;
+        };
+        action
+            .get("edit")
+            .is_some_and(|edit| self.apply_workspace_edit(edit))
+    }
+
+    fn apply_workspace_edit(&mut self, edit: &serde_json::Value) -> bool {
+        let mut edits = Vec::new();
+        if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
+            if let Some(document_edits) = changes.get(&self.active_document_uri()) {
+                edits.extend(document_edits.as_array().into_iter().flatten().cloned());
+            }
+        }
+        if let Some(document_changes) = edit
+            .get("documentChanges")
+            .and_then(serde_json::Value::as_array)
+        {
+            for document_change in document_changes {
+                let Some(uri) = document_change
+                    .get("textDocument")
+                    .and_then(|document| document.get("uri"))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                if uri == self.active_document_uri() {
+                    edits.extend(
+                        document_change
+                            .get("edits")
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .cloned(),
+                    );
+                }
+            }
+        }
+        let converted = edits
+            .iter()
+            .filter_map(|edit| {
+                let range = edit.get("range")?;
+                let start = self
+                    .buffer
+                    .position_to_offset(json_position(range.get("start")?)?)
+                    .ok()?;
+                let end = self
+                    .buffer
+                    .position_to_offset(json_position(range.get("end")?)?)
+                    .ok()?;
+                let text = edit.get("newText")?.as_str()?.to_owned();
+                Some(Edit::replace(TextRange { start, end }, text))
+            })
+            .collect::<Vec<_>>();
+        if converted.is_empty() {
+            return false;
+        }
+        let Ok(transaction) = Transaction::new(converted) else {
+            return false;
+        };
+        if self.buffer.apply_transaction(transaction).is_err() {
+            return false;
+        }
+        self.language_ui
+            .set_document_version(self.buffer.snapshot().version());
+        self.sync_buffer_projection();
+        self.deferred_effects.push(self.syntax_effect());
+        true
     }
 
     /// Converts a language-panel request into a trust-gated JSON-RPC effect.
@@ -4513,6 +4602,51 @@ mod tests {
             state.last_language_method.as_deref(),
             Some("textDocument/semanticTokens/full")
         );
+    }
+
+    #[test]
+    fn rename_and_code_action_edits_apply_as_undoable_root_transactions() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("edit.rs");
+        std::fs::write(&path, "old\n").expect("source");
+        let mut state = AppState::default();
+        state.open_startup_path(&path);
+        let uri = state.active_document_uri();
+        let version = state.buffer.snapshot().version();
+        let edit = |new_text: &str, end: u32| {
+            serde_json::json!({
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": end}
+                },
+                "newText": new_text
+            })
+        };
+        state.apply_event(Event::LspResponse {
+            request: RequestId(20),
+            version,
+            method: "textDocument/rename".to_owned(),
+            result: serde_json::json!({"changes": {uri.clone(): [edit("renamed", 3)]}}),
+        });
+        let rename =
+            state.apply_language_action(app_ui::language::LanguageAction::AcceptRenamePreview);
+        assert!(rename.render);
+        assert_eq!(state.active_text, "renamed\n");
+        let version = state.buffer.snapshot().version();
+        state.apply_event(Event::LspResponse {
+            request: RequestId(21),
+            version,
+            method: "textDocument/codeAction".to_owned(),
+            result: serde_json::json!([{"title": "replace", "edit": {"changes": {
+                uri: [edit("fixed", 7)]
+            }}}]),
+        });
+        let action = state
+            .apply_language_action(app_ui::language::LanguageAction::AcceptCodeAction { index: 0 });
+        assert!(action.render);
+        assert_eq!(state.active_text, "fixed\n");
+        let _ = state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.undo")));
+        assert_eq!(state.active_text, "renamed\n");
     }
 
     #[test]
