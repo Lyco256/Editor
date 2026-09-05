@@ -6,4 +6,6 @@ diagnostics, and exposes crash/exit status without terminating the editor. Resul
 when their request and document version are still current. Completion, hover, signature help,
 navigation, references, rename, code actions, semantic tokens, inlay hints, document symbols, and
 formatting are projected into versioned language views. Command-palette and typed `Action` routes
-request these operations without allowing the UI to access the process directly.
+request these operations without allowing the UI to access the process directly. Server-originated
+requests are surfaced as typed client events; root handling for `workspace/applyEdit` is still a
+release-blocking follow-up and is not currently advertised as supported.

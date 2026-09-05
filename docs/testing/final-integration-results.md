@@ -1,6 +1,6 @@
 # Final integration results
 
-Wave 2 integration is verified on `devenv` (commit `44f97e7`). It has not yet been promoted to
+Wave 2 integration is verified on the current tip of `devenv`. It has not yet been promoted to
 `main`, because release-blocking evidence and promotion remain. On this
 verified integration state, format check, workspace Clippy with
 warnings denied, all workspace tests, source/document mirror check, release build, and redirected
@@ -14,3 +14,12 @@ safe headless startup path. A PTY-backed smoke run, idle memory/CPU samples, a f
 Windows Terminal 10 MiB process-level open/force-close sample, and successful Inno Setup compilation
 are recorded in the smoke/performance documents; native 10 MiB typing-latency and clean interactive
 open/close profiling remain outstanding.
+
+The LSP client exposes server-originated requests, but root bootstrap does not yet handle
+`workspace/applyEdit`; server-requested workspace edits remain a release-blocking implementation
+gap in addition to the native profiling and promotion gates.
+
+The standalone LSP client also has protocol methods that are not yet reachable from root actions
+(completion resolve, prepare rename, declaration/implementation navigation, and range formatting),
+and syntax structural-selection ranges are not wired to an editor action. These remain functional
+integration gaps.

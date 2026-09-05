@@ -1,6 +1,6 @@
 # Requirements audit (2026-09-05)
 
-`devenv` is the current integration branch at commit `44f97e7`; it is not yet promoted to `main`
+`devenv` is the current integration branch (the verified state is the tip of `devenv`); it is not yet promoted to `main`
 because release gates remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
 all workspace tests, source/document mirrors, release build, and redirected headless startup.
 
@@ -43,6 +43,18 @@ Still release-blocking or environment-blocked:
    large-file suppression, as well as language panels, cancellation, crash notification, and
    replacement-server startup. A Syntax effect now reaches a rendered Root framebuffer. The
    `.editorconfig` root integration also has deterministic load and save-normalization tests.
+
+3. LSP server-originated requests are surfaced by `lsp-client` but the root bootstrap currently
+   ignores `ClientEvent::ServerRequest`. The required server-requested `workspace/applyEdit` path
+   therefore remains unimplemented; only client-originated rename/code-action workspace edits are
+   applied today. This is a functional release blocker until root policy, safe edit application, and
+   the JSON-RPC response path are wired and covered by an integration test.
+
+4. Several protocol capabilities are available in the standalone `lsp-client` API but are not
+   exposed through root actions yet: completion resolve, prepare-rename negotiation,
+   declaration/implementation navigation, and range formatting. Structural selection ranges are
+   likewise produced by the syntax engine but are not connected to an editor action. These are
+   functional integration gaps against the master LSP/editing requirements.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining performance/smoke evidence and promotion to an identical verified
