@@ -1,6 +1,7 @@
 # Final integration results
 
-Wave 2 is merged into `devenv`. On the verified integration commit, `tools/verify.ps1` exited 0:
+Wave 2 is merged into `devenv` and promoted to `main` at the same commit (`9c16ebf`). On this
+verified integration state, `tools/verify.ps1` exited 0:
 format check, workspace Clippy with warnings denied, all workspace tests, and the source/document
 mirror check passed. Release build also succeeded; the remaining manual smoke/performance observations
 are documented explicitly in their respective records.
