@@ -1,0 +1,8 @@
+Workspace | roots=2 | recent=2 | trust=trusted
+Trust: trusted workspace - external processes permitted
+Explorer
+ [-]  alpha
+   [-]  src
+>       * main.rs
+          lib.rs
+        README.md

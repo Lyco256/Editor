@@ -1,0 +1,3 @@
+Quick Open | query=main
+Enter=current editor  Ctrl+Enter=to side  Mouse=select
+>  1. /workspace/alpha/src/main.rs (recent)
