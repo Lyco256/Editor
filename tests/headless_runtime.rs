@@ -1063,3 +1063,61 @@ fn root_file_operation_confirmation_updates_active_document_after_atomic_rename(
     assert_eq!(state.active_path.as_deref(), Some(target.as_path()));
     assert!(target.is_file());
 }
+
+#[test]
+fn root_file_operation_acceptance_covers_create_move_and_delete() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let source = directory.path().join("source.txt");
+    let created = directory.path().join("created.txt");
+    let moved_dir = directory.path().join("sub");
+    std::fs::create_dir(&moved_dir).expect("subdirectory");
+    std::fs::write(&source, "source\n").expect("source");
+    let mut state = editor::app::state::AppState::default();
+    state.open_startup_path(&source);
+
+    let execute = |state: &mut editor::app::state::AppState,
+                   plan: workspace_core::FileOperationPlan| {
+        let _ = state.apply_action(Action::RequestFileOperation(plan));
+        let transition = state.apply_action(Action::ConfirmFileOperation);
+        let Some(Effect::FileOperation { request, plan }) = transition.effects.first().cloned()
+        else {
+            panic!("confirmed file operation effect expected");
+        };
+        match &plan {
+            workspace_core::FileOperationPlan::CreateFile { path } => {
+                workspace_core::create_file(path, &[]).expect("create");
+            }
+            workspace_core::FileOperationPlan::Move(move_plan) => {
+                workspace_core::move_path(&move_plan.source, &move_plan.target).expect("move");
+            }
+            workspace_core::FileOperationPlan::Delete(delete) => {
+                workspace_core::delete_file(&delete.path).expect("delete");
+            }
+            workspace_core::FileOperationPlan::Rename(_) => panic!("unexpected rename"),
+        }
+        state.apply_event(Event::FileOperationCompleted { request, plan });
+    };
+
+    execute(
+        &mut state,
+        workspace_core::FileOperationPlan::CreateFile {
+            path: created.clone(),
+        },
+    );
+    assert!(created.is_file());
+    let moved = moved_dir.join("created.txt");
+    execute(
+        &mut state,
+        workspace_core::FileOperationPlan::Move(
+            workspace_core::plan_move(&created, &moved).expect("move plan"),
+        ),
+    );
+    assert!(moved.is_file());
+    execute(
+        &mut state,
+        workspace_core::FileOperationPlan::Delete(
+            workspace_core::plan_delete(&moved).expect("delete plan"),
+        ),
+    );
+    assert!(!moved.exists());
+}
