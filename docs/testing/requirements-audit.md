@@ -1,6 +1,6 @@
 # Requirements audit (2026-09-05)
 
-`devenv` is the current integration branch at commit `abda6be`; it is not yet promoted to `main`
+`devenv` is the current integration branch at commit `1887f97`; it is not yet promoted to `main`
 because release gates remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
 all workspace tests, source/document mirrors, release build, and redirected headless startup.
 
@@ -24,6 +24,8 @@ Implemented in the integration pass:
 - root command-palette routing for Git Changes, Diff, Branches, Stashes, History, Commit, and
   Conflicts views, plus document-scoped `.editorconfig` indentation, encoding, EOL, whitespace,
   and final-newline behavior;
+- confirmed root filesystem-operation prompts and background create/rename/move/delete effects,
+  including dirty-buffer deletion protection and Explorer refresh;
 - Windows installer (`build/editor.iss`) and packaging script (`build/package.ps1`).
 
 Still release-blocking or environment-blocked:
@@ -33,14 +35,13 @@ Still release-blocking or environment-blocked:
    transaction. Native keystroke-to-frame latency and repeated open/close of a 10 MiB document
    remain unavailable; `docs/testing/final-smoke.md` records the PTY smoke scope. The master
    requirement requires user approval before treating those missing measurements as an exception.
-2. The root-level headless acceptance suite now covers the fake-server initialize/request/response
+2. Root action coverage now includes every language-panel action and workspace file-operation
+   confirmation path. The headless acceptance suite covers the fake-server initialize/request/response
    lifecycle, semantic tokens, Git projection/mutation routing, encoding round trips, and
    large-file suppression, as well as language panels, cancellation, crash notification, and
    replacement-server startup. A Syntax effect now reaches a rendered Root framebuffer. The
-   `.editorconfig` root integration also has deterministic load and save-normalization tests. Full
-   scenario breadth is still short of the release matrix, notably complete interactive UI routing
-   for all language actions.
+   `.editorconfig` root integration also has deterministic load and save-normalization tests.
 
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
-complete until the remaining root acceptance coverage, installer/performance/smoke evidence, and
-promotion to an identical verified `main` state are supplied.
+complete until the remaining performance/smoke evidence and promotion to an identical verified
+`main` state are supplied.
