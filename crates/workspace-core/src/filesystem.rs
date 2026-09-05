@@ -16,6 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -110,6 +111,15 @@ pub struct FileChangeTracker {
     watched: BTreeMap<String, WatchedFile>,
 }
 
+/// Native filesystem watcher used by the workspace service. The callback only queues compact
+/// notify events; document decoding remains in the caller's poll path so watcher threads never
+/// touch editor state.
+pub struct NativeFileWatcher {
+    watcher: RecommendedWatcher,
+    events: std::sync::mpsc::Receiver<Result<notify::Event, notify::Error>>,
+    watched: BTreeMap<String, WatchedFile>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileFingerprint {
     byte_len: u64,
@@ -129,6 +139,8 @@ pub enum FileOperationError {
     TargetExists(PathBuf),
     #[error("symlink loop or unreadable path: {0}")]
     Unreadable(PathBuf),
+    #[error("native filesystem watcher error: {0}")]
+    Watcher(String),
 }
 
 impl ExplorerTree {
@@ -292,6 +304,93 @@ impl FileChangeTracker {
 impl Default for FileChangeTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl NativeFileWatcher {
+    pub fn new() -> Result<Self, FileOperationError> {
+        let (sender, events) = std::sync::mpsc::sync_channel(256);
+        let watcher = notify::recommended_watcher(move |event| {
+            // Dropping the receiver is a normal shutdown path. A bounded blocking send applies
+            // backpressure instead of silently losing an external-change notification.
+            let _ = sender.send(event);
+        })
+        .map_err(|error| FileOperationError::Watcher(error.to_string()))?;
+        Ok(Self {
+            watcher,
+            events,
+            watched: BTreeMap::new(),
+        })
+    }
+
+    pub fn watch(
+        &mut self,
+        document: &TextDocument,
+        dirty: bool,
+    ) -> Result<(), FileOperationError> {
+        let parent = document
+            .path
+            .parent()
+            .ok_or_else(|| FileOperationError::Unreadable(document.path.clone()))?;
+        self.watcher
+            .watch(parent, RecursiveMode::NonRecursive)
+            .map_err(|error| FileOperationError::Watcher(error.to_string()))?;
+        let fingerprint = fingerprint_path(document.path.as_path())?;
+        self.watched.insert(
+            normalized_path_key(document.path.as_path()),
+            WatchedFile {
+                path: document.path.clone(),
+                load_options: DocumentLoadOptions {
+                    fallback_encoding: document.encoding.clone(),
+                    malformed_input_policy: crate::document::DecodePolicy::Strict,
+                    large_file_settings: crate::LargeFileSettings {
+                        threshold_bytes: u64::MAX,
+                    },
+                },
+                dirty,
+                fingerprint,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn poll(&mut self) -> Result<Vec<FileChangeEvent>, FileOperationError> {
+        let mut changed = std::collections::BTreeSet::new();
+        while let Ok(result) = self.events.try_recv() {
+            let event = result.map_err(|error| FileOperationError::Watcher(error.to_string()))?;
+            if matches!(
+                event.kind,
+                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+            ) {
+                for path in event.paths {
+                    changed.insert(normalized_path_key(&path));
+                }
+            }
+        }
+        let mut output = Vec::new();
+        for (key, watched) in &mut self.watched {
+            if !changed.contains(key) {
+                continue;
+            }
+            let current = fingerprint_path(watched.path.as_path())?;
+            if current == watched.fingerprint {
+                continue;
+            }
+            let document = load_text_document(watched.path.as_path(), &watched.load_options)?;
+            output.push(if watched.dirty {
+                FileChangeEvent::Conflict {
+                    path: watched.path.clone(),
+                    document,
+                }
+            } else {
+                FileChangeEvent::Reload {
+                    path: watched.path.clone(),
+                    document,
+                }
+            });
+            watched.fingerprint = current;
+        }
+        Ok(output)
     }
 }
 

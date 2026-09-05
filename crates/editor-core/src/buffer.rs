@@ -111,7 +111,7 @@ impl AutoPairMarker {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct HistoryEntry {
     forward: Transaction,
     inverse: Transaction,
@@ -124,7 +124,7 @@ struct HistoryEntry {
 }
 
 /// Mutable Unicode text and all transaction-scoped editor state.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextBuffer {
     rope: Rope,
     selections: SelectionSet,
@@ -201,6 +201,19 @@ impl TextBuffer {
 
     pub fn mark_saved(&mut self) {
         self.saved_state = self.current_state;
+    }
+
+    /// Marks restored recovery contents as dirty without inventing an edit transaction.
+    ///
+    /// Recovery records contain the user's already-edited text, so replaying a synthetic edit
+    /// would pollute undo history. This marker keeps dirty-quit protection active until the user
+    /// explicitly saves the recovered buffer.
+    pub fn mark_recovered_dirty(&mut self) {
+        self.saved_state = if self.current_state == 0 {
+            1
+        } else {
+            self.current_state - 1
+        };
     }
 
     #[must_use]

@@ -79,6 +79,45 @@ impl CommandSpec {
             current_dir: None,
         }
     }
+
+    /// Resolves a conventional language-server executable from `PATH` without launching it.
+    ///
+    /// The caller still owns Workspace Trust authorization and process startup. This lookup is
+    /// intentionally filesystem-only so discovery cannot execute untrusted workspace code.
+    #[must_use]
+    pub fn discover_known(language: &str) -> Option<Self> {
+        let candidates: &[&str] = match language {
+            "rust" => &["rust-analyzer"],
+            "c" | "cpp" => &["clangd"],
+            "c-sharp" => &["csharp-ls", "OmniSharp"],
+            "java" => &["jdtls"],
+            "go" => &["gopls"],
+            "python" => &["pyright-langserver", "pylsp"],
+            "javascript" | "typescript" => &["typescript-language-server"],
+            "html" => &["vscode-html-language-server"],
+            "css" => &["vscode-css-language-server"],
+            "yaml" => &["yaml-language-server"],
+            "bash" => &["bash-language-server"],
+            _ => &[],
+        };
+        let path = std::env::var_os("PATH")?;
+        for directory in std::env::split_paths(&path) {
+            for candidate in candidates {
+                let direct = directory.join(candidate);
+                if direct.is_file() {
+                    return Some(Self::new(direct));
+                }
+                #[cfg(windows)]
+                {
+                    let executable = directory.join(format!("{candidate}.exe"));
+                    if executable.is_file() {
+                        return Some(Self::new(executable));
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,12 +414,11 @@ pub enum MessageIoError {
     Protocol(#[from] ProtocolError),
 }
 
-#[must_use]
-pub fn encode_message(message: &impl Serialize) -> Vec<u8> {
-    let payload = serde_json::to_vec(message).expect("serializing JSON-RPC payload");
+pub fn encode_message(message: &impl Serialize) -> Result<Vec<u8>, ProtocolError> {
+    let payload = serde_json::to_vec(message).map_err(ProtocolError::InvalidJson)?;
     let mut frame = format!("Content-Length: {}\r\n\r\n", payload.len()).into_bytes();
     frame.extend_from_slice(&payload);
-    frame
+    Ok(frame)
 }
 
 pub async fn write_message<W>(
@@ -390,7 +428,7 @@ pub async fn write_message<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let frame = encode_message(message);
+    let frame = encode_message(message)?;
     writer.write_all(&frame).await?;
     writer.flush().await?;
     Ok(())

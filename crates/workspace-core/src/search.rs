@@ -21,7 +21,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, SyncSender},
     },
     thread,
 };
@@ -133,6 +133,12 @@ pub enum SearchError {
     Cancelled,
     #[error("rg executable was requested but not available")]
     RgUnavailable,
+    #[error("replacement range {start}..{end} is invalid for `{path}`")]
+    InvalidReplacementRange {
+        path: PathBuf,
+        start: usize,
+        end: usize,
+    },
 }
 
 pub fn search_workspace(options: SearchOptions) -> Result<SearchSession, SearchError> {
@@ -142,7 +148,9 @@ pub fn search_workspace(options: SearchOptions) -> Result<SearchSession, SearchE
     if options.pattern.trim().is_empty() {
         return Err(SearchError::EmptyPattern);
     }
-    let (sender, receiver) = mpsc::channel();
+    // Bound the event queue so a fast search cannot grow memory without limit when the
+    // consumer is temporarily busy rendering or applying results.
+    let (sender, receiver) = mpsc::sync_channel(256);
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = Arc::clone(&cancel);
     thread::spawn(move || {
@@ -252,10 +260,21 @@ pub fn apply_replacement_plan(plan: &ReplacementPlan) -> Result<ReplacementRepor
 fn apply_file_edits(file: &FileReplacementPlan) -> Result<(), SearchError> {
     let text = fs::read_to_string(&file.path)?;
     let mut buffer = text;
+    let mut previous_start = None;
     for edit in &file.edits {
-        if edit.range.start > edit.range.end || edit.range.end > buffer.len() {
-            continue;
+        let valid_range = edit.range.start <= edit.range.end
+            && edit.range.end <= buffer.len()
+            && buffer.is_char_boundary(edit.range.start)
+            && buffer.is_char_boundary(edit.range.end)
+            && previous_start.is_none_or(|start| edit.range.end <= start);
+        if !valid_range {
+            return Err(SearchError::InvalidReplacementRange {
+                path: file.path.clone(),
+                start: edit.range.start,
+                end: edit.range.end,
+            });
         }
+        previous_start = Some(edit.range.start);
         buffer.replace_range(edit.range.clone(), &edit.replacement);
     }
     save_text_document(&file.path, &buffer, &DocumentSaveOptions::default())?;
@@ -264,7 +283,7 @@ fn apply_file_edits(file: &FileReplacementPlan) -> Result<(), SearchError> {
 
 fn run_rg_search(
     options: &SearchOptions,
-    sender: &mpsc::Sender<SearchEvent>,
+    sender: &SyncSender<SearchEvent>,
     cancel: &AtomicBool,
 ) -> Result<(), SearchError> {
     if !rg_available() {
@@ -328,7 +347,7 @@ fn run_rg_search(
 
 fn run_rust_search(
     options: &SearchOptions,
-    sender: &mpsc::Sender<SearchEvent>,
+    sender: &SyncSender<SearchEvent>,
     cancel: &AtomicBool,
 ) -> Result<(), SearchError> {
     let regex = compile_search_regex(options)?;
@@ -583,6 +602,26 @@ mod tests {
         let plan = plan_replacements(&hits, "x");
         assert_eq!(plan.files.len(), 1);
         assert_eq!(plan.files[0].edits.len(), 2);
+    }
+
+    #[test]
+    fn invalid_replacement_range_is_reported_without_writing() {
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("unicode.txt");
+        fs::write(&path, "界").expect("seed");
+        let plan = ReplacementPlan {
+            files: vec![FileReplacementPlan {
+                path: path.clone(),
+                edits: vec![ReplacementEdit {
+                    range: 1..2,
+                    replacement: "x".to_owned(),
+                }],
+            }],
+        };
+        let report = apply_replacement_plan(&plan).expect("report");
+        assert!(report.modified_files.is_empty());
+        assert_eq!(report.failed_files, vec![path.clone()]);
+        assert_eq!(fs::read_to_string(path).expect("read"), "界");
     }
 
     #[test]

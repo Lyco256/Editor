@@ -7,7 +7,8 @@ Important types:
 
 - `ExplorerTree` and `ExplorerEntry` represent workspace tree discovery.
 - `QuickOpenIndex` and `QuickOpenCandidate` hold file-name discovery data.
-- `FileChangeTracker` watches open documents and classifies on-disk changes.
+- `NativeFileWatcher` is the event-driven OS watcher for open documents; `FileChangeTracker` remains
+  a deterministic fingerprint fallback for environments without watcher delivery.
 - `DeletePlan`, `RenamePlan`, `MovePlan`, and `FileOperationPlan` expose confirmation metadata.
 
 Invariants:
@@ -17,12 +18,15 @@ Invariants:
 - Case-only rename handling is separated out so Windows can take the safer path.
 - File-change scanning compares a disk fingerprint against the tracked snapshot before deciding
   reload versus conflict.
+- Native watcher callbacks are bounded and only queue paths; decoding and state mutation happen in
+  the consumer poll path.
 
 Dependencies:
 
 - `ignore` for discovery and search-side filtering.
 - `document.rs` for text decoding and save-on-replace support.
 - `path.rs` for identity and case-sensitive/case-insensitive comparisons.
+- `notify` for native filesystem notifications.
 
 Tests:
 

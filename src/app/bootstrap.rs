@@ -1,13 +1,26 @@
 //! Process bootstrap and safe fallback startup path.
 
-use std::{convert::Infallible, env, path::PathBuf, process::ExitCode};
+use std::{
+    convert::Infallible,
+    env,
+    io::IsTerminal,
+    path::PathBuf,
+    process::{Command, ExitCode, Stdio},
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+};
 
 use editor_types::TerminalCapabilities;
 use terminal_backend::{Framebuffer, TerminalAdapter};
 
 use super::{
     action::Action,
-    runtime::{AppRuntime, QueueActionSource, RecordingDispatcher, run_interactive_with_state},
+    effect::Effect,
+    event::Event,
+    runtime::{
+        AppRuntime, EffectDispatcher, QueueActionSource, RecordingDispatcher,
+        run_interactive_with_state,
+    },
     state::AppState,
 };
 
@@ -36,6 +49,7 @@ impl TerminalAdapter for BootstrapTerminal {
 
 #[must_use]
 pub fn run() -> ExitCode {
+    install_panic_hook();
     let request = match StartupRequest::from_args(env::args_os().skip(1)) {
         Ok(request) => request,
         Err(error) => {
@@ -46,6 +60,10 @@ pub fn run() -> ExitCode {
 
     if request.path.is_some() {
         return run_interactive_session(request);
+    }
+
+    if std::io::stdout().is_terminal() {
+        return run_interactive_session(StartupRequest { path: None });
     }
 
     // A non-interactive invocation still exercises the complete lifecycle and is useful for
@@ -64,6 +82,15 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        terminal_backend::restore_after_panic();
+        eprintln!("Editor panic: subsystem=runtime operation=panic message={panic_info}");
+        previous(panic_info);
+    }));
 }
 
 /// Command-line startup request. A single positional path is supported, matching `editor .`
@@ -99,8 +126,24 @@ impl StartupRequest {
 fn run_interactive_session(request: StartupRequest) -> ExitCode {
     let size = terminal_backend::CrosstermBackend::<std::io::Stdout>::size().unwrap_or((80, 24));
     let backend = terminal_backend::CrosstermBackend::stdout();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = ServiceDispatcher::default();
     let mut state = AppState::default();
+    let recovery = config_core::RecoveryStore::for_application("Editor").ok();
+    if request.path.is_none() {
+        if let Some(store) = &recovery {
+            match store.load_latest() {
+                Ok(loaded) => {
+                    for warning in loaded.warnings {
+                        eprintln!("Editor: recovery warning: {}", warning.message);
+                    }
+                    if let Some(session) = loaded.session {
+                        state.restore_session(&session);
+                    }
+                }
+                Err(error) => eprintln!("Editor: recovery unavailable: {error}"),
+            }
+        }
+    }
     if let Some(path) = request.path {
         let message = if path.is_dir() {
             format!("opening workspace {}", path.display())
@@ -109,13 +152,208 @@ fn run_interactive_session(request: StartupRequest) -> ExitCode {
         };
         state.open_startup_path(&path);
         eprintln!("Editor: {message}");
+    } else if state.active_path.is_none() {
+        if let Ok(path) = env::current_dir() {
+            state.open_startup_path(path);
+        }
     }
     match run_interactive_with_state(backend, dispatcher, size, state) {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(final_state) => {
+            if let Some(store) = recovery {
+                if let Err(error) = store.save(&final_state.session_state()) {
+                    eprintln!("Editor: could not persist session: {error}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("Editor runtime failed: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[derive(Debug)]
+struct ServiceDispatcher {
+    events: Receiver<Event>,
+    sender: Sender<Event>,
+}
+
+impl Default for ServiceDispatcher {
+    fn default() -> Self {
+        let (sender, events) = mpsc::channel();
+        Self { events, sender }
+    }
+}
+
+impl EffectDispatcher for ServiceDispatcher {
+    #[allow(clippy::too_many_lines)]
+    fn dispatch(&mut self, effect: Effect) {
+        let Effect::SaveDocument { path, text } = effect.clone() else {
+            if let Effect::RefreshExplorer { request, roots } = effect.clone() {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let mut entries = Vec::new();
+                    let mut failure = None;
+                    for root in roots {
+                        match workspace_core::canonicalize_path(&root) {
+                            Ok(canonical) => match workspace_core::ExplorerTree::new(
+                                vec![canonical.clone()],
+                                Vec::new(),
+                            )
+                            .children(canonical.as_path())
+                            {
+                                Ok(children) => entries.extend(children.into_iter().map(|entry| {
+                                    super::event::ExplorerEntryData {
+                                        path: entry.path,
+                                        depth: u8::try_from(entry.depth).unwrap_or(u8::MAX),
+                                    }
+                                })),
+                                Err(error) => failure = Some(error.to_string()),
+                            },
+                            Err(error) => failure = Some(error.to_string()),
+                        }
+                    }
+                    let event = failure.map_or_else(
+                        || Event::ExplorerUpdated { request, entries },
+                        |message| Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "explorer".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message,
+                            },
+                        },
+                    );
+                    let _ = sender.send(event);
+                });
+                return;
+            }
+            if let Effect::RefreshGitStatus { request, root } = effect.clone() {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let event = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => match runtime
+                            .block_on(vcs_git::GitClient::default().status(&root, None))
+                        {
+                            Ok(status) => Event::GitStatusUpdated {
+                                request,
+                                summary: status.summary,
+                            },
+                            Err(error) => Event::EffectFailed {
+                                request,
+                                message: editor_types::OutputMessage {
+                                    subsystem: "git".to_owned(),
+                                    operation: "status".to_owned(),
+                                    level: editor_types::OutputLevel::Error,
+                                    message: error.to_string(),
+                                },
+                            },
+                        },
+                        Err(error) => Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "git".to_owned(),
+                                operation: "runtime".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+                return;
+            }
+            if let Effect::ExternalProcess {
+                request,
+                kind,
+                spec,
+            } = effect
+            {
+                let sender = self.sender.clone();
+                thread::spawn(move || {
+                    let result = Command::new(&spec.executable)
+                        .args(&spec.arguments)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .spawn();
+                    let event = match result {
+                        Ok(mut child)
+                            if matches!(
+                                kind,
+                                super::effect::ExternalProcessKind::LanguageServer
+                            ) =>
+                        {
+                            // Language servers are long-lived; leave the child attached to the
+                            // session and report successful startup without waiting for exit.
+                            let _ = child.stderr.take();
+                            Event::EffectCompleted(request)
+                        }
+                        Ok(mut child) => match child.wait() {
+                            Ok(status) if status.success() => Event::EffectCompleted(request),
+                            Ok(status) => Event::EffectFailed {
+                                request,
+                                message: editor_types::OutputMessage {
+                                    subsystem: format!("{kind:?}").to_lowercase(),
+                                    operation: "process".to_owned(),
+                                    level: editor_types::OutputLevel::Error,
+                                    message: format!("{} exited with {status}", spec.executable),
+                                },
+                            },
+                            Err(error) => Event::EffectFailed {
+                                request,
+                                message: editor_types::OutputMessage {
+                                    subsystem: format!("{kind:?}").to_lowercase(),
+                                    operation: "process-wait".to_owned(),
+                                    level: editor_types::OutputLevel::Error,
+                                    message: error.to_string(),
+                                },
+                            },
+                        },
+                        Err(error) => Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: format!("{kind:?}").to_lowercase(),
+                                operation: "process-spawn".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: error.to_string(),
+                            },
+                        },
+                    };
+                    let _ = sender.send(event);
+                });
+            }
+            return;
+        };
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let event = match workspace_core::save_text_document(
+                &path,
+                &text,
+                &workspace_core::DocumentSaveOptions::default(),
+            ) {
+                Ok(_) => Event::DocumentSaved { path },
+                Err(error) => Event::DocumentSaveFailed {
+                    path: path.clone(),
+                    message: editor_types::OutputMessage {
+                        subsystem: "workspace".to_owned(),
+                        operation: "save-file".to_owned(),
+                        level: editor_types::OutputLevel::Error,
+                        message: format!("could not save {}: {error}", path.display()),
+                    },
+                },
+            };
+            let _ = sender.send(event);
+        });
+    }
+
+    fn poll_events(&mut self) -> Vec<Event> {
+        self.events.try_iter().collect()
     }
 }
 

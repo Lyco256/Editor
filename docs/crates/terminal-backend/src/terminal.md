@@ -15,6 +15,8 @@ Invariants:
 - Cleanup is idempotent and best-effort.
 - A failed `enter` still triggers restoration attempts for any modes that were already enabled.
 - Drop performs a final restore attempt so terminal state is repaired during normal shutdown.
+- `restore_after_panic` provides process-wide best-effort cleanup for aborting panic paths where
+  `Drop` cannot run.
 
 Data flow:
 

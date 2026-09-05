@@ -12,10 +12,12 @@ Important types:
 
 Invariants:
 
-- Search results stream through a channel and can be cancelled.
+- Search results stream through a bounded 256-event channel (backpressure) and can be cancelled.
 - Literal, regex, case-sensitive, case-insensitive, whole-word, include, and exclude options are
   supported in both backends.
 - Replacement plans group edits per file before any write occurs.
+- Replacement byte ranges are checked for bounds, UTF-8 boundaries, and overlap; invalid plans
+  return `SearchError::InvalidReplacementRange` instead of being skipped or panicking.
 
 Dependencies:
 

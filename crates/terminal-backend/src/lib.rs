@@ -15,7 +15,7 @@ pub use clipboard::{Clipboard, ClipboardError, MemoryClipboard, SystemClipboard}
 pub use framebuffer::{Cell, Framebuffer, FramebufferError};
 pub use input::{InputReader, normalize_event, normalize_key, normalize_mouse};
 pub use renderer::DifferentialRenderer;
-pub use terminal::{CrosstermBackend, CursorShape, TerminalError};
+pub use terminal::{CrosstermBackend, CursorShape, TerminalError, restore_after_panic};
 
 use editor_types::TerminalCapabilities;
 

@@ -7,6 +7,8 @@ Important types:
 
 - `CommandSpec` describes a structured executable, argument vector, environment map, and working
   directory.
+- `CommandSpec::discover_known` resolves conventional server names from `PATH` without executing
+  them; root orchestration must still authorize and spawn the result.
 - `InitializeParams`, `InitializeResponse`, and `ServerInfo` model the LSP handshake.
 - `TextDocumentItem`, `DidOpenTextDocumentParams`, `DidChangeTextDocumentParams`, `DidSaveTextDocumentParams`,
   and `DidCloseTextDocumentParams` cover document notifications.
@@ -22,7 +24,7 @@ Invariants:
 
 Data flow:
 
-- `encode_message` and `write_message` serialize a JSON-RPC value into a stdio frame.
+- `encode_message` and `write_message` serialize a JSON-RPC value into a stdio frame and return a typed protocol error if serialization fails.
 - `read_message` parses headers and payload bytes back into a typed incoming message.
 - The position helpers convert between LSP wire positions and editor logical positions using plain
   text and the negotiated encoding.

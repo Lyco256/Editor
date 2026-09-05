@@ -12,12 +12,15 @@ Important types:
 - `SemanticServicePolicy` tells higher layers whether semantic services are enabled or suppressed by
   large-file mode.
 - `AppliedTransaction` reports whether a transaction changed text and which version it produced.
+- `TextBuffer` also supports structural cloning/equality for root-state snapshots; Ropey remains
+  private to this module.
 
 Invariants:
 
 - A transaction updates the buffer version exactly once when it changes text.
 - Undo restores the exact prior text, selections, and auto-pair marker state.
 - Redo reapplies the reverted transaction exactly.
+- Recovered unsaved snapshots can be marked dirty without synthesizing an undoable edit.
 - UTF-8 byte offsets are never exposed as public editor positions.
 - Caret boundaries reject CRLF split points.
 

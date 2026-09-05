@@ -26,6 +26,8 @@ Data flow:
 - `spawn` starts the process with structured arguments and creates the reader tasks.
 - `initialize` parses the server capabilities response and stores the negotiated encoding.
 - Notification helpers serialize typed LSP params and write them through the process stdin.
+- JSON serialization failures propagate as typed `ProtocolError` values; no protocol payload uses a
+  panic-based fallback.
 - The stdout reader decodes messages, resolves pending requests, and forwards diagnostics or server
   requests through the broadcast channel.
 - The stderr reader forwards diagnostic text to the event stream for Output visibility.

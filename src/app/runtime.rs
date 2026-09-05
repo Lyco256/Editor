@@ -8,7 +8,6 @@ use app_ui::{
     shell::{
         BottomPanelState, ExplorerState, PaneNode, PanelEntry, ShellFocus, ShellState, TabEntry,
     },
-    widgets::CommandPaletteState,
 };
 use editor_core::TextBuffer;
 use editor_types::{OutputLevel, StyleRole};
@@ -23,6 +22,10 @@ pub trait ActionSource {
 
 pub trait EffectDispatcher {
     fn dispatch(&mut self, effect: Effect);
+
+    fn poll_events(&mut self) -> Vec<super::event::Event> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -117,6 +120,9 @@ where
             for effect in transition.effects {
                 self.dispatcher.dispatch(effect);
             }
+            for event in self.dispatcher.poll_events() {
+                self.state.apply_event(event);
+            }
             if transition.render {
                 self.render()?;
             }
@@ -134,6 +140,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn frame_for_state(
     state: &AppState,
     size: (u16, u16),
@@ -152,6 +159,10 @@ fn frame_for_state(
     let status = EditorStatusData {
         file_name: file_name.clone(),
         dirty: state.active_dirty,
+        branch: state
+            .git_status
+            .as_ref()
+            .and_then(|status| status.branch.clone()),
         language_server: format!("{:?}", state.language_server),
         trust: if state.workspace_trusted {
             "trusted"
@@ -175,27 +186,20 @@ fn frame_for_state(
         tab_width: 4,
     };
     let roots = state
-        .active_path
-        .as_ref()
-        .filter(|path| path.is_dir())
-        .map(|path| vec![path.display().to_string()])
-        .unwrap_or_default();
+        .workspace_roots
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
     let entries = state
-        .active_path
-        .as_ref()
-        .filter(|path| path.is_file())
-        .map(|path| {
-            vec![app_ui::shell::ExplorerEntry {
-                depth: 0,
-                label: path.file_name().map_or_else(
-                    || path.display().to_string(),
-                    |name| name.to_string_lossy().into_owned(),
-                ),
-                active: true,
-                expanded: false,
-            }]
+        .explorer_entries
+        .iter()
+        .map(|entry| app_ui::shell::ExplorerEntry {
+            depth: entry.depth,
+            label: entry.label.clone(),
+            active: entry.active,
+            expanded: entry.expanded,
         })
-        .unwrap_or_default();
+        .collect();
     let output_entries = state
         .output
         .iter()
@@ -213,22 +217,38 @@ fn frame_for_state(
         explorer: ExplorerState {
             roots,
             entries,
-            visible: true,
+            visible: state.explorer_visible,
         },
-        tabs: vec![TabEntry {
-            title: viewport.title.clone(),
-            dirty: state.active_dirty,
-            active: true,
-            closeable: true,
-        }],
+        tabs: state
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| TabEntry {
+                title: tab
+                    .path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .map_or_else(
+                        || "Welcome".to_owned(),
+                        |name| name.to_string_lossy().into_owned(),
+                    ),
+                dirty: tab.buffer.is_dirty(),
+                active: index == state.active_tab,
+                closeable: true,
+            })
+            .collect(),
         root: PaneNode::leaf(viewport),
         bottom: BottomPanelState {
             title: "Output".to_owned(),
             entries: output_entries,
-            visible: !state.output.is_empty(),
+            visible: state.bottom_panel_visible || !state.output.is_empty(),
         },
-        palette: CommandPaletteState::default(),
-        focus: ShellFocus::Editor,
+        palette: state.palette.clone(),
+        focus: if state.palette_visible {
+            ShellFocus::CommandPalette
+        } else {
+            ShellFocus::Editor
+        },
         status,
     };
     shell.render(
@@ -323,6 +343,9 @@ where
             }
             for effect in transition.effects {
                 self.dispatcher.dispatch(effect);
+            }
+            for event in self.dispatcher.poll_events() {
+                self.state.apply_event(event);
             }
             if transition.render {
                 self.render()?;

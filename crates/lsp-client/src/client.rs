@@ -478,7 +478,7 @@ impl LspClient {
     }
 
     async fn send_message<M: Serialize>(&self, message: M) -> Result<(), ClientError> {
-        let frame = protocol::encode_message(&message);
+        let frame = protocol::encode_message(&message).map_err(ClientError::Protocol)?;
         let mut process = self.inner.process.lock().await;
         let writer = process
             .writer

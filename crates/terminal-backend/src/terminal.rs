@@ -349,6 +349,28 @@ impl<W: Write> Drop for CrosstermBackend<W> {
     }
 }
 
+/// Best-effort process-wide cleanup used by the panic hook.
+///
+/// Release builds abort on panic, so adapter `Drop` implementations cannot be relied on. This
+/// helper deliberately ignores individual terminal errors because it runs while unwinding or
+/// aborting and must never mask the original panic.
+pub fn restore_after_panic() {
+    let mut stdout = io::stdout();
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        stdout,
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        SetAttribute(Attribute::Reset),
+        ResetColor,
+        Show,
+        SetCursorStyle::DefaultUserShape,
+        LeaveAlternateScreen
+    );
+    let _ = stdout.flush();
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CleanupAction {
     EnhancedKeyboard,

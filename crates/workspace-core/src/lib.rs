@@ -19,8 +19,8 @@ pub use document::{
 };
 pub use filesystem::{
     DeletePlan, ExplorerEntry, ExplorerEntryKind, ExplorerTree, FileChangeEvent, FileChangeTracker,
-    FileOperationError, FileOperationPlan, QuickOpenCandidate, QuickOpenIndex, create_file,
-    delete_file, move_path, plan_delete, plan_move, plan_rename, rename_path,
+    FileOperationError, FileOperationPlan, NativeFileWatcher, QuickOpenCandidate, QuickOpenIndex,
+    create_file, delete_file, move_path, plan_delete, plan_move, plan_rename, rename_path,
 };
 pub use path::{
     CanonicalPath, PathError, canonical_workspace_identity, canonical_workspace_key,

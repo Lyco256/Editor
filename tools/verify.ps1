@@ -18,4 +18,13 @@ cargo test --workspace --all-features
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 cargo test --test doc_mirror
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+cargo build --release
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Redirected execution must remain deterministic and terminate cleanly without a terminal.
+& (Join-Path $PWD "target\release\editor.exe") *> $null
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+exit 0
