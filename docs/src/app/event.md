@@ -21,3 +21,5 @@ LSP responses retain method and document version so stale results are ignored be
 language state; initialization also records the negotiated position encoding.
 Persistent language-server requests are represented by `LspServerRequest` and are answered only
 after root policy applies a safe workspace edit.
+`LspWorkspaceEditApplied` reports completion for client-originated edits that were dispatched to
+the background worker, including typed failure reasons.

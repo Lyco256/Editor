@@ -29,3 +29,4 @@ File resource WorkspaceEdit operations (create/rename/delete) are now applied wi
 validation and rollback on operation failure. Directory resource operations remain explicitly
 rejected. Rename and code-action edits targeting unopened documents use the same background worker
 as server-originated edits.
+Revoking Workspace Trust shuts down persistent LSP sessions and rejects late server edits.

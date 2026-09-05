@@ -59,6 +59,9 @@ Still release-blocking or environment-blocked:
    they target unopened documents. Remaining limitation is explicit rejection of directory
    resource operations; file resource operations and all text-document edits are handled.
 
+7. Revoking Workspace Trust now stops persistent language-server sessions and rejects late server
+   workspace edits, with deterministic root-state coverage.
+
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining performance/smoke evidence and promotion to an identical verified
 `main` state are supplied.

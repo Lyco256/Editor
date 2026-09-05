@@ -20,8 +20,11 @@ search sessions can be cancelled with a typed effect.
 server process is started.
 `LspNotification` sends didOpen/didChange/didSave/didClose and workspace-folder notifications
 through the persistent trusted language-server session.
+`StopLanguageServer` tears down that session when Workspace Trust is revoked.
 `LspServerResponse` sends the result of a root-validated server-originated request back to the
 persistent client.
+`LspApplyWorkspaceEdit` applies client-originated edits that include unopened documents on a
+background worker.
 `GitHunk` carries a parsed diff hunk to the Git adapter over stdin for stage/unstage, while
 `GitDiscard` carries a confirmation-bound discard plan. Both are trust-gated and report completion
 or typed failure events without constructing shell command strings.

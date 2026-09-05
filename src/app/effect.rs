@@ -42,6 +42,10 @@ pub enum Effect {
         kind: ExternalProcessKind,
         spec: ProcessSpec,
     },
+    /// Stops the persistent language-server session when trust is revoked.
+    StopLanguageServer {
+        request: RequestId,
+    },
     GitHunk {
         request: RequestId,
         root: PathBuf,

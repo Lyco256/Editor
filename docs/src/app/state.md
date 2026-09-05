@@ -76,5 +76,6 @@ position encoding applied to diagnostic range conversion.
 After a trusted server becomes ready, root sends workspace folders and didOpen for every open tab;
 new tabs are opened in the session, edits, saves, and close-tab actions queue
 didChange/didSave/didClose notifications through the persistent session.
+Revoking trust stops the persistent server and rejects any late server-originated workspace edit.
 Git status events populate the pure dashboard model and successful Git mutations schedule a status
 refresh.

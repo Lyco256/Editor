@@ -2719,6 +2719,11 @@ impl AppState {
                 }
             }
             Action::SetWorkspaceTrust(trusted) => {
+                let stop_language_server = !trusted
+                    && matches!(
+                        self.language_server,
+                        LanguageServerStatus::Running { .. } | LanguageServerStatus::Starting
+                    );
                 self.workspace_trusted = trusted;
                 if let Some(root) = self.workspace_roots.first() {
                     self.trust_store.set_state(
@@ -2761,6 +2766,17 @@ impl AppState {
                         }
                         self.language_server = LanguageServerStatus::Unavailable;
                     }
+                } else if stop_language_server {
+                    self.language_server = LanguageServerStatus::Stopped;
+                    self.lsp_open_documents.clear();
+                    self.lsp_document_texts.clear();
+                    return Transition {
+                        effects: vec![Effect::StopLanguageServer {
+                            request: RequestId(self.frame_number.saturating_add(1)),
+                        }],
+                        render: true,
+                        ..Transition::default()
+                    };
                 }
                 Transition {
                     render: true,
@@ -2966,6 +2982,7 @@ impl AppState {
                     Effect::LspServerResponse { .. } => unreachable!("unguarded effect"),
                     Effect::SaveDocument { .. }
                     | Effect::SaveDocumentAs { .. }
+                    | Effect::StopLanguageServer { .. }
                     | Effect::FileOperation { .. }
                     | Effect::RefreshExplorer { .. }
                     | Effect::ClipboardWrite { .. }
@@ -2998,6 +3015,7 @@ impl AppState {
                     }
                     Effect::SaveDocument { .. }
                     | Effect::SaveDocumentAs { .. }
+                    | Effect::StopLanguageServer { .. }
                     | Effect::FileOperation { .. }
                     | Effect::RefreshExplorer { .. }
                     | Effect::ClipboardWrite { .. }
@@ -4389,6 +4407,18 @@ impl AppState {
                 method,
                 params,
             } => {
+                if !self.workspace_trusted {
+                    self.deferred_effects.push(Effect::LspServerResponse {
+                        request,
+                        id,
+                        result: Some(serde_json::json!({
+                            "applied": false,
+                            "failureReason": "workspace is no longer trusted",
+                        })),
+                        error: None,
+                    });
+                    return;
+                }
                 if method == "workspace/applyEdit" {
                     let edit = params
                         .as_ref()
@@ -5090,6 +5120,7 @@ mod tests {
         let mut state = AppState::default();
         state.open_startup_path(&first);
         state.open_tab(&second).expect("second tab");
+        state.workspace_trusted = true;
         let first_uri = format!("file:///{}", first.to_string_lossy().replace('\\', "/"));
         let second_uri = format!("file:///{}", second.to_string_lossy().replace('\\', "/"));
         let edit = serde_json::json!({
@@ -5159,6 +5190,45 @@ mod tests {
                 error: None,
             } if result["applied"] == true
         )));
+    }
+
+    #[test]
+    fn server_workspace_edit_is_rejected_after_trust_is_revoked() {
+        let mut state = AppState::default();
+        state.apply_event(Event::LspServerRequest {
+            request: RequestId(44),
+            id: lsp_client::protocol::RequestId::Number(1),
+            method: "workspace/applyEdit".to_owned(),
+            params: Some(serde_json::json!({"edit": {"changes": {}}})),
+        });
+        let effects = state.take_deferred_effects();
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::LspServerResponse { result: Some(result), .. })
+                if result["applied"] == false
+        ));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::LspWorkspaceEdit { .. }))
+        );
+    }
+
+    #[test]
+    fn revoking_workspace_trust_stops_a_running_language_server() {
+        let mut state = AppState {
+            workspace_trusted: true,
+            language_server: LanguageServerStatus::Running {
+                name: "fake".to_owned(),
+            },
+            ..AppState::default()
+        };
+        let transition = state.apply_action(Action::SetWorkspaceTrust(false));
+        assert!(matches!(
+            transition.effects.first(),
+            Some(Effect::StopLanguageServer { .. })
+        ));
+        assert_eq!(state.language_server, LanguageServerStatus::Stopped);
     }
 
     #[test]

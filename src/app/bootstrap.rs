@@ -1258,6 +1258,40 @@ impl EffectDispatcher for ServiceDispatcher {
                 });
                 return;
             }
+            if let Effect::StopLanguageServer { request } = effect.clone() {
+                let sender = self.sender.clone();
+                let clients = self.lsp_clients.clone();
+                self.runtime.spawn(async move {
+                    let sessions = clients
+                        .lock()
+                        .map(|mut clients| {
+                            clients
+                                .drain()
+                                .map(|(_, client)| client)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let mut failure = None;
+                    for client in sessions {
+                        if let Err(error) = client.shutdown().await {
+                            failure = Some(error.to_string());
+                        }
+                    }
+                    let event = failure.map_or(Event::EffectCompleted(request), |message| {
+                        Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "lsp".to_owned(),
+                                operation: "shutdown".to_owned(),
+                                level: editor_types::OutputLevel::Warning,
+                                message,
+                            },
+                        }
+                    });
+                    let _ = sender.send(event);
+                });
+                return;
+            }
             if let Effect::GitHunk {
                 request,
                 root,
