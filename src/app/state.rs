@@ -2935,8 +2935,22 @@ impl AppState {
             Action::AddWorkspaceRoot(path) => {
                 if path.is_dir() {
                     if !self.workspace_roots.iter().any(|root| root == &path) {
+                        let was_trusted = self.workspace_trusted;
                         self.workspace_roots.push(path);
-                        return self.explorer_refresh_transition();
+                        self.refresh_workspace_trust();
+                        let mut transition = self.explorer_refresh_transition();
+                        if was_trusted
+                            && !self.workspace_trusted
+                            && matches!(self.language_server, LanguageServerStatus::Running { .. })
+                        {
+                            self.language_server = LanguageServerStatus::Stopped;
+                            self.lsp_open_documents.clear();
+                            self.lsp_document_texts.clear();
+                            transition.effects.push(Effect::StopLanguageServer {
+                                request: RequestId(self.frame_number.saturating_add(1)),
+                            });
+                        }
+                        return transition;
                     }
                 } else {
                     self.output.push(OutputMessage {

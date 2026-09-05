@@ -77,6 +77,7 @@ After a trusted server becomes ready, root sends workspace folders and didOpen f
 new tabs are opened in the session, edits, saves, and close-tab actions queue
 didChange/didSave/didClose notifications through the persistent session.
 Revoking trust stops the persistent server and rejects any late server-originated workspace edit.
+Adding a new root recomputes aggregate trust; an untrusted root also stops a running server.
 Git status events populate the pure dashboard model and successful Git mutations schedule a status
 refresh.
 In-document find and replace are root actions backed by editor-core; match ranges are retained for

@@ -14,6 +14,7 @@ Implemented in the integration pass:
   formatter effect, and recovery checkpoints after each action;
 - canonical-path trust-store loading and saving at process bootstrap;
 - multi-root trust decisions now require and persist an explicit state for every canonical root;
+- adding an untrusted root revokes aggregate trust and stops any running language server;
 - bounded search result backpressure, native `notify` watcher abstraction, typed replacement-range
   validation, typed LSP serialization errors, and panic terminal cleanup;
 - root command palette plus Explorer/Output toggles;
