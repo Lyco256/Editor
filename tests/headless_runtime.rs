@@ -282,6 +282,24 @@ fn root_headless_syntax_effect_renders_a_highlighted_frame() {
 }
 
 #[test]
+fn ten_mib_edit_transaction_stays_within_interactive_budget() {
+    let text = "x".repeat(10 * 1024 * 1024);
+    let mut buffer = editor_core::TextBuffer::new(&text);
+    let transaction = editor_core::Transaction::new(vec![editor_core::Edit::insert(
+        editor_core::CharacterOffset(0),
+        "y",
+    )])
+    .expect("10 MiB edit transaction should be valid");
+    let started = std::time::Instant::now();
+    buffer
+        .apply_transaction(transaction)
+        .expect("10 MiB edit should be valid");
+    let elapsed = started.elapsed();
+    println!("10 MiB edit transaction: {:.2?}", elapsed);
+    assert!(elapsed < std::time::Duration::from_millis(250));
+}
+
+#[test]
 fn headless_action_loop_preserves_editing_state_between_frames() {
     use editor_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
 
