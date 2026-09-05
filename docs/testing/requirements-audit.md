@@ -1,7 +1,7 @@
 # Requirements audit (2026-09-05)
 
-`devenv` is the current integration branch; it is not yet promoted to `main` because release gates
-remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
+`devenv` is the current integration branch at commit `bd0a8dc`; it is not yet promoted to `main`
+because release gates remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
 all workspace tests, source/document mirrors, release build, and redirected headless startup.
 
 Implemented in the integration pass:

@@ -1,6 +1,6 @@
 # Final integration results
 
-Wave 2 integration is verified on `devenv` (commit `ff5e0f0`). It has not yet been promoted to
+Wave 2 integration is verified on `devenv` (commit `bd0a8dc`). It has not yet been promoted to
 `main`, because release-blocking evidence and architecture work remain. On this
 verified integration state, format check, workspace Clippy with
 warnings denied, all workspace tests, source/document mirror check, release build, and redirected
