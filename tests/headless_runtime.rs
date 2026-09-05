@@ -350,6 +350,7 @@ async fn root_lsp_effect_and_response_lifecycle_updates_language_views() {
         .initialized()
         .await
         .expect("initialized notification");
+    let mut client_events = client.subscribe();
     client
         .did_open(lsp_client::DidOpenTextDocumentParams {
             text_document: lsp_client::TextDocumentItem {
@@ -361,6 +362,16 @@ async fn root_lsp_effect_and_response_lifecycle_updates_language_views() {
         })
         .await
         .expect("didOpen");
+
+    if let Ok(Ok(lsp_client::ClientEvent::Diagnostics(params))) =
+        tokio::time::timeout(std::time::Duration::from_millis(250), client_events.recv()).await
+    {
+        state.apply_event(Event::LanguageDiagnostics {
+            request: editor_types::RequestId(21),
+            params,
+        });
+        assert!(state.language_model().diagnostics.current().is_some());
+    }
 
     let root_effect = Effect::LspRequest {
         request: editor_types::RequestId(22),
@@ -420,7 +431,222 @@ async fn root_lsp_effect_and_response_lifecycle_updates_language_views() {
             .map(|spans| spans.spans.len()),
         Some(1)
     );
+
+    let request_params = serde_json::json!({
+        "textDocument": {"uri": "file:///workspace/main.rs"},
+        "position": {"line": 0, "character": 0}
+    });
+    for (request_id, method, result) in [
+        (
+            25,
+            "textDocument/hover",
+            client.hover(request_params.clone()).await.expect("hover"),
+        ),
+        (
+            26,
+            "textDocument/signatureHelp",
+            client
+                .signature_help(request_params.clone())
+                .await
+                .expect("signature help"),
+        ),
+        (
+            27,
+            "textDocument/definition",
+            client
+                .definition(request_params.clone())
+                .await
+                .expect("definition"),
+        ),
+        (
+            28,
+            "textDocument/references",
+            client
+                .references(request_params.clone())
+                .await
+                .expect("references"),
+        ),
+        (
+            29,
+            "textDocument/rename",
+            client.rename(request_params.clone()).await.expect("rename"),
+        ),
+        (
+            30,
+            "textDocument/codeAction",
+            client
+                .code_action(request_params.clone())
+                .await
+                .expect("code action"),
+        ),
+        (
+            31,
+            "textDocument/inlayHint",
+            client
+                .inlay_hints(request_params.clone())
+                .await
+                .expect("inlay hints"),
+        ),
+        (
+            32,
+            "textDocument/documentSymbol",
+            client
+                .document_symbols(request_params.clone())
+                .await
+                .expect("document symbols"),
+        ),
+    ] {
+        state.apply_event(Event::LspResponse {
+            request: editor_types::RequestId(request_id),
+            version,
+            method: method.to_owned(),
+            result,
+        });
+    }
+    assert!(state.language_model().hover.current().is_some());
+    assert!(state.language_model().signature.current().is_some());
+    assert!(state.language_model().go_to.current().is_some());
+    assert!(state.language_model().references.current().is_some());
+    assert!(state.language_model().rename.current().is_some());
+    assert!(state.language_model().code_actions.current().is_some());
+    assert!(state.language_model().inlay_hints.current().is_some());
+    assert!(state.language_model().symbols.current().is_some());
+
+    let formatting = client
+        .formatting(request_params)
+        .await
+        .expect("formatting response");
+    state.apply_event(Event::LspResponse {
+        request: editor_types::RequestId(33),
+        version,
+        method: "textDocument/formatting".to_owned(),
+        result: formatting,
+    });
+    assert!(state.language_model().formatting.current().is_some());
     client.shutdown().await.expect("fake LSP should shut down");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn root_fake_server_cancellation_and_crash_restart_are_observable() {
+    let slow_command = {
+        let mut command = lsp_client::CommandSpec::new(fake_lsp_server_bin());
+        command.args = vec![
+            "lsp".to_owned(),
+            "slow_completion".to_owned(),
+            "utf16".to_owned(),
+        ];
+        command
+    };
+    let slow = lsp_client::LspClient::spawn(slow_command)
+        .await
+        .expect("slow fake server should spawn");
+    slow.initialize(lsp_client::InitializeParams::default())
+        .await
+        .expect("slow fake server should initialize");
+    slow.initialized().await.expect("initialized notification");
+    let ticket = slow
+        .start_request::<serde_json::Value>(
+            "textDocument/completion",
+            serde_json::json!({"position": {"line": 0, "character": 0}}),
+        )
+        .await
+        .expect("completion ticket");
+    slow.cancel_request(ticket.id())
+        .await
+        .expect("cancel notification");
+    assert!(matches!(
+        ticket.wait().await,
+        Err(lsp_client::ClientError::Cancelled)
+    ));
+    slow.shutdown()
+        .await
+        .expect("slow fake LSP should shut down");
+
+    let crash_command = {
+        let mut command = lsp_client::CommandSpec::new(fake_lsp_server_bin());
+        command.args = vec![
+            "lsp".to_owned(),
+            "crash_after_open".to_owned(),
+            "utf16".to_owned(),
+        ];
+        command
+    };
+    let crash = lsp_client::LspClient::spawn(crash_command)
+        .await
+        .expect("crash fake server should spawn");
+    crash
+        .initialize(lsp_client::InitializeParams::default())
+        .await
+        .expect("crash fake server should initialize");
+    crash.initialized().await.expect("initialized notification");
+    let mut events = crash.subscribe();
+    crash
+        .did_open(lsp_client::DidOpenTextDocumentParams {
+            text_document: lsp_client::TextDocumentItem {
+                uri: lsp_client::DocumentUri("file:///workspace/crash.rs".to_owned()),
+                language_id: "rust".to_owned(),
+                version: 1,
+                text: "crash".to_owned(),
+            },
+        })
+        .await
+        .expect("didOpen crash document");
+    let terminal_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("crash event stream");
+            if matches!(
+                event,
+                lsp_client::ClientEvent::Crashed { .. } | lsp_client::ClientEvent::Exited { .. }
+            ) {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("crash event should arrive");
+    assert!(matches!(
+        terminal_event,
+        lsp_client::ClientEvent::Crashed { .. } | lsp_client::ClientEvent::Exited { .. }
+    ));
+    drop(crash);
+    let restart_command = {
+        let mut command = lsp_client::CommandSpec::new(fake_lsp_server_bin());
+        command.args = vec!["lsp".to_owned(), "normal".to_owned(), "utf16".to_owned()];
+        command
+    };
+    let restarted = lsp_client::LspClient::spawn(restart_command)
+        .await
+        .expect("replacement LSP should spawn after crash");
+    restarted
+        .initialize(lsp_client::InitializeParams::default())
+        .await
+        .expect("replacement LSP should initialize");
+    restarted
+        .initialized()
+        .await
+        .expect("replacement initialized notification");
+    restarted
+        .did_open(lsp_client::DidOpenTextDocumentParams {
+            text_document: lsp_client::TextDocumentItem {
+                uri: lsp_client::DocumentUri("file:///workspace/crash.rs".to_owned()),
+                language_id: "rust".to_owned(),
+                version: 2,
+                text: "crash".to_owned(),
+            },
+        })
+        .await
+        .expect("didOpen after restart");
+    let result = restarted
+        .completion(serde_json::json!({
+            "position": {"line": 0, "character": 0}
+        }))
+        .await
+        .expect("replacement LSP should answer requests");
+    assert!(result.get("items").is_some());
+    restarted
+        .shutdown()
+        .await
+        .expect("replacement LSP should shut down");
 }
 
 #[test]

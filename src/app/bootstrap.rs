@@ -5,11 +5,10 @@ use std::{
     env,
     io::IsTerminal,
     path::PathBuf,
-    process::{Command, ExitCode, Stdio},
+    process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
     sync::mpsc::{self, Receiver, Sender},
     sync::{Arc, Mutex},
-    thread,
 };
 
 use editor_types::TerminalCapabilities;
@@ -128,7 +127,13 @@ impl StartupRequest {
 fn run_interactive_session(request: StartupRequest) -> ExitCode {
     let size = terminal_backend::CrosstermBackend::<std::io::Stdout>::size().unwrap_or((80, 24));
     let backend = terminal_backend::CrosstermBackend::stdout();
-    let dispatcher = ServiceDispatcher::default();
+    let dispatcher = match ServiceDispatcher::try_new() {
+        Ok(dispatcher) => dispatcher,
+        Err(error) => {
+            eprintln!("Editor: background runtime unavailable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let mut state = AppState::default();
     let recovery = config_core::RecoveryStore::for_application("Editor").ok();
     let trust_path = recovery.as_ref().and_then(|store| {
@@ -311,20 +316,26 @@ struct ServiceDispatcher {
     events: Receiver<Event>,
     sender: Sender<Event>,
     shutdown: Arc<AtomicBool>,
+    runtime: tokio::runtime::Runtime,
     syntax: Arc<Mutex<syntax_engine::SyntaxEngine>>,
     searches: Arc<Mutex<std::collections::HashMap<u64, workspace_core::SearchCancellation>>>,
 }
 
-impl Default for ServiceDispatcher {
-    fn default() -> Self {
+impl ServiceDispatcher {
+    fn try_new() -> Result<Self, String> {
         let (sender, events) = mpsc::channel();
-        Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
             events,
             sender,
             shutdown: Arc::new(AtomicBool::new(false)),
+            runtime,
             syntax: Arc::new(Mutex::new(syntax_engine::SyntaxEngine::default())),
             searches: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        }
+        })
     }
 }
 
@@ -354,7 +365,7 @@ impl EffectDispatcher for ServiceDispatcher {
             } = effect.clone()
             {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let event = match workspace_core::save_text_document(
                         &path,
                         &text,
@@ -391,7 +402,7 @@ impl EffectDispatcher for ServiceDispatcher {
             {
                 let sender = self.sender.clone();
                 let syntax = self.syntax.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let descriptor = editor_core::DocumentDescriptor {
                         id: document,
                         version,
@@ -419,7 +430,7 @@ impl EffectDispatcher for ServiceDispatcher {
             }
             if let Effect::RefreshExplorer { request, roots } = effect.clone() {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let mut entries = Vec::new();
                     let mut failure = None;
                     for root in roots {
@@ -464,60 +475,62 @@ impl EffectDispatcher for ServiceDispatcher {
             {
                 let sender = self.sender.clone();
                 let searches = self.searches.clone();
-                thread::spawn(move || match workspace_core::search_workspace(options) {
-                    Ok(session) => {
-                        if let Ok(mut active) = searches.lock() {
-                            active.insert(session_id, session.cancellation());
-                        }
-                        while let Some(event) = session.recv() {
-                            match event {
-                                workspace_core::SearchEvent::Match(hit) => {
-                                    let _ = sender.send(Event::SearchResult {
-                                        session_id,
-                                        result: app_ui::workspace::SearchResult {
-                                            path: hit.path,
-                                            line_number: hit.line_number,
-                                            line_text: hit.line_text,
-                                            matched_text: hit.matched_text,
-                                        },
-                                    });
-                                }
-                                workspace_core::SearchEvent::Finished { .. } => {
-                                    let _ = sender.send(Event::SearchFinished { session_id });
-                                    break;
-                                }
-                                workspace_core::SearchEvent::Cancelled => {
-                                    let _ = sender.send(Event::SearchCancelled { session_id });
-                                    break;
-                                }
-                                workspace_core::SearchEvent::Error(message) => {
-                                    let _ = sender.send(Event::SearchFailed {
-                                        session_id,
-                                        message: editor_types::OutputMessage {
-                                            subsystem: "workspace".to_owned(),
-                                            operation: "search".to_owned(),
-                                            level: editor_types::OutputLevel::Error,
-                                            message,
-                                        },
-                                    });
-                                    break;
+                self.runtime.spawn_blocking(move || {
+                    match workspace_core::search_workspace(options) {
+                        Ok(session) => {
+                            if let Ok(mut active) = searches.lock() {
+                                active.insert(session_id, session.cancellation());
+                            }
+                            while let Some(event) = session.recv() {
+                                match event {
+                                    workspace_core::SearchEvent::Match(hit) => {
+                                        let _ = sender.send(Event::SearchResult {
+                                            session_id,
+                                            result: app_ui::workspace::SearchResult {
+                                                path: hit.path,
+                                                line_number: hit.line_number,
+                                                line_text: hit.line_text,
+                                                matched_text: hit.matched_text,
+                                            },
+                                        });
+                                    }
+                                    workspace_core::SearchEvent::Finished { .. } => {
+                                        let _ = sender.send(Event::SearchFinished { session_id });
+                                        break;
+                                    }
+                                    workspace_core::SearchEvent::Cancelled => {
+                                        let _ = sender.send(Event::SearchCancelled { session_id });
+                                        break;
+                                    }
+                                    workspace_core::SearchEvent::Error(message) => {
+                                        let _ = sender.send(Event::SearchFailed {
+                                            session_id,
+                                            message: editor_types::OutputMessage {
+                                                subsystem: "workspace".to_owned(),
+                                                operation: "search".to_owned(),
+                                                level: editor_types::OutputLevel::Error,
+                                                message,
+                                            },
+                                        });
+                                        break;
+                                    }
                                 }
                             }
+                            if let Ok(mut active) = searches.lock() {
+                                active.remove(&session_id);
+                            }
                         }
-                        if let Ok(mut active) = searches.lock() {
-                            active.remove(&session_id);
+                        Err(error) => {
+                            let _ = sender.send(Event::SearchFailed {
+                                session_id,
+                                message: editor_types::OutputMessage {
+                                    subsystem: "workspace".to_owned(),
+                                    operation: "search".to_owned(),
+                                    level: editor_types::OutputLevel::Error,
+                                    message: error.to_string(),
+                                },
+                            });
                         }
-                    }
-                    Err(error) => {
-                        let _ = sender.send(Event::SearchFailed {
-                            session_id,
-                            message: editor_types::OutputMessage {
-                                subsystem: "workspace".to_owned(),
-                                operation: "search".to_owned(),
-                                level: editor_types::OutputLevel::Error,
-                                message: error.to_string(),
-                            },
-                        });
                     }
                 });
                 return;
@@ -540,7 +553,7 @@ impl EffectDispatcher for ServiceDispatcher {
             {
                 let sender = self.sender.clone();
                 let method_for_event = method.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let result = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -604,7 +617,7 @@ impl EffectDispatcher for ServiceDispatcher {
             } = effect.clone()
             {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let outcome = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -652,7 +665,7 @@ impl EffectDispatcher for ServiceDispatcher {
             } = effect.clone()
             {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let outcome = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -683,7 +696,7 @@ impl EffectDispatcher for ServiceDispatcher {
             }
             if let Effect::ClipboardWrite { request, text, cut } = effect.clone() {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let event = match terminal_backend::SystemClipboard::new() {
                         Ok(mut clipboard) => {
                             match terminal_backend::Clipboard::write_text(&mut clipboard, &text) {
@@ -715,7 +728,7 @@ impl EffectDispatcher for ServiceDispatcher {
             }
             if let Effect::ClipboardRead { request } = effect.clone() {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let event = match terminal_backend::SystemClipboard::new() {
                         Ok(mut clipboard) => {
                             match terminal_backend::Clipboard::read_text(&mut clipboard) {
@@ -753,7 +766,7 @@ impl EffectDispatcher for ServiceDispatcher {
             } = effect.clone()
             {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let event = match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -806,7 +819,7 @@ impl EffectDispatcher for ServiceDispatcher {
             }
             if let Effect::ApplyReplacementPlan { request, plan } = effect.clone() {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let event = match workspace_core::apply_replacement_plan(&plan) {
                         Ok(report) => Event::ReplacementApplied { request, report },
                         Err(error) => Event::ReplacementFailed {
@@ -825,7 +838,7 @@ impl EffectDispatcher for ServiceDispatcher {
             }
             if let Effect::RefreshGitStatus { request, root } = effect.clone() {
                 let sender = self.sender.clone();
-                thread::spawn(move || {
+                self.runtime.spawn_blocking(move || {
                     let event = match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -899,7 +912,7 @@ impl EffectDispatcher for ServiceDispatcher {
                 let sender = self.sender.clone();
                 let shutdown = self.shutdown.clone();
                 if matches!(kind, super::effect::ExternalProcessKind::LanguageServer) {
-                    thread::spawn(move || {
+                    self.runtime.spawn_blocking(move || {
                         let event_sender = sender.clone();
                         let shutdown = shutdown.clone();
                         let result = tokio::runtime::Builder::new_current_thread()
@@ -1021,53 +1034,39 @@ impl EffectDispatcher for ServiceDispatcher {
                     });
                     return;
                 }
-                thread::spawn(move || {
-                    let result = Command::new(&spec.executable)
+                self.runtime.spawn(async move {
+                    let result = tokio::process::Command::new(&spec.executable)
                         .args(&spec.arguments)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn();
+                        .output()
+                        .await;
                     let event = match result {
-                        Ok(child) => match child.wait_with_output() {
-                            Ok(output) if output.status.success() => {
-                                if !output.stdout.is_empty() || !output.stderr.is_empty() {
-                                    let _ =
-                                        sender.send(Event::Output(editor_types::OutputMessage {
-                                            subsystem: format!("{kind:?}").to_lowercase(),
-                                            operation: "process-output".to_owned(),
-                                            level: editor_types::OutputLevel::Information,
-                                            message: format!(
-                                                "{}{}",
-                                                String::from_utf8_lossy(&output.stdout),
-                                                String::from_utf8_lossy(&output.stderr)
-                                            ),
-                                        }));
-                                }
-                                Event::EffectCompleted(request)
-                            }
-                            Ok(output) => Event::EffectFailed {
-                                request,
-                                message: editor_types::OutputMessage {
+                        Ok(output) if output.status.success() => {
+                            if !output.stdout.is_empty() || !output.stderr.is_empty() {
+                                let _ = sender.send(Event::Output(editor_types::OutputMessage {
                                     subsystem: format!("{kind:?}").to_lowercase(),
-                                    operation: "process".to_owned(),
-                                    level: editor_types::OutputLevel::Error,
+                                    operation: "process-output".to_owned(),
+                                    level: editor_types::OutputLevel::Information,
                                     message: format!(
-                                        "{} exited with {}: {}",
-                                        spec.executable,
-                                        output.status,
+                                        "{}{}",
+                                        String::from_utf8_lossy(&output.stdout),
                                         String::from_utf8_lossy(&output.stderr)
                                     ),
-                                },
-                            },
-                            Err(error) => Event::EffectFailed {
-                                request,
-                                message: editor_types::OutputMessage {
-                                    subsystem: format!("{kind:?}").to_lowercase(),
-                                    operation: "process-wait".to_owned(),
-                                    level: editor_types::OutputLevel::Error,
-                                    message: error.to_string(),
-                                },
+                                }));
+                            }
+                            Event::EffectCompleted(request)
+                        }
+                        Ok(output) => Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: format!("{kind:?}").to_lowercase(),
+                                operation: "process".to_owned(),
+                                level: editor_types::OutputLevel::Error,
+                                message: format!(
+                                    "{} exited with {}: {}",
+                                    spec.executable,
+                                    output.status,
+                                    String::from_utf8_lossy(&output.stderr)
+                                ),
                             },
                         },
                         Err(error) => Event::EffectFailed {
@@ -1086,7 +1085,7 @@ impl EffectDispatcher for ServiceDispatcher {
             return;
         };
         let sender = self.sender.clone();
-        thread::spawn(move || {
+        self.runtime.spawn_blocking(move || {
             let event = match workspace_core::save_text_document(
                 &path,
                 &text,

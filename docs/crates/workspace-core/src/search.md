@@ -13,6 +13,8 @@ Important types:
 Invariants:
 
 - Search results stream through a bounded 256-event channel (backpressure) and can be cancelled.
+- Search workers are scheduled with Tokio `spawn_blocking` (using the caller runtime or a shared
+  lazily initialized runtime), so root orchestration does not create ad-hoc OS threads.
 - `SearchCancellation` is a cloneable cancellation capability for the root dispatcher; the UI
   never receives the worker's receiver directly.
 - Literal, regex, case-sensitive, case-insensitive, whole-word, include, and exclude options are

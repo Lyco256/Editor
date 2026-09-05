@@ -19,11 +19,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
-    thread,
 };
 
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
@@ -32,6 +31,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::document::{DocumentError, DocumentSaveOptions, save_text_document};
+
+static SEARCH_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchBackendPreference {
@@ -142,6 +143,8 @@ pub enum SearchError {
     Cancelled,
     #[error("rg executable was requested but not available")]
     RgUnavailable,
+    #[error("background search runtime is unavailable: {0}")]
+    RuntimeUnavailable(String),
     #[error("replacement range {start}..{end} is invalid for `{path}`")]
     InvalidReplacementRange {
         path: PathBuf,
@@ -162,7 +165,7 @@ pub fn search_workspace(options: SearchOptions) -> Result<SearchSession, SearchE
     let (sender, receiver) = mpsc::sync_channel(256);
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = Arc::clone(&cancel);
-    thread::spawn(move || {
+    spawn_search_task(move || {
         let result = match options.backend {
             SearchBackendPreference::ForceRust => run_rust_search(&options, &sender, &cancel_clone),
             SearchBackendPreference::ForceRg => run_rg_search(&options, &sender, &cancel_clone)
@@ -203,8 +206,32 @@ pub fn search_workspace(options: SearchOptions) -> Result<SearchSession, SearchE
                 let _ = sender.send(SearchEvent::Error(error.to_string()));
             }
         }
-    });
+    })?;
     Ok(SearchSession { receiver, cancel })
+}
+
+fn spawn_search_task<F>(task: F) -> Result<(), SearchError>
+where
+    F: FnOnce() + Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn_blocking(task);
+        return Ok(());
+    }
+
+    let runtime = SEARCH_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())
+    });
+    match runtime {
+        Ok(runtime) => {
+            runtime.spawn_blocking(task);
+            Ok(())
+        }
+        Err(error) => Err(SearchError::RuntimeUnavailable(error.clone())),
+    }
 }
 
 pub fn collect_search_results(session: &SearchSession) -> Result<Vec<SearchHit>, SearchError> {
