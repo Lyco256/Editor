@@ -1,0 +1,4 @@
+Search | session=8 | query=needle
+Options: case | whole-word | max=10
+Status: superseded by newer search
+No search hits yet

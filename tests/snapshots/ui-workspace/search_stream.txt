@@ -1,0 +1,5 @@
+Search | session=7 | query=needle
+Options: literal | ignore-case | max=50
+Status: streaming results
+> /workspace/alpha/src/main.rs:12 needle alpha
+  /workspace/alpha/src/lib.rs:22 needle beta

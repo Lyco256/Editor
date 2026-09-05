@@ -1,0 +1,8 @@
+Workspace | roots=2 | recent=2 | trust=untrusted
+Trust: untrusted workspace - external processes blocked
+Explorer
+ [-]  alpha
+   [-]  src
+>       * main.rs
+          lib.rs
+        README.md

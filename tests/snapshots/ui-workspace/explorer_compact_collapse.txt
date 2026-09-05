@@ -1,0 +1,8 @@
+Workspace | roots=2 | recent=2 | trust=u
+Trust: untrusted workspace - external pr
+Explorer
+ [-]  alpha
+   [-]  src
+>       * main.rs
+          lib.rs
+        README.md
