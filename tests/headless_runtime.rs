@@ -319,6 +319,7 @@ fn git_status_projection_routes_dashboard_mutations_through_root_effects() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::too_many_lines)]
 async fn root_lsp_effect_and_response_lifecycle_updates_language_views() {
     let directory = tempfile::tempdir().expect("workspace");
     let path = directory.path().join("main.rs");
@@ -527,6 +528,7 @@ async fn root_lsp_effect_and_response_lifecycle_updates_language_views() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::too_many_lines)]
 async fn root_fake_server_cancellation_and_crash_restart_are_observable() {
     let slow_command = {
         let mut command = lsp_client::CommandSpec::new(fake_lsp_server_bin());

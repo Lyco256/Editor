@@ -581,6 +581,13 @@ impl Default for AppState {
                 CommandEntry::available("workbench.showOutput", "Show Output"),
                 CommandEntry::available("editor.quit", "Quit"),
                 CommandEntry::available("git.refresh", "Refresh Git Status"),
+                CommandEntry::available("git.showChanges", "Show Git Changes"),
+                CommandEntry::available("git.showDiff", "Show Git Diff"),
+                CommandEntry::available("git.showBranches", "Show Git Branches"),
+                CommandEntry::available("git.showStashes", "Show Git Stashes"),
+                CommandEntry::available("git.showHistory", "Show Git History"),
+                CommandEntry::available("git.showCommit", "Show Git Commit"),
+                CommandEntry::available("git.showConflicts", "Show Git Conflicts"),
             ]),
             tabs: vec![TabState::untitled()],
             active_tab: 0,
@@ -2625,6 +2632,13 @@ impl AppState {
                 self.bottom_panel_view = BottomPanelView::Git;
                 self.bottom_panel_visible = true;
             }
+            "git.showChanges" => self.show_git_view(app_ui::git::GitView::Changes),
+            "git.showDiff" => self.show_git_view(app_ui::git::GitView::Diff),
+            "git.showBranches" => self.show_git_view(app_ui::git::GitView::Branches),
+            "git.showStashes" => self.show_git_view(app_ui::git::GitView::Stashes),
+            "git.showHistory" => self.show_git_view(app_ui::git::GitView::History),
+            "git.showCommit" => self.show_git_view(app_ui::git::GitView::Commit),
+            "git.showConflicts" => self.show_git_view(app_ui::git::GitView::Conflicts),
             "workbench.showOutput" => {
                 self.bottom_panel_view = BottomPanelView::Output;
                 self.bottom_panel_visible = true;
@@ -2660,6 +2674,14 @@ impl AppState {
         self.active_text = self.buffer.to_string();
         self.active_dirty = self.buffer.is_dirty();
         self.sync_active_tab();
+    }
+
+    fn show_git_view(&mut self, view: app_ui::git::GitView) {
+        self.bottom_panel_view = BottomPanelView::Git;
+        self.bottom_panel_visible = true;
+        if let Some(dashboard) = self.git_dashboard.as_mut() {
+            dashboard.view = view;
+        }
     }
 
     fn next_clipboard_request(&self) -> RequestId {
@@ -3374,6 +3396,26 @@ mod tests {
         let _ = state.apply_action(key(KeyCode::Enter));
         assert!(!state.running);
         assert!(!state.palette_visible);
+    }
+
+    #[test]
+    fn git_view_commands_route_to_the_source_control_panel() {
+        let mut state = AppState::default();
+        for command in [
+            "git.showChanges",
+            "git.showDiff",
+            "git.showBranches",
+            "git.showStashes",
+            "git.showHistory",
+            "git.showCommit",
+            "git.showConflicts",
+        ] {
+            let transition =
+                state.apply_action(Action::Invoke(editor_types::CommandId::new(command)));
+            assert!(transition.render, "{command} should redraw the panel");
+            assert!(state.bottom_panel_visible);
+            assert_eq!(state.bottom_panel_view, super::BottomPanelView::Git);
+        }
     }
 
     #[test]
