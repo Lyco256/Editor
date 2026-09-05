@@ -52,3 +52,16 @@ fn starts_renders_and_quits_cleanly_with_fake_adapters() {
     assert!(!final_state.running);
     assert!(final_state.frame_number >= 1);
 }
+
+#[test]
+fn startup_file_is_loaded_without_launching_external_effects() {
+    let directory = tempfile::tempdir().expect("temporary directory is available");
+    let path = directory.path().join("hello.rs");
+    std::fs::write(&path, "fn main() {}\n").expect("fixture is writable");
+
+    let mut state = editor::app::state::AppState::default();
+    state.open_startup_path(&path);
+    assert_eq!(state.active_path.as_deref(), Some(path.as_path()));
+    assert_eq!(state.active_text, "fn main() {}\n");
+    assert!(state.output.is_empty());
+}
