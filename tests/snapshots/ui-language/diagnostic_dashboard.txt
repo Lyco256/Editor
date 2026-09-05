@@ -1,0 +1,6 @@
+ D|i|a|g|n|o|s|t|i|c|s|||s|u|m|m|a|r|y|||p|r|o|b|l|e|m|s|||o|v|e|r|v|i|e|w
+ E|r|r|o|r|s|1|W|a|r|n|i|n|g|s|1|I|n|f|o|1|H|i|n|t|s|1
+ G|u|t|t|e|r|1|1|1|1|R|u|l|e|r|1|1|1|1
+>•|s|r|c|/|l|i|b|.|r|s|-|>|m|i|s|s|i|n|g| |s|e|m|i|c|o|l|o|n| |n|e|a|r| |j|o|i|n| |p|o|i|n|t
+ •|s|r|c|/|m|a|i|n|.|r|s|-|>|u|n|u|s|e|d| |i|m|p|o|r|t| |i|n| |u|n|i|c|o|d|e| |m|o|d|u|l|e
+ •|t|e|s|t|s|/|ユ|↳|ニ|↳|コ|↳|ー|↳|ド|↳|.|r|s|-|>|d|o|c|u|m|e|n|t|a|t|i|o|n| |n|o|t|e| |f|o|r| |界|↳|🙂|↳| |l|i|n|e
