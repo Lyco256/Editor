@@ -54,6 +54,11 @@ Still release-blocking or environment-blocked:
    didOpen/didChange/didSave/didClose plus workspace-folder notifications. Resource-operation
    WorkspaceEdit entries remain rejected with a typed response; only text-document edits are applied.
 
+6. Remaining protocol/UI coverage: opening or switching additional tabs after server startup does
+   not yet emit a new didOpen/didClose pair, and client-originated rename/code-action edits for
+   unopened documents remain preview-only. These are functional gaps against full multi-document
+   LSP behavior and must be closed before release completion.
+
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining performance/smoke evidence and promotion to an identical verified
 `main` state are supplied.

@@ -24,3 +24,8 @@ syntax-aware structural selection expansion.
 Trusted language-server requests now reuse the persistent client session when available. Root
 queues workspace-folder, didOpen, didChange, didSave, and didClose notifications; deterministic
 state coverage verifies the lifecycle notifications are emitted.
+
+The LSP implementation still rejects WorkspaceEdit resource operations and does not yet emit
+additional didOpen/didClose notifications for tabs opened or switched after startup; rename and
+code-action edits for unopened documents remain preview-only. These are release gaps, not silently
+ignored behavior.
