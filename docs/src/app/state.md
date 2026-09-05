@@ -10,8 +10,9 @@ buffer is clean; dirty quits surface a warning. `session_state` and `restore_ses
 active editor (including selections and unsaved text) to the versioned, atomic recovery format.
 Ctrl+B/Ctrl+J toggle the Explorer and Output panel, while Ctrl+P opens a keyboard-driven command
 palette whose commands route back through the root transition path.
-Simple VS Code keybindings loaded through the resolved settings layer are matched before editor
-editing and dispatch their mapped command through the same transition path.
+VS Code keybindings loaded through the resolved settings layer are matched before editor editing,
+including simple `when` predicates (`editorTextFocus`, selection/dirty state, language id, and
+platform) and two-stroke chords; matching commands dispatch through the same transition path.
 Ctrl+O opens a keyboard-driven Quick Open overlay; Ctrl+Shift+F starts a project-search prompt; and
 Ctrl+F/Ctrl+H provide in-document find and replace prompts. Prompt actions remain root transitions,
 so selecting a file or starting a search cannot perform I/O from a view.

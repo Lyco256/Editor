@@ -42,6 +42,7 @@ pub struct AppState {
     pub(crate) pair_config: Vec<PairConfig>,
     pub(crate) indent_style: editor_core::IndentStyle,
     pub(crate) keybindings: Vec<config_core::Keybinding>,
+    pending_key_chord: Option<editor_types::KeyEvent>,
     pub(crate) last_language_method: Option<String>,
     pub(crate) syntax_snapshot: syntax_engine::SyntaxSnapshot,
     pub(crate) document_id: DocumentId,
@@ -162,10 +163,14 @@ fn panel_row(text: impl AsRef<str>) -> app_ui::language::PanelRow {
     app_ui::language::PanelRow::new(panel_glyphs(text.as_ref()))
 }
 
-fn keybinding_matches(binding: &config_core::Keybinding, key: &editor_types::KeyEvent) -> bool {
+fn keybinding_parts(binding: &config_core::Keybinding) -> Vec<&str> {
+    binding.key.split_whitespace().collect()
+}
+
+fn keybinding_matches_token(token: &str, key: &editor_types::KeyEvent) -> bool {
     let mut modifiers = Vec::new();
     let mut key_name = None;
-    for part in binding.key.split('+') {
+    for part in token.split('+') {
         match part.to_ascii_lowercase().as_str() {
             "ctrl" | "control" => modifiers.push(Modifier::Control),
             "alt" | "option" => modifiers.push(Modifier::Alt),
@@ -207,6 +212,12 @@ fn keybinding_matches(binding: &config_core::Keybinding, key: &editor_types::Key
         }
         _ => false,
     }
+}
+
+fn keybinding_matches(binding: &config_core::Keybinding, key: &editor_types::KeyEvent) -> bool {
+    keybinding_parts(binding)
+        .first()
+        .is_some_and(|token| keybinding_matches_token(token, key))
 }
 
 fn json_label(value: &serde_json::Value) -> String {
@@ -786,6 +797,7 @@ impl Default for AppState {
             pair_config: PairConfig::common_defaults(),
             indent_style: editor_core::IndentStyle::Spaces(4),
             keybindings: Vec::new(),
+            pending_key_chord: None,
             last_language_method: None,
             syntax_snapshot: syntax_engine::SyntaxSnapshot::default(),
             document_id: DocumentId(1),
@@ -2219,7 +2231,98 @@ impl AppState {
         self.keybindings
             .iter()
             .rev()
-            .find(|binding| keybinding_matches(binding, key))
+            .find(|binding| {
+                keybinding_parts(binding).len() == 1
+                    && keybinding_matches(binding, key)
+                    && self.keybinding_when_matches(binding)
+            })
+            .map(|binding| binding.command.clone())
+    }
+
+    fn keybinding_when_matches(&self, binding: &config_core::Keybinding) -> bool {
+        let Some(when) = binding.when.as_deref().map(str::trim) else {
+            return true;
+        };
+        if when.is_empty() {
+            return true;
+        }
+        when.split("&&").all(|clause| {
+            let clause = clause.trim();
+            let (negated, expression) = clause
+                .strip_prefix('!')
+                .map_or((false, clause), |value| (true, value.trim()));
+            let (key, operator, expected) = expression.split_once("==").map_or_else(
+                || {
+                    expression
+                        .split_once("!=")
+                        .map_or((expression, None, None), |(key, value)| {
+                            (key.trim(), Some("!="), Some(value.trim()))
+                        })
+                },
+                |(key, value)| (key.trim(), Some("=="), Some(value.trim())),
+            );
+            let actual = match key {
+                "editorTextFocus" => {
+                    Some((self.input_mode.is_none() && !self.palette_visible).to_string())
+                }
+                "editorHasSelection" => Some(
+                    self.buffer
+                        .selections()
+                        .selections()
+                        .iter()
+                        .any(|selection| !selection.is_cursor())
+                        .to_string(),
+                ),
+                "editorReadonly" => Some(false.to_string()),
+                "resourceLangId" => self
+                    .active_path
+                    .as_deref()
+                    .and_then(syntax_engine::SyntaxLanguage::from_path)
+                    .map(|language| language.name().to_owned()),
+                "isMac" | "isLinux" | "isWindows" => Some((key == "isWindows").to_string()),
+                "inFilesExplorer" => Some(self.explorer_visible.to_string()),
+                "activeEditorDirty" => Some(self.active_dirty.to_string()),
+                _ => return false,
+            };
+            let equals = expected.map_or(actual.as_deref() == Some("true"), |expected| {
+                actual
+                    .as_deref()
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+            });
+            let matches = if operator == Some("!=") {
+                !equals
+            } else {
+                equals
+            };
+            if negated { !matches } else { matches }
+        })
+    }
+
+    fn begin_key_chord_if_needed(&mut self, key: &editor_types::KeyEvent) -> bool {
+        let starts = self.keybindings.iter().rev().any(|binding| {
+            let parts = keybinding_parts(binding);
+            parts.len() > 1
+                && keybinding_matches_token(parts[0], key)
+                && self.keybinding_when_matches(binding)
+        });
+        if starts {
+            self.pending_key_chord = Some(key.clone());
+        }
+        starts
+    }
+
+    fn configured_chord_command(&mut self, key: &editor_types::KeyEvent) -> Option<String> {
+        let first = self.pending_key_chord.take()?;
+        self.keybindings
+            .iter()
+            .rev()
+            .find(|binding| {
+                let parts = keybinding_parts(binding);
+                parts.len() == 2
+                    && keybinding_matches_token(parts[0], &first)
+                    && keybinding_matches_token(parts[1], key)
+                    && self.keybinding_when_matches(binding)
+            })
             .map(|binding| binding.command.clone())
     }
 
@@ -3485,8 +3588,16 @@ impl AppState {
                 return self.apply_input_mode(mode, key);
             }
             if !self.palette_visible {
+                if let Some(command) = self.configured_chord_command(key) {
+                    return self.apply_command(&command);
+                }
                 if let Some(command) = self.configured_command_for_key(key) {
                     return self.apply_command(&command);
+                }
+                if self.pending_key_chord.is_some() {
+                    self.pending_key_chord = None;
+                } else if self.begin_key_chord_if_needed(key) {
+                    return None;
                 }
             }
             if key.code == KeyCode::Character('f')
@@ -5282,6 +5393,56 @@ mod tests {
         assert!(transition.render);
         assert!(state.bottom_panel_visible);
         assert_eq!(state.bottom_panel_view, BottomPanelView::Problems);
+    }
+
+    #[test]
+    fn configured_vscode_chord_and_when_context_are_enforced() {
+        use super::InputMode;
+        use editor_types::{KeyCode, KeyEvent, Modifiers};
+
+        let mut state = AppState::default();
+        state.apply_settings(&config_core::EditorSettings {
+            keybindings: vec![
+                config_core::Keybinding {
+                    key: "ctrl+k ctrl+o".to_owned(),
+                    command: "workbench.quickOpen".to_owned(),
+                    when: Some("editorTextFocus && !editorReadonly".to_owned()),
+                    unknown: std::collections::BTreeMap::new(),
+                },
+                config_core::Keybinding {
+                    key: "ctrl+alt+p".to_owned(),
+                    command: "workbench.showProblems".to_owned(),
+                    when: Some("resourceLangId == rust".to_owned()),
+                    unknown: std::collections::BTreeMap::new(),
+                },
+            ],
+            ..config_core::EditorSettings::default()
+        });
+        let _ = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('k'),
+            modifiers: Modifiers::from_modifiers([editor_types::Modifier::Control]),
+            repeat: false,
+        })));
+        assert!(state.pending_key_chord.is_some());
+        let _ = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('o'),
+            modifiers: Modifiers::from_modifiers([editor_types::Modifier::Control]),
+            repeat: false,
+        })));
+        assert_eq!(state.input_mode, Some(InputMode::QuickOpen));
+
+        state.input_mode = None;
+        state.active_path = Some(std::path::PathBuf::from("/workspace/main.txt"));
+        let transition = state.apply_action(Action::Input(InputEvent::Key(KeyEvent {
+            code: KeyCode::Character('p'),
+            modifiers: Modifiers::from_modifiers([
+                editor_types::Modifier::Control,
+                editor_types::Modifier::Alt,
+            ]),
+            repeat: false,
+        })));
+        assert!(!transition.render || state.bottom_panel_view != BottomPanelView::Problems);
+        assert!(!state.bottom_panel_visible);
     }
 
     #[test]
