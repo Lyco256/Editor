@@ -2660,12 +2660,12 @@ impl AppState {
     }
 
     fn refresh_workspace_trust(&mut self) {
-        if let Some(root) = self.workspace_roots.first() {
-            self.workspace_trusted = self
-                .trust_store
-                .state_for_path(root)
-                .allows_external_processes();
-        }
+        self.workspace_trusted = !self.workspace_roots.is_empty()
+            && self.workspace_roots.iter().all(|root| {
+                self.trust_store
+                    .state_for_path(root)
+                    .allows_external_processes()
+            });
     }
 }
 
@@ -2731,7 +2731,7 @@ impl AppState {
                         LanguageServerStatus::Running { .. } | LanguageServerStatus::Starting
                     );
                 self.workspace_trusted = trusted;
-                if let Some(root) = self.workspace_roots.first() {
+                for root in &self.workspace_roots {
                     self.trust_store.set_state(
                         root,
                         if trusted {
@@ -5323,6 +5323,28 @@ mod tests {
             Some(Effect::StopLanguageServer { .. })
         ));
         assert_eq!(state.language_server, LanguageServerStatus::Stopped);
+    }
+
+    #[test]
+    fn multi_root_trust_requires_every_canonical_root() {
+        let first = tempfile::tempdir().expect("first root");
+        let second = tempfile::tempdir().expect("second root");
+        let mut state = AppState {
+            workspace_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+            ..AppState::default()
+        };
+        let _ = state.apply_action(Action::SetWorkspaceTrust(true));
+        assert!(state.workspace_trusted);
+        let _ = state.apply_action(Action::SetWorkspaceTrust(false));
+        assert!(!state.workspace_trusted);
+        assert_eq!(
+            state.trust_store.state_for_path(first.path()),
+            workspace_core::TrustState::Untrusted
+        );
+        assert_eq!(
+            state.trust_store.state_for_path(second.path()),
+            workspace_core::TrustState::Untrusted
+        );
     }
 
     #[test]

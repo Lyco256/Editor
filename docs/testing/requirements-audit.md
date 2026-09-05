@@ -13,6 +13,7 @@ Implemented in the integration pass:
 - root clipboard copy/cut/paste effects (with cut-after-write safety), an authorized external
   formatter effect, and recovery checkpoints after each action;
 - canonical-path trust-store loading and saving at process bootstrap;
+- multi-root trust decisions now require and persist an explicit state for every canonical root;
 - bounded search result backpressure, native `notify` watcher abstraction, typed replacement-range
   validation, typed LSP serialization errors, and panic terminal cleanup;
 - root command palette plus Explorer/Output toggles;
