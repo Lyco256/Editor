@@ -1,6 +1,7 @@
 # Final integration results
 
-Wave 2 is merged into `devenv` and promoted identically to `main` at the final verified commit. On this
+Wave 2 integration is verified on `devenv` (commit `2e69cca`). It has not yet been promoted to
+`main`, because release-blocking evidence and architecture work remain. On this
 verified integration state, format check, workspace Clippy with
 warnings denied, all workspace tests, source/document mirror check, release build, and redirected
 headless startup all pass through `tools/verify.ps1`. Root integration now covers persistent editing,
