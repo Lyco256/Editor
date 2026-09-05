@@ -261,10 +261,13 @@ fn json_position(value: &serde_json::Value) -> Option<LogicalPosition> {
 }
 
 fn json_path(uri: &str) -> PathBuf {
-    let path = uri
-        .strip_prefix("file:///")
-        .or_else(|| uri.strip_prefix("file://"))
-        .unwrap_or(uri);
+    let (path, prefix) = if let Some(path) = uri.strip_prefix("file:///") {
+        (path, "/")
+    } else if let Some(path) = uri.strip_prefix("file://") {
+        (path, "//")
+    } else {
+        (uri, "")
+    };
     let bytes = path.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -284,7 +287,18 @@ fn json_path(uri: &str) -> PathBuf {
         decoded.push(bytes[index]);
         index += 1;
     }
-    PathBuf::from(String::from_utf8_lossy(&decoded).replace('/', std::path::MAIN_SEPARATOR_STR))
+    let decoded = String::from_utf8_lossy(&decoded).replace('/', std::path::MAIN_SEPARATOR_STR);
+    #[cfg(windows)]
+    {
+        if prefix == "//" {
+            return PathBuf::from(format!("\\\\{decoded}"));
+        }
+        PathBuf::from(decoded)
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(format!("{prefix}{decoded}"))
+    }
 }
 
 fn workspace_edits_for_path(edit: &serde_json::Value, path: &Path) -> Vec<serde_json::Value> {

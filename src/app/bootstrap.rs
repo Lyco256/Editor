@@ -926,11 +926,38 @@ fn lsp_resource_operations(edit: &serde_json::Value) -> Result<Vec<LspResourceOp
 }
 
 fn lsp_uri_path(uri: &str) -> PathBuf {
-    let path = uri
-        .strip_prefix("file:///")
-        .or_else(|| uri.strip_prefix("file://"))
-        .unwrap_or(uri);
-    PathBuf::from(percent_decode_uri_path(path).replace('/', std::path::MAIN_SEPARATOR_STR))
+    if let Some(path) = uri.strip_prefix("file:///") {
+        let decoded = percent_decode_uri_path(path);
+        #[cfg(windows)]
+        {
+            return PathBuf::from(decoded.replace('/', std::path::MAIN_SEPARATOR_STR));
+        }
+        #[cfg(not(windows))]
+        {
+            return PathBuf::from(format!(
+                "/{}",
+                decoded.replace('/', std::path::MAIN_SEPARATOR_STR)
+            ));
+        }
+    }
+    if let Some(path) = uri.strip_prefix("file://") {
+        let decoded = percent_decode_uri_path(path);
+        #[cfg(windows)]
+        {
+            return PathBuf::from(format!(
+                "\\\\{}",
+                decoded.replace('/', std::path::MAIN_SEPARATOR_STR)
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            return PathBuf::from(format!(
+                "//{}",
+                decoded.replace('/', std::path::MAIN_SEPARATOR_STR)
+            ));
+        }
+    }
+    PathBuf::from(percent_decode_uri_path(uri).replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
 fn percent_decode_uri_path(path: &str) -> String {
@@ -2294,7 +2321,7 @@ mod tests {
     use super::{
         StartupRequest, apply_lsp_workspace_edit, apply_workspace_language_configuration,
         apply_workspace_settings, apply_workspace_snippets, convert_static_theme,
-        load_workspace_theme,
+        load_workspace_theme, lsp_uri_path,
     };
 
     #[test]
@@ -2418,6 +2445,17 @@ mod tests {
             converted.color(editor_types::StyleRole::EditorBackground),
             terminal_backend::RgbColor::new(10, 11, 12)
         );
+    }
+
+    #[test]
+    fn lsp_file_uri_round_trips_absolute_paths() {
+        let path = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\workspace\space file.rs")
+        } else {
+            std::path::PathBuf::from("/workspace/space file.rs")
+        };
+        let uri = lsp_client::protocol::DocumentUri::from_path(&path);
+        assert!(workspace_core::path_eq(&lsp_uri_path(&uri.0), &path));
     }
 
     #[test]
