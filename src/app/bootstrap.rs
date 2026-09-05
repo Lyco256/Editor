@@ -755,6 +755,37 @@ impl EffectDispatcher for ServiceDispatcher {
             } = effect.clone()
             {
                 let sender = self.sender.clone();
+                let persistent = self
+                    .lsp_clients
+                    .lock()
+                    .ok()
+                    .and_then(|clients| clients.values().next().cloned());
+                if let Some(client) = persistent {
+                    self.runtime.spawn(async move {
+                        match client.request_json(&method, params).await {
+                            Ok(result) => {
+                                let _ = sender.send(Event::LspResponse {
+                                    request,
+                                    version,
+                                    method,
+                                    result,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = sender.send(Event::EffectFailed {
+                                    request,
+                                    message: editor_types::OutputMessage {
+                                        subsystem: "lsp".to_owned(),
+                                        operation: "request".to_owned(),
+                                        level: editor_types::OutputLevel::Error,
+                                        message: error.to_string(),
+                                    },
+                                });
+                            }
+                        }
+                    });
+                    return;
+                }
                 let method_for_event = method.clone();
                 self.runtime.spawn_blocking(move || {
                     let result = tokio::runtime::Builder::new_current_thread()
@@ -809,6 +840,42 @@ impl EffectDispatcher for ServiceDispatcher {
                             });
                         }
                     }
+                });
+                return;
+            }
+            if let Effect::LspNotification {
+                request,
+                method,
+                params,
+            } = effect.clone()
+            {
+                let sender = self.sender.clone();
+                let client = self
+                    .lsp_clients
+                    .lock()
+                    .ok()
+                    .and_then(|clients| clients.values().next().cloned());
+                self.runtime.spawn(async move {
+                    let result = match client {
+                        Some(client) => client
+                            .notify_json(&method, params)
+                            .await
+                            .map_err(|error| error.to_string()),
+                        None => Err("language server session is no longer available".to_owned()),
+                    };
+                    let event = result.map_or_else(
+                        |message| Event::EffectFailed {
+                            request,
+                            message: editor_types::OutputMessage {
+                                subsystem: "lsp".to_owned(),
+                                operation: "notification".to_owned(),
+                                level: editor_types::OutputLevel::Warning,
+                                message,
+                            },
+                        },
+                        |()| Event::EffectCompleted(request),
+                    );
+                    let _ = sender.send(event);
                 });
                 return;
             }

@@ -28,6 +28,8 @@ pub struct AppState {
     pub frame_number: u64,
     pub language_server: LanguageServerStatus,
     pub(crate) lsp_position_encoding: lsp_client::protocol::PositionEncoding,
+    lsp_open_document: Option<PathBuf>,
+    lsp_last_text: Option<String>,
     pub git_status: Option<GitStatusSummary>,
     pub(crate) git_dashboard: Option<app_ui::git::GitDashboardState>,
     pub(crate) git_root: Option<PathBuf>,
@@ -667,6 +669,8 @@ impl Default for AppState {
             frame_number: 0,
             language_server: LanguageServerStatus::Stopped,
             lsp_position_encoding: lsp_client::protocol::PositionEncoding::Utf16,
+            lsp_open_document: None,
+            lsp_last_text: None,
             git_status: None,
             git_dashboard: None,
             git_root: None,
@@ -1579,6 +1583,90 @@ impl AppState {
             || "untitled:editor".to_owned(),
             |path| format!("file://{}", path.to_string_lossy().replace('\\', "/")),
         )
+    }
+
+    fn queue_lsp_notification(&mut self, method: &str, params: serde_json::Value) {
+        if self.workspace_trusted
+            && matches!(self.language_server, LanguageServerStatus::Running { .. })
+        {
+            self.deferred_effects.push(Effect::LspNotification {
+                request: RequestId(self.frame_number.saturating_add(1)),
+                method: method.to_owned(),
+                params,
+            });
+        }
+    }
+
+    fn queue_lsp_did_open(&mut self) {
+        let Some(path) = self.active_path.clone() else {
+            return;
+        };
+        if self
+            .lsp_open_document
+            .as_ref()
+            .is_some_and(|open| workspace_core::path_eq(open, &path))
+        {
+            return;
+        }
+        let text = self.buffer.snapshot().text().to_owned();
+        self.queue_lsp_notification(
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": self.active_document_uri(),
+                    "languageId": syntax_engine::SyntaxLanguage::from_path(&path)
+                        .map_or_else(|| "plaintext".to_owned(), |language| language.name().to_owned()),
+                    "version": self.buffer.snapshot().version(),
+                    "text": text,
+                }
+            }),
+        );
+        self.lsp_open_document = Some(path);
+        self.lsp_last_text = Some(self.buffer.snapshot().text().to_owned());
+    }
+
+    fn queue_lsp_did_change(&mut self, previous_text: String) {
+        let Some(path) = self.active_path.clone() else {
+            return;
+        };
+        if !self
+            .lsp_open_document
+            .as_ref()
+            .is_some_and(|open| workspace_core::path_eq(open, &path))
+        {
+            return;
+        }
+        let current = self.buffer.snapshot().text().to_owned();
+        if self.lsp_last_text.as_deref() == Some(current.as_str()) {
+            return;
+        }
+        let old_buffer = TextBuffer::new(&previous_text);
+        let old_end = old_buffer
+            .offset_to_position(CharacterOffset(old_buffer.len_chars()))
+            .unwrap_or_default();
+        let old_lsp_end = lsp_client::PositionMapper::new(
+            &lsp_client::TextSnapshot::new(previous_text),
+            self.lsp_position_encoding,
+        )
+        .to_lsp(old_end)
+        .unwrap_or_default();
+        self.queue_lsp_notification(
+            "textDocument/didChange",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": self.active_document_uri(),
+                    "version": self.buffer.snapshot().version(),
+                },
+                "contentChanges": [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": old_lsp_end.line, "character": old_lsp_end.character}
+                    },
+                    "text": current,
+                }]
+            }),
+        );
+        self.lsp_last_text = Some(self.buffer.snapshot().text().to_owned());
     }
 
     fn discovered_lsp_spec(&self) -> Option<ProcessSpec> {
@@ -2605,7 +2693,29 @@ impl AppState {
             }
             Action::CloseTab(index) => {
                 if let Some(tab) = self.tabs.get(index) {
-                    if tab.buffer.is_dirty() {
+                    let tab_dirty = tab.buffer.is_dirty();
+                    let tab_path = tab.path.clone();
+                    if !tab_dirty
+                        && tab_path.as_ref().is_some_and(|path| {
+                            self.lsp_open_document
+                                .as_ref()
+                                .is_some_and(|open| workspace_core::path_eq(open, path))
+                        })
+                    {
+                        if let Some(path) = tab_path.as_ref() {
+                            self.queue_lsp_notification(
+                                "textDocument/didClose",
+                                serde_json::json!({
+                                    "textDocument": {
+                                        "uri": format!("file://{}", path.to_string_lossy().replace('\\', "/"))
+                                    }
+                                }),
+                            );
+                        }
+                        self.lsp_open_document = None;
+                        self.lsp_last_text = None;
+                    }
+                    if tab_dirty {
                         self.output.push(OutputMessage {
                             subsystem: "editor".to_owned(),
                             operation: "close-tab".to_owned(),
@@ -2740,6 +2850,7 @@ impl AppState {
                         (*request, super::effect::ExternalProcessKind::Git)
                     }
                     Effect::LspRequest { request, .. }
+                    | Effect::LspNotification { request, .. }
                     | Effect::LspWorkspaceEdit { request, .. } => {
                         (*request, super::effect::ExternalProcessKind::LanguageServer)
                     }
@@ -2788,6 +2899,7 @@ impl AppState {
                     | Effect::SearchWorkspace { .. }
                     | Effect::CancelSearch { .. }
                     | Effect::LspRequest { .. }
+                    | Effect::LspNotification { .. }
                     | Effect::LspServerResponse { .. }
                     | Effect::LspWorkspaceEdit { .. }
                     | Effect::Render => {}
@@ -2903,6 +3015,7 @@ impl AppState {
             }
         }
         let before_version = self.buffer.snapshot().version();
+        let before_text = self.buffer.snapshot().text().to_owned();
         let result = match input {
             InputEvent::Paste(text) => self
                 .buffer
@@ -3018,6 +3131,7 @@ impl AppState {
         }
         if self.buffer.snapshot().version() != before_version {
             self.diagnostics.clear();
+            self.queue_lsp_did_change(before_text);
         }
         self.sync_buffer_projection();
     }
@@ -3736,6 +3850,13 @@ impl AppState {
                 if self.active_path.as_ref() == Some(&path) {
                     self.buffer.mark_saved();
                     self.sync_buffer_projection();
+                    self.queue_lsp_notification(
+                        "textDocument/didSave",
+                        serde_json::json!({
+                            "textDocument": {"uri": self.active_document_uri()},
+                            "text": self.buffer.snapshot().text(),
+                        }),
+                    );
                 }
                 self.output.push(OutputMessage {
                     subsystem: "workspace".to_owned(),
@@ -4192,6 +4313,23 @@ impl AppState {
                 self.language_server = LanguageServerStatus::Running {
                     name: "language server".to_owned(),
                 };
+                self.queue_lsp_did_open();
+                let folders = self
+                    .workspace_roots
+                    .iter()
+                    .map(|root| {
+                        serde_json::json!({
+                            "uri": format!("file://{}", root.to_string_lossy().replace('\\', "/")),
+                            "name": root.file_name().and_then(|name| name.to_str()).unwrap_or("workspace"),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !folders.is_empty() {
+                    self.queue_lsp_notification(
+                        "workspace/didChangeWorkspaceFolders",
+                        serde_json::json!({"event": {"added": folders, "removed": []}}),
+                    );
+                }
             }
             Event::LanguageDiagnostics { params, .. } => {
                 let snapshot = self.buffer.snapshot();
@@ -4378,6 +4516,30 @@ mod tests {
         let transition = state.apply_action(Action::RequestEffect(lsp_effect()));
         assert_eq!(transition.effects.len(), 1);
         assert!(transition.events.is_empty());
+    }
+
+    #[test]
+    fn language_server_ready_queues_document_lifecycle_notifications() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let path = directory.path().join("main.rs");
+        std::fs::write(&path, "fn main() {}").expect("fixture");
+        let mut state = AppState::default();
+        state.workspace_roots.push(directory.path().to_path_buf());
+        state.open_startup_path(&path);
+        state.workspace_trusted = true;
+        state.apply_event(Event::LanguageServerReady {
+            request: RequestId(9),
+            encoding: lsp_client::protocol::PositionEncoding::Utf16,
+        });
+        let effects = state.take_deferred_effects();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::LspNotification { method, .. } if method == "textDocument/didOpen"
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::LspNotification { method, .. } if method == "workspace/didChangeWorkspaceFolders"
+        )));
     }
 
     #[test]

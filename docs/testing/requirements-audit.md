@@ -50,6 +50,10 @@ Still release-blocking or environment-blocked:
 4. Root language commands now expose completion resolve, prepare rename, declaration/implementation
    navigation, range formatting, and syntax-aware structural selection expansion.
 
+5. Trusted language-server requests now reuse the persistent client when available, and root queues
+   didOpen/didChange/didSave/didClose plus workspace-folder notifications. Resource-operation
+   WorkspaceEdit entries remain rejected with a typed response; only text-document edits are applied.
+
 Accordingly, the repository is integrated and test-clean, but the product goal is not marked
 complete until the remaining performance/smoke evidence and promotion to an identical verified
 `main` state are supplied.

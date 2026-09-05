@@ -72,5 +72,7 @@ Workspace Quick Open and streaming project search are routed through typed root 
 and syntax refreshes are scheduled after document-version changes.
 Language effect requests are converted to structured LSP methods and trust-gated, with negotiated
 position encoding applied to diagnostic range conversion.
+After a trusted server becomes ready, root sends workspace folders and didOpen; edits, saves, and
+close-tab actions queue didChange/didSave/didClose notifications through the persistent session.
 Git status events populate the pure dashboard model and successful Git mutations schedule a status
 refresh.

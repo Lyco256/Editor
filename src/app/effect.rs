@@ -94,6 +94,12 @@ pub enum Effect {
         method: String,
         params: serde_json::Value,
     },
+    /// Sends a JSON-RPC notification through the persistent language-server session.
+    LspNotification {
+        request: RequestId,
+        method: String,
+        params: serde_json::Value,
+    },
     /// Responds to a server-originated JSON-RPC request after root policy has handled it.
     LspServerResponse {
         request: RequestId,
@@ -131,6 +137,7 @@ impl Effect {
                 | Self::RefreshGitStatus { .. }
                 | Self::FormatDocument { .. }
                 | Self::LspRequest { .. }
+                | Self::LspNotification { .. }
                 | Self::LspWorkspaceEdit { .. }
         )
     }

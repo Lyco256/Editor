@@ -18,6 +18,8 @@ root state receives explicit confirmation; execution remains on the background d
 search sessions can be cancelled with a typed effect.
 `LspRequest` carries a structured JSON-RPC method/parameters payload and is trust-gated before any
 server process is started.
+`LspNotification` sends didOpen/didChange/didSave/didClose and workspace-folder notifications
+through the persistent trusted language-server session.
 `LspServerResponse` sends the result of a root-validated server-originated request back to the
 persistent client.
 `GitHunk` carries a parsed diff hunk to the Git adapter over stdin for stage/unstage, while
