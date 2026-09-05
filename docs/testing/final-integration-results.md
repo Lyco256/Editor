@@ -25,6 +25,8 @@ Trusted language-server requests now reuse the persistent client session when av
 queues workspace-folder, didOpen, didChange, didSave, and didClose notifications; deterministic
 state coverage verifies the lifecycle notifications are emitted. Directory resource operations
 remain explicitly rejected and are still outside the complete WorkspaceEdit surface.
+In-document FindInDocument/ReplaceInDocument actions now expose editor-core search and undoable
+replace-all behavior through root state.
 
 File resource WorkspaceEdit operations (create/rename/delete) are now applied with trusted-root
 validation and rollback on operation failure. Directory resource operations remain explicitly
