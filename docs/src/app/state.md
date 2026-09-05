@@ -12,6 +12,8 @@ Ctrl+B/Ctrl+J toggle the Explorer and Output panel, while Ctrl+P opens a keyboar
 palette whose commands route back through the root transition path.
 Git Changes, Diff, Branches, Stashes, History, Commit, and Conflicts each have command-palette
 routes that select the corresponding dashboard view without giving the UI direct process access.
+Language Problems, hover, signature help, completion, code action, restart, and dismiss actions
+are likewise exposed through typed command-palette routes.
 Trusting a file workspace discovers a conventional language server on `PATH`; its startup and crash
 events update the visible `LanguageServerStatus` without allowing untrusted process execution.
 Left-click and drag input is translated from screen cells to logical buffer selections with bounded

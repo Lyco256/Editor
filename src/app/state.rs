@@ -588,6 +588,13 @@ impl Default for AppState {
                 CommandEntry::available("git.showHistory", "Show Git History"),
                 CommandEntry::available("git.showCommit", "Show Git Commit"),
                 CommandEntry::available("git.showConflicts", "Show Git Conflicts"),
+                CommandEntry::available("language.showProblems", "Show Language Problems"),
+                CommandEntry::available("language.openHover", "Show Hover"),
+                CommandEntry::available("language.openSignature", "Show Signature Help"),
+                CommandEntry::available("language.acceptCompletion", "Accept Completion"),
+                CommandEntry::available("language.acceptCodeAction", "Accept Code Action"),
+                CommandEntry::available("language.restart", "Restart Language Server"),
+                CommandEntry::available("language.dismiss", "Dismiss Language Popup"),
             ]),
             tabs: vec![TabState::untitled()],
             active_tab: 0,
@@ -975,6 +982,8 @@ impl AppState {
     #[allow(clippy::too_many_lines)]
     pub fn apply_git_action(&mut self, action: app_ui::git::GitAction) -> Transition {
         use app_ui::git::GitAction;
+        self.bottom_panel_view = BottomPanelView::Git;
+        self.bottom_panel_visible = true;
         if let Some(dashboard) = self.git_dashboard.as_mut() {
             let _ = dashboard.dispatch(action.clone());
         }
@@ -1748,6 +1757,8 @@ impl AppState {
     #[allow(clippy::too_many_lines, clippy::needless_return)]
     fn apply_action_inner(&mut self, action: Action) -> Transition {
         match action {
+            Action::Language(action) => return self.apply_language_action(action),
+            Action::Git(action) => return self.apply_git_action(action),
             Action::Quit => {
                 if self.active_dirty {
                     self.output.push(OutputMessage {
@@ -2645,6 +2656,35 @@ impl AppState {
             "git.showHistory" => self.show_git_view(app_ui::git::GitView::History),
             "git.showCommit" => self.show_git_view(app_ui::git::GitView::Commit),
             "git.showConflicts" => self.show_git_view(app_ui::git::GitView::Conflicts),
+            "language.showProblems" => {
+                return self
+                    .apply_language_command(app_ui::language::LanguageAction::RevealProblems);
+            }
+            "language.openHover" => {
+                return self.apply_language_command(app_ui::language::LanguageAction::OpenHover);
+            }
+            "language.openSignature" => {
+                return self
+                    .apply_language_command(app_ui::language::LanguageAction::OpenSignatureHelp);
+            }
+            "language.acceptCompletion" => {
+                return self.apply_language_command(
+                    app_ui::language::LanguageAction::AcceptCompletion { index: 0 },
+                );
+            }
+            "language.acceptCodeAction" => {
+                return self.apply_language_command(
+                    app_ui::language::LanguageAction::AcceptCodeAction { index: 0 },
+                );
+            }
+            "language.restart" => {
+                return self.apply_language_command(
+                    app_ui::language::LanguageAction::RestartLanguageServer,
+                );
+            }
+            "language.dismiss" => {
+                return self.apply_language_command(app_ui::language::LanguageAction::DismissPopup);
+            }
             "workbench.showOutput" => {
                 self.bottom_panel_view = BottomPanelView::Output;
                 self.bottom_panel_visible = true;
@@ -2680,6 +2720,16 @@ impl AppState {
         self.active_text = self.buffer.to_string();
         self.active_dirty = self.buffer.is_dirty();
         self.sync_active_tab();
+    }
+
+    fn apply_language_command(
+        &mut self,
+        action: app_ui::language::LanguageAction,
+    ) -> Option<Effect> {
+        self.apply_language_action(action)
+            .effects
+            .into_iter()
+            .next()
     }
 
     fn show_git_view(&mut self, view: app_ui::git::GitView) {
@@ -3422,6 +3472,21 @@ mod tests {
             assert!(state.bottom_panel_visible);
             assert_eq!(state.bottom_panel_view, super::BottomPanelView::Git);
         }
+    }
+
+    #[test]
+    fn typed_language_and_git_actions_enter_the_root_transition_path() {
+        let mut state = AppState::default();
+        let language = state.apply_action(Action::Language(
+            app_ui::language::LanguageAction::RevealProblems,
+        ));
+        assert!(language.render);
+        assert!(state.bottom_panel_visible);
+        let git = state.apply_action(Action::Git(app_ui::git::GitAction::SwitchView(
+            app_ui::git::GitView::History,
+        )));
+        assert!(git.render);
+        assert_eq!(state.bottom_panel_view, super::BottomPanelView::Git);
     }
 
     #[test]

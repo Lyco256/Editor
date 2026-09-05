@@ -9,6 +9,10 @@ use super::effect::Effect;
 pub enum Action {
     Input(InputEvent),
     Invoke(CommandId),
+    /// Typed language-panel action routed through root state.
+    Language(app_ui::language::LanguageAction),
+    /// Typed source-control action routed through root state.
+    Git(app_ui::git::GitAction),
     SetWorkspaceTrust(bool),
     OpenPath(PathBuf),
     /// Reopens the active file with a user-selected codec after clean-buffer confirmation.

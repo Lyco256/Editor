@@ -5,6 +5,7 @@ I/O. Input adapters create them; `AppState` consumes them. Trust changes and eff
 explicit so policy tests can observe authorization decisions.
 `OpenPath` and `AddWorkspaceRoot` make file/workspace navigation explicit root actions; the
 transition layer performs the corresponding model update and reports errors as output messages.
+`Language` and `Git` carry typed app-ui panel actions into root transitions without embedding I/O.
 `ReopenWithEncoding` uses an explicit BOM-aware codec after refusing to replace dirty text, while
 `SetEncoding` changes the next-save codec and marks the buffer dirty so conversion cannot be lost.
 `SplitPane`, `CloseSplit`, and `SetSplitRatio` make horizontal/vertical editor layout changes
