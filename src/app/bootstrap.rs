@@ -7,7 +7,8 @@ use terminal_backend::{Framebuffer, TerminalAdapter};
 
 use super::{
     action::Action,
-    runtime::{AppRuntime, QueueActionSource, RecordingDispatcher, run_interactive},
+    runtime::{AppRuntime, QueueActionSource, RecordingDispatcher, run_interactive_with_state},
+    state::AppState,
 };
 
 #[derive(Debug, Default)]
@@ -98,17 +99,18 @@ impl StartupRequest {
 fn run_interactive_session(request: StartupRequest) -> ExitCode {
     let size = terminal_backend::CrosstermBackend::<std::io::Stdout>::size().unwrap_or((80, 24));
     let backend = terminal_backend::CrosstermBackend::stdout();
-    let mut dispatcher = RecordingDispatcher::default();
+    let dispatcher = RecordingDispatcher::default();
+    let mut state = AppState::default();
     if let Some(path) = request.path {
         let message = if path.is_dir() {
             format!("opening workspace {}", path.display())
         } else {
             format!("opening file {}", path.display())
         };
-        dispatcher.effects.push(crate::app::effect::Effect::Render);
+        state.open_startup_path(&path);
         eprintln!("Editor: {message}");
     }
-    match run_interactive(backend, dispatcher, size) {
+    match run_interactive_with_state(backend, dispatcher, size, state) {
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Editor runtime failed: {error}");

@@ -1,5 +1,7 @@
 //! Authoritative root state and pure transition logic.
 
+use std::path::{Path, PathBuf};
+
 use editor_types::{
     InputEvent, KeyCode, LanguageServerStatus, Modifier, OutputLevel, OutputMessage,
 };
@@ -13,6 +15,9 @@ pub struct AppState {
     pub frame_number: u64,
     pub language_server: LanguageServerStatus,
     pub output: Vec<OutputMessage>,
+    pub active_path: Option<PathBuf>,
+    pub active_text: String,
+    pub active_dirty: bool,
 }
 
 impl Default for AppState {
@@ -23,6 +28,40 @@ impl Default for AppState {
             frame_number: 0,
             language_server: LanguageServerStatus::Stopped,
             output: Vec::new(),
+            active_path: None,
+            active_text: String::new(),
+            active_dirty: false,
+        }
+    }
+}
+
+impl AppState {
+    /// Loads a startup path into the view model without launching external processes.
+    ///
+    /// Directories become workspace roots; regular files are decoded using the workspace document
+    /// adapter and retained as editable text. Missing or malformed files are reported as structured
+    /// output while the editor remains usable.
+    pub fn open_startup_path(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref().to_path_buf();
+        if path.is_dir() {
+            self.active_path = Some(path);
+            return;
+        }
+        match workspace_core::load_text_document(
+            &path,
+            &workspace_core::DocumentLoadOptions::default(),
+        ) {
+            Ok(document) => {
+                self.active_path = Some(document.path);
+                self.active_text = document.text;
+                self.active_dirty = false;
+            }
+            Err(error) => self.output.push(OutputMessage {
+                subsystem: "workspace".to_owned(),
+                operation: "open-file".to_owned(),
+                level: OutputLevel::Error,
+                message: format!("could not open {}: {error}", path.display()),
+            }),
         }
     }
 }

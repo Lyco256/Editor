@@ -2,7 +2,16 @@
 
 use std::collections::VecDeque;
 
-use app_ui::frame::empty_frame;
+use app_ui::{
+    editor::{EditorStatusData, EditorViewportState, SemanticMarkerSet},
+    frame::empty_frame,
+    shell::{
+        BottomPanelState, ExplorerState, PaneNode, PanelEntry, ShellFocus, ShellState, TabEntry,
+    },
+    widgets::CommandPaletteState,
+};
+use editor_core::TextBuffer;
+use editor_types::{OutputLevel, StyleRole};
 use terminal_backend::{Framebuffer, InputReader, TerminalAdapter};
 use thiserror::Error;
 
@@ -51,11 +60,22 @@ where
 {
     #[must_use]
     pub fn new(terminal: T, input: I, dispatcher: D, size: (u16, u16)) -> Self {
+        Self::with_state(terminal, input, dispatcher, size, AppState::default())
+    }
+
+    #[must_use]
+    pub fn with_state(
+        terminal: T,
+        input: I,
+        dispatcher: D,
+        size: (u16, u16),
+        state: AppState,
+    ) -> Self {
         Self {
             terminal,
             input,
             dispatcher,
-            state: AppState::default(),
+            state,
             size,
         }
     }
@@ -105,13 +125,118 @@ where
     }
 
     fn render(&mut self) -> Result<(), RuntimeError> {
-        let frame: Framebuffer = empty_frame(self.size.0, self.size.1);
+        let frame = frame_for_state(&self.state, self.size, self.terminal.capabilities());
         self.terminal
             .render(&frame)
             .map_err(|error| RuntimeError::Render(error.to_string()))?;
         self.state.frame_number += 1;
         Ok(())
     }
+}
+
+fn frame_for_state(
+    state: &AppState,
+    size: (u16, u16),
+    capabilities: editor_types::TerminalCapabilities,
+) -> Framebuffer {
+    let mut frame = empty_frame(size.0, size.1);
+    let buffer = TextBuffer::new(&state.active_text);
+    let file_name = state
+        .active_path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map_or_else(
+            || "Welcome".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+    let status = EditorStatusData {
+        file_name: file_name.clone(),
+        dirty: state.active_dirty,
+        language_server: format!("{:?}", state.language_server),
+        trust: if state.workspace_trusted {
+            "trusted"
+        } else {
+            "untrusted"
+        }
+        .to_owned(),
+        ..EditorStatusData::default()
+    };
+    let viewport = EditorViewportState {
+        title: file_name,
+        snapshot: buffer.snapshot(),
+        viewport: app_ui::editor::TextViewport::default(),
+        selections: buffer.selections().clone(),
+        folds: editor_core::FoldSet::default(),
+        markers: SemanticMarkerSet::default(),
+        search_matches: Vec::new(),
+        bracket_matches: Vec::new(),
+        status: status.clone(),
+        show_line_numbers: true,
+        tab_width: 4,
+    };
+    let roots = state
+        .active_path
+        .as_ref()
+        .filter(|path| path.is_dir())
+        .map(|path| vec![path.display().to_string()])
+        .unwrap_or_default();
+    let entries = state
+        .active_path
+        .as_ref()
+        .filter(|path| path.is_file())
+        .map(|path| {
+            vec![app_ui::shell::ExplorerEntry {
+                depth: 0,
+                label: path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+                active: true,
+                expanded: false,
+            }]
+        })
+        .unwrap_or_default();
+    let output_entries = state
+        .output
+        .iter()
+        .map(|message| PanelEntry {
+            label: message.message.clone(),
+            detail: Some(message.operation.clone()),
+            level: match message.level {
+                OutputLevel::Error => StyleRole::Error,
+                OutputLevel::Warning => StyleRole::Warning,
+                OutputLevel::Information | OutputLevel::Trace => StyleRole::Information,
+            },
+        })
+        .collect();
+    let shell = ShellState {
+        explorer: ExplorerState {
+            roots,
+            entries,
+            visible: true,
+        },
+        tabs: vec![TabEntry {
+            title: viewport.title.clone(),
+            dirty: state.active_dirty,
+            active: true,
+            closeable: true,
+        }],
+        root: PaneNode::leaf(viewport),
+        bottom: BottomPanelState {
+            title: "Output".to_owned(),
+            entries: output_entries,
+            visible: !state.output.is_empty(),
+        },
+        palette: CommandPaletteState::default(),
+        focus: ShellFocus::Editor,
+        status,
+    };
+    shell.render(
+        &mut frame,
+        app_ui::widgets::Rect::new(0, 0, size.0, size.1),
+        capabilities,
+    );
+    frame
 }
 
 /// Runs the production event loop with one terminal adapter for rendering and input.
@@ -123,9 +248,29 @@ where
 /// Returns a typed lifecycle error when entering, reading, rendering, or restoring the terminal
 /// fails.
 pub fn run_interactive<T, D>(
+    terminal: T,
+    dispatcher: D,
+    size: (u16, u16),
+) -> Result<AppState, RuntimeError>
+where
+    T: InteractiveTerminal,
+    D: EffectDispatcher,
+{
+    run_interactive_with_state(terminal, dispatcher, size, AppState::default())
+}
+
+/// Interactive runtime variant used by startup paths that have already loaded a document or
+/// workspace model.
+///
+/// # Errors
+///
+/// Returns a typed lifecycle error when entering, reading, rendering, or restoring the terminal
+/// fails.
+pub fn run_interactive_with_state<T, D>(
     mut terminal: T,
     dispatcher: D,
     size: (u16, u16),
+    state: AppState,
 ) -> Result<AppState, RuntimeError>
 where
     T: InteractiveTerminal,
@@ -134,7 +279,8 @@ where
     terminal
         .enter()
         .map_err(|error| RuntimeError::Enter(error.to_string()))?;
-    let mut runtime = AppRuntime::new(terminal, InteractiveActionSource, dispatcher, size);
+    let mut runtime =
+        AppRuntime::with_state(terminal, InteractiveActionSource, dispatcher, size, state);
     let runtime_result = runtime.run_entered_interactive();
     let restore_result = runtime
         .terminal
