@@ -69,11 +69,11 @@ Release-gate status and evidence:
 5. Trusted language-server requests now reuse the persistent client when available, and root queues
    didOpen/didChange/didSave/didClose plus workspace-folder notifications. File resource
    WorkspaceEdit operations (create/rename/delete) are validated, journaled, and applied with
-   rollback on operation failure; directory resource operations remain explicitly rejected.
+   rollback on operation failure, including recursive directory rename/delete.
 
 6. Client-originated rename/code-action WorkspaceEdits now use the background atomic worker when
-   they target unopened documents. Remaining limitation is explicit rejection of directory
-   resource operations; file resource operations and all text-document edits are handled.
+   they target unopened documents. Directory rename/delete operations are handled with recursive
+   rollback journaling; non-recursive directory deletes return a typed error.
 
 7. Revoking Workspace Trust now stops persistent language-server sessions and rejects late server
    workspace edits, with deterministic root-state coverage.
