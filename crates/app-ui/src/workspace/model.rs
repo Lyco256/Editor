@@ -635,9 +635,7 @@ fn quick_open_score(candidate: &QuickOpenCandidate, query: &str) -> Option<u32> 
 
 fn score_text(candidate: &str, needle: &str) -> Option<u32> {
     if candidate.contains(needle) {
-        return candidate
-            .find(needle)
-            .map(saturating_usize_to_u32);
+        return candidate.find(needle).map(saturating_usize_to_u32);
     }
     let mut score = 0_u32;
     let mut search_index = 0_usize;
