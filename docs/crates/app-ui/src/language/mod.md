@@ -30,3 +30,7 @@ Invariants and flow:
 
 Tests cover diagnostics, grouping, Unicode grapheme handling, stale suppression, and the major
 overlay render paths used by the language UI.
+# Contextual overlays
+
+Language surfaces expose payload-preserving completion items plus anchored contextual overlay
+placement for completion, hover, signature, Quick Fix, rename, navigation, references and symbols.

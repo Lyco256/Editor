@@ -129,6 +129,56 @@ impl SelectionSet {
         self.selections.is_empty()
     }
 
+    /// Returns a set with one additional cursor while keeping the primary cursor distinguished.
+    pub fn with_cursor(&self, cursor: Selection) -> Result<Self> {
+        let primary = self.primary();
+        let mut selections = self.selections.clone();
+        selections.push(cursor);
+        let index = selections
+            .iter()
+            .position(|selection| *selection == primary)
+            .unwrap_or(0);
+        Self::new(selections, index)
+    }
+
+    /// Removes the last non-primary cursor, leaving at least the primary selection intact.
+    pub fn without_last_cursor(&self) -> Result<Self> {
+        if self.selections.len() <= 1 {
+            return Ok(self.clone());
+        }
+        let mut selections = self.selections.clone();
+        let Some(removed) = selections.pop() else {
+            return Ok(self.clone());
+        };
+        let primary = if removed == self.primary() {
+            selections.last().copied().unwrap_or(self.primary())
+        } else {
+            self.primary()
+        };
+        let index = selections
+            .iter()
+            .position(|selection| *selection == primary)
+            .unwrap_or(0);
+        Self::new(selections, index)
+    }
+
+    /// Collapses all selections to their active endpoints and retains the primary endpoint.
+    pub fn collapse(&self) -> Result<Self> {
+        let primary = self.primary();
+        let selections = self
+            .selections
+            .iter()
+            .copied()
+            .map(|selection| Selection::cursor(selection.active))
+            .collect::<Vec<_>>();
+        let primary_cursor = Selection::cursor(primary.active);
+        let index = selections
+            .iter()
+            .position(|selection| *selection == primary_cursor)
+            .unwrap_or(0);
+        Self::new(selections, index)
+    }
+
     pub(crate) fn mapped(&self, mut mapper: impl FnMut(Selection) -> Selection) -> Result<Self> {
         Self::new(
             self.selections.iter().copied().map(&mut mapper).collect(),

@@ -24,3 +24,7 @@ replace-all is one undoable transaction and invalid expressions surface typed ou
 `RequestFileOperation` creates a typed create/rename/move/delete confirmation prompt;
 `ConfirmFileOperation` is the only action that emits the corresponding background filesystem
 effect, while `CancelFileOperation` drops the pending plan.
+# MVP root actions
+
+The root action vocabulary includes lifecycle, pane/viewport/fold focus, split and Unicode-safe
+multi-cursor operations so keyboard, mouse and palette inputs converge on one transition path.

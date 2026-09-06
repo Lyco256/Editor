@@ -54,6 +54,7 @@ pub struct SemanticMarkerSet {
     pub language: Vec<MarkerSpan>,
     pub git: Vec<MarkerSpan>,
     pub search: Vec<MarkerSpan>,
+    pub diagnostics: Vec<MarkerSpan>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -136,6 +137,8 @@ impl EditorStatusData {
 
 #[derive(Debug, Clone)]
 pub struct EditorViewportState {
+    /// Stable root-assigned pane id used by shell hit testing and focus routing.
+    pub pane_id: u32,
     pub title: String,
     pub snapshot: TextSnapshot,
     pub viewport: TextViewport,
@@ -150,6 +153,7 @@ pub struct EditorViewportState {
     pub status: EditorStatusData,
     pub show_line_numbers: bool,
     pub tab_width: usize,
+    pub overview_whole_document: bool,
 }
 
 impl EditorViewportState {
@@ -541,10 +545,23 @@ impl EditorViewportState {
         let column = area.right().saturating_sub(1);
         let total_lines = parse_lines(&self.snapshot).len().max(1);
         for row in 0..area.height {
-            let line_index = (self.viewport.top_line as usize)
-                .saturating_add(usize::from(row))
-                .min(total_lines - 1);
+            let line_index = if self.overview_whole_document {
+                usize::from(row)
+                    .saturating_mul(total_lines)
+                    .checked_div(usize::from(area.height).max(1))
+                    .unwrap_or(0)
+                    .min(total_lines - 1)
+            } else {
+                self.viewport
+                    .top_line
+                    .saturating_add(u32::from(row))
+                    .try_into()
+                    .unwrap_or(total_lines - 1)
+                    .min(total_lines - 1)
+            };
             let marker = overview_marker_for_line(
+                &self.snapshot,
+                self.overview_whole_document,
                 u32::try_from(line_index).unwrap_or(u32::MAX),
                 &self.markers,
                 &self.search_matches,
@@ -575,6 +592,23 @@ impl EditorViewportState {
         }
         if self.range_hits_any_ranges(&range, &self.bracket_matches) {
             return GlyphStyle::new(StyleRole::SyntaxKeyword, row_background, true);
+        }
+        if let Some(marker) = self
+            .markers
+            .diagnostics
+            .iter()
+            .find(|marker| intersects(range, marker.range))
+        {
+            let role = match marker.kind {
+                MarkerKind::Error => StyleRole::Error,
+                MarkerKind::Warning => StyleRole::Warning,
+                MarkerKind::Information => StyleRole::Information,
+                MarkerKind::Hint => StyleRole::Hint,
+                _ => StyleRole::EditorText,
+            };
+            if role != StyleRole::EditorText {
+                return GlyphStyle::new(role, row_background, false);
+            }
         }
         if let Some((_, role)) = self
             .syntax_spans
@@ -702,6 +736,8 @@ fn gutter_marker(line: u32, current: bool, folds: &FoldSet) -> &'static str {
 }
 
 fn overview_marker_for_line(
+    snapshot: &TextSnapshot,
+    whole_document: bool,
     line: u32,
     markers: &SemanticMarkerSet,
     search_matches: &[TextRange],
@@ -718,7 +754,7 @@ fn overview_marker_for_line(
         .chain(markers.git.iter())
         .chain(markers.search.iter())
     {
-        if range_contains_line(marker.range, line) {
+        if range_contains_line(snapshot, whole_document, marker.range, line) {
             best = Some(match marker.kind {
                 MarkerKind::Error => "E",
                 MarkerKind::Warning => "W",
@@ -737,23 +773,39 @@ fn overview_marker_for_line(
     if best.is_none()
         && search_matches
             .iter()
-            .any(|range| range_contains_line(*range, line))
+            .any(|range| range_contains_line(snapshot, whole_document, *range, line))
     {
         best = Some("S");
     }
     if best.is_none()
         && bracket_matches
             .iter()
-            .any(|range| range_contains_line(*range, line))
+            .any(|range| range_contains_line(snapshot, whole_document, *range, line))
     {
         best = Some("B");
     }
     best.unwrap_or(" ")
 }
 
-fn range_contains_line(range: TextRange, line: u32) -> bool {
-    let start = u32::try_from(range.start.0).unwrap_or(u32::MAX);
-    let end = u32::try_from(range.end.0.max(range.start.0)).unwrap_or(u32::MAX);
+fn range_contains_line(
+    snapshot: &TextSnapshot,
+    whole_document: bool,
+    range: TextRange,
+    line: u32,
+) -> bool {
+    if !whole_document {
+        let start = u32::try_from(range.start.0).unwrap_or(u32::MAX);
+        let end = u32::try_from(range.end.0.max(range.start.0)).unwrap_or(u32::MAX);
+        return line >= start && line <= end;
+    }
+    let start = snapshot
+        .offset_to_position(range.start)
+        .ok()
+        .map_or(u32::MAX, |p| p.line);
+    let end = snapshot
+        .offset_to_position(range.end)
+        .ok()
+        .map_or(start, |p| p.line);
     line >= start && line <= end
 }
 
@@ -869,6 +921,7 @@ mod tests {
         let mut collapsed = folds.clone();
         collapsed.toggle_at(1);
         EditorViewportState {
+            pane_id: 0,
             title: String::from("sample.rs"),
             snapshot,
             viewport: TextViewport {
@@ -899,6 +952,7 @@ mod tests {
                     },
                     kind: MarkerKind::Match,
                 }],
+                diagnostics: Vec::new(),
             },
             syntax_spans: Vec::new(),
             search_matches: vec![TextRange {
@@ -932,6 +986,7 @@ mod tests {
             },
             show_line_numbers: true,
             tab_width: 4,
+            overview_whole_document: false,
         }
     }
 

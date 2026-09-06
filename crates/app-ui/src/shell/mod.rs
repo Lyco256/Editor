@@ -5,11 +5,13 @@
 //! framebuffer output and normalized UI actions without performing any external I/O.
 #![allow(
     clippy::bool_to_int_with_if,
+    clippy::comparison_chain,
     clippy::if_not_else,
     clippy::large_enum_variant,
     clippy::manual_clamp,
     clippy::match_same_arms,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    clippy::self_only_used_in_recursion
 )]
 
 use editor_types::{
@@ -405,7 +407,7 @@ impl ShellState {
                         self.palette.select_index(index);
                         vec![ShellAction::PaletteSelected(index)]
                     }
-                    ShellHit::Editor => vec![ShellAction::FocusEditor],
+                    ShellHit::Editor(pane_id) => vec![ShellAction::FocusPane(pane_id)],
                     ShellHit::StatusBar => vec![ShellAction::FocusStatusBar],
                     ShellHit::None => Vec::new(),
                 }
@@ -668,9 +670,88 @@ impl ShellState {
             }
         }
         if layout.editor.contains(column, row) {
-            return ShellHit::Editor;
+            return self.editor_hit(&self.root, layout.editor, column, row);
         }
         ShellHit::None
+    }
+
+    fn editor_hit(&self, node: &PaneNode, rect: Rect, column: u16, row: u16) -> ShellHit {
+        if !rect.contains(column, row) {
+            return ShellHit::None;
+        }
+        match node {
+            PaneNode::Leaf(viewport) => ShellHit::Editor(viewport.pane_id),
+            PaneNode::Split {
+                axis,
+                ratio_percent,
+                first,
+                second,
+            } => {
+                let inner = rect.inset(1, 1).unwrap_or(rect);
+                match axis {
+                    SplitAxis::Vertical => {
+                        let left_width = inner
+                            .width
+                            .saturating_mul(*ratio_percent)
+                            .saturating_div(100)
+                            .max(1);
+                        let divider = inner.x.saturating_add(left_width);
+                        if column < divider {
+                            self.editor_hit(
+                                first,
+                                Rect::new(inner.x, inner.y, left_width, inner.height),
+                                column,
+                                row,
+                            )
+                        } else if column > divider {
+                            self.editor_hit(
+                                second,
+                                Rect::new(
+                                    divider.saturating_add(1),
+                                    inner.y,
+                                    inner.width.saturating_sub(left_width).saturating_sub(1),
+                                    inner.height,
+                                ),
+                                column,
+                                row,
+                            )
+                        } else {
+                            ShellHit::None
+                        }
+                    }
+                    SplitAxis::Horizontal => {
+                        let top_height = inner
+                            .height
+                            .saturating_mul(*ratio_percent)
+                            .saturating_div(100)
+                            .max(1);
+                        let divider = inner.y.saturating_add(top_height);
+                        if row < divider {
+                            self.editor_hit(
+                                first,
+                                Rect::new(inner.x, inner.y, inner.width, top_height),
+                                column,
+                                row,
+                            )
+                        } else if row > divider {
+                            self.editor_hit(
+                                second,
+                                Rect::new(
+                                    inner.x,
+                                    divider.saturating_add(1),
+                                    inner.width,
+                                    inner.height.saturating_sub(top_height).saturating_sub(1),
+                                ),
+                                column,
+                                row,
+                            )
+                        } else {
+                            ShellHit::None
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -690,6 +771,7 @@ pub enum ShellAction {
     PaletteQueryChanged(String),
     RunCommand(editor_types::CommandId),
     FocusEditor,
+    FocusPane(u32),
     FocusStatusBar,
     ClearFocus,
     DragSplit,
@@ -702,7 +784,7 @@ enum ShellHit {
     Explorer(usize),
     Bottom(usize),
     Palette(usize),
-    Editor,
+    Editor(u32),
     StatusBar,
 }
 
@@ -820,6 +902,7 @@ mod tests {
         let mut collapsed = folds.clone();
         collapsed.toggle_at(1);
         EditorViewportState {
+            pane_id: 0,
             title: String::from("main.rs"),
             snapshot: buffer.snapshot(),
             viewport: TextViewport::default(),
@@ -847,6 +930,7 @@ mod tests {
                     },
                     kind: MarkerKind::Match,
                 }],
+                diagnostics: Vec::new(),
             },
             syntax_spans: Vec::new(),
             search_matches: vec![editor_core::TextRange {
@@ -880,6 +964,7 @@ mod tests {
             },
             show_line_numbers: true,
             tab_width: 4,
+            overview_whole_document: false,
         }
     }
 

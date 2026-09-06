@@ -9,7 +9,6 @@ use app_ui::{
         BottomPanelState, ExplorerState, PaneNode, PanelEntry, ShellFocus, ShellState, TabEntry,
     },
 };
-use editor_core::TextBuffer;
 use editor_types::{OutputLevel, StyleRole};
 use terminal_backend::{Framebuffer, InputReader, TerminalAdapter};
 use thiserror::Error;
@@ -192,7 +191,18 @@ fn frame_for_state(
     capabilities: editor_types::TerminalCapabilities,
 ) -> Framebuffer {
     let mut frame = empty_frame(size.0, size.1);
-    let buffer = TextBuffer::new(&state.active_text);
+    // The active tab buffer is authoritative. `active_text` is a projection used by recovery and
+    // serialization; reconstructing a TextBuffer here would reset selections and undo history on
+    // every frame.
+    let buffer = state
+        .tabs
+        .get(state.active_tab)
+        .map_or(&state.buffer, |tab| &tab.buffer);
+    let snapshot = if state.active_text == buffer.snapshot().text() {
+        buffer.snapshot()
+    } else {
+        editor_core::TextSnapshot::from_text(state.active_text.clone())
+    };
     let file_name = state
         .active_path
         .as_ref()
@@ -242,18 +252,24 @@ fn frame_for_state(
         .collect::<Vec<_>>();
     let mut language_markers = diagnostic_markers.clone();
     language_markers.extend(syntax_error_markers);
-    let mut folds = editor_core::FoldSet::default();
-    let fold_regions = state
-        .syntax_snapshot
-        .folds
+    let mut folds = state
+        .panes
         .iter()
-        .filter_map(|range| {
-            let start = buffer.offset_to_position(range.start).ok()?.line;
-            let end = buffer.offset_to_position(range.end).ok()?.line;
-            editor_core::FoldRegion::new(start, end).ok()
-        })
-        .collect::<Vec<_>>();
-    folds.set_regions(fold_regions);
+        .find(|pane| pane.id == state.focused_pane)
+        .map_or_else(editor_core::FoldSet::default, |pane| pane.folds.clone());
+    if folds.regions().is_empty() {
+        let fold_regions = state
+            .syntax_snapshot
+            .folds
+            .iter()
+            .filter_map(|range| {
+                let start = buffer.offset_to_position(range.start).ok()?.line;
+                let end = buffer.offset_to_position(range.end).ok()?.line;
+                editor_core::FoldRegion::new(start, end).ok()
+            })
+            .collect::<Vec<_>>();
+        folds.set_regions(fold_regions);
+    }
     let mut syntax_spans = state
         .language_ui
         .semantic
@@ -314,6 +330,24 @@ fn frame_for_state(
             Some(editor_core::TextRange { start, end })
         })
         .collect::<Vec<_>>();
+    let primary = buffer.selections().primary();
+    let cursor_position = buffer
+        .offset_to_position(primary.active)
+        .unwrap_or_default();
+    let selection_summary = if buffer.selections().len() > 1 {
+        format!("{} cursors", buffer.selections().len())
+    } else if primary.is_cursor() {
+        String::from("1 cursor")
+    } else {
+        format!(
+            "{} chars selected",
+            primary
+                .range()
+                .end
+                .0
+                .saturating_sub(primary.range().start.0)
+        )
+    };
     let status = EditorStatusData {
         file_name: file_name.clone(),
         dirty: state.active_dirty,
@@ -349,16 +383,25 @@ fn frame_for_state(
             String::from("tabs")
         },
         indent_size: u8::try_from(state.tab_width).unwrap_or(u8::MAX),
+        cursor_line: cursor_position.line.saturating_add(1),
+        cursor_column: cursor_position.character.saturating_add(1),
+        selection_summary,
         ..EditorStatusData::default()
     };
     let viewport = EditorViewportState {
+        pane_id: state.focused_pane,
         title: file_name,
-        snapshot: buffer.snapshot(),
-        viewport: app_ui::editor::TextViewport::default(),
+        snapshot,
+        viewport: state
+            .panes
+            .iter()
+            .find(|pane| pane.id == state.focused_pane)
+            .map_or_else(app_ui::editor::TextViewport::default, |pane| pane.viewport),
         selections: buffer.selections().clone(),
         folds: folds.clone(),
         markers: SemanticMarkerSet {
             language: language_markers.clone(),
+            diagnostics: diagnostic_markers,
             ..SemanticMarkerSet::default()
         },
         syntax_spans,
@@ -367,6 +410,7 @@ fn frame_for_state(
         status: status.clone(),
         show_line_numbers: state.show_line_numbers,
         tab_width: state.tab_width,
+        overview_whole_document: true,
     };
     let roots = state
         .workspace_roots
@@ -456,11 +500,24 @@ fn frame_for_state(
                     |name| name.to_string_lossy().into_owned(),
                 );
             EditorViewportState {
+                pane_id: 1,
                 title,
                 snapshot: tab.buffer.snapshot(),
-                viewport: app_ui::editor::TextViewport::default(),
+                viewport: state
+                    .panes
+                    .iter()
+                    .find(|pane| {
+                        pane.displayed_tab == state.split_secondary_tab.unwrap_or(usize::MAX)
+                    })
+                    .map_or_else(app_ui::editor::TextViewport::default, |pane| pane.viewport),
                 selections: tab.buffer.selections().clone(),
-                folds: folds.clone(),
+                folds: state
+                    .panes
+                    .iter()
+                    .find(|pane| {
+                        pane.displayed_tab == state.split_secondary_tab.unwrap_or(usize::MAX)
+                    })
+                    .map_or_else(|| folds.clone(), |pane| pane.folds.clone()),
                 markers: SemanticMarkerSet {
                     language: language_markers,
                     ..SemanticMarkerSet::default()
@@ -471,6 +528,7 @@ fn frame_for_state(
                 status: status.clone(),
                 show_line_numbers: state.show_line_numbers,
                 tab_width: state.tab_width,
+                overview_whole_document: true,
             }
         });
     let root = match (state.split_axis, second_viewport) {

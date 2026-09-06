@@ -44,3 +44,7 @@ Tests:
 - palette filtering and activation selection
 - framebuffer semantic snapshot formatting
 - theme depth mapping for true-color and reduced-color output
+# Generic picker and command registry
+
+`GenericPicker` provides typed stable rows, query filtering, bounded selection, accept and cancel;
+`CommandRegistry` is the shared registration surface for palette and keybinding routes.

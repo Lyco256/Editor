@@ -234,12 +234,14 @@ impl QuickOpenState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchOptionsView {
     pub literal: bool,
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub max_results: Option<usize>,
+    pub include: Option<String>,
+    pub exclude: Option<String>,
 }
 
 impl Default for SearchOptionsView {
@@ -249,6 +251,8 @@ impl Default for SearchOptionsView {
             case_sensitive: false,
             whole_word: false,
             max_results: None,
+            include: None,
+            exclude: None,
         }
     }
 }
@@ -415,6 +419,38 @@ pub struct WorkspaceUiState {
     pub recent_workspaces: Vec<PathBuf>,
     pub trust: WorkspaceTrustState,
     pub prompt: Option<WorkspacePrompt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentWorkspaceRow {
+    pub id: String,
+    pub path: PathBuf,
+    pub exists: bool,
+}
+
+impl WorkspaceUiState {
+    /// Returns stable, typed recent-workspace rows with missing-path state preserved for UI.
+    #[must_use]
+    pub fn recent_rows(&self) -> Vec<RecentWorkspaceRow> {
+        self.recent_workspaces
+            .iter()
+            .map(|path| RecentWorkspaceRow {
+                id: path.to_string_lossy().into_owned(),
+                path: path.clone(),
+                exists: path.is_dir(),
+            })
+            .collect()
+    }
+
+    pub fn remove_recent(&mut self, path: &Path) {
+        self.recent_workspaces.retain(|item| item != path);
+    }
+
+    pub fn remember_workspace(&mut self, path: PathBuf) {
+        self.recent_workspaces.retain(|item| item != &path);
+        self.recent_workspaces.insert(0, path);
+        self.recent_workspaces.truncate(20);
+    }
 }
 
 impl Default for WorkspaceUiState {

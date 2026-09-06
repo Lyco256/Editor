@@ -49,3 +49,7 @@ Tests:
 - compact shell layout behavior
 - keyboard and mouse action routing
 - 120x40 framebuffer snapshot covering tabs, explorer, split panes, bottom panel, and status bar
+# Pane routing
+
+Editor leaves carry stable pane ids; recursive hit testing returns `FocusPane(id)` so nested split
+geometry can route keyboard and mouse focus without relying on tab labels.

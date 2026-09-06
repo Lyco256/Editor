@@ -33,6 +33,14 @@ pub struct TextSnapshot {
 }
 
 impl TextSnapshot {
+    /// Creates an immutable snapshot for compatibility projections (without edit history).
+    #[must_use]
+    pub fn from_text(text: impl Into<Arc<str>>) -> Self {
+        Self {
+            text: text.into(),
+            version: 0,
+        }
+    }
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
@@ -452,6 +460,107 @@ impl TextBuffer {
         self.selections = SelectionSet::new(moved, self.selections.primary_index())?;
         Ok(())
     }
+
+    /// Adds a cursor at a character offset without changing the primary selection.
+    pub fn add_cursor_at(&mut self, offset: CharacterOffset) -> Result<()> {
+        let selection = Selection::cursor(offset);
+        self.set_selections(self.selections.with_cursor(selection)?)
+    }
+
+    /// Adds a vertically aligned cursor above the primary cursor.
+    pub fn add_cursor_above(&mut self, tab_width: usize) -> Result<()> {
+        self.add_cursor_vertical(-1, tab_width)
+    }
+
+    /// Adds a vertically aligned cursor below the primary cursor.
+    pub fn add_cursor_below(&mut self, tab_width: usize) -> Result<()> {
+        self.add_cursor_vertical(1, tab_width)
+    }
+
+    fn add_cursor_vertical(&mut self, delta: i32, tab_width: usize) -> Result<()> {
+        let snapshot = self.snapshot();
+        let primary = self.selections.primary();
+        let position = snapshot.offset_to_position(primary.active)?;
+        let column = snapshot.display_column(primary.active, tab_width)?;
+        let target_line = i64::from(position.line).saturating_add(i64::from(delta));
+        if target_line < 0
+            || target_line >= i64::try_from(snapshot.line_count()).unwrap_or(i64::MAX)
+        {
+            return Ok(());
+        }
+        let offset = snapshot.offset_for_display_column(
+            u32::try_from(target_line).unwrap_or(u32::MAX),
+            column,
+            tab_width,
+        )?;
+        self.add_cursor_at(offset)
+    }
+
+    /// Removes the last cursor while preserving the primary cursor when possible.
+    pub fn remove_last_cursor(&mut self) -> Result<()> {
+        self.set_selections(self.selections.without_last_cursor()?)
+    }
+
+    /// Collapses every selection to its active endpoint.
+    pub fn collapse_selections(&mut self) -> Result<()> {
+        self.set_selections(self.selections.collapse()?)
+    }
+
+    /// Selects the next occurrence of `query`, wrapping at the end of the document.
+    pub fn select_next_occurrence(
+        &mut self,
+        query: &str,
+        options: crate::FindOptions,
+        skip: bool,
+    ) -> Result<bool> {
+        let matches = self.find(query, options)?;
+        if matches.is_empty() {
+            return Ok(false);
+        }
+        let primary = self.selections.primary().range();
+        let Some(next) = matches
+            .iter()
+            .find(|matched| matched.range.start > primary.end)
+            .or_else(|| matches.first())
+            .copied()
+        else {
+            return Ok(false);
+        };
+        if skip {
+            return Ok(true);
+        }
+        self.set_selections(
+            self.selections
+                .with_cursor(Selection::new(next.range.start, next.range.end))?,
+        )?;
+        Ok(true)
+    }
+
+    /// Selects every occurrence of `query` as one normalized multi-selection set.
+    pub fn select_all_occurrences(
+        &mut self,
+        query: &str,
+        options: crate::FindOptions,
+    ) -> Result<usize> {
+        let matches = self.find(query, options)?;
+        if matches.is_empty() {
+            return Ok(0);
+        }
+        let primary = self.selections.primary();
+        let mut selections = matches
+            .iter()
+            .map(|matched| Selection::new(matched.range.start, matched.range.end))
+            .collect::<Vec<_>>();
+        let primary_index = selections
+            .iter()
+            .position(|selection| *selection == primary)
+            .unwrap_or(0);
+        self.set_selections(SelectionSet::new(
+            std::mem::take(&mut selections),
+            primary_index,
+        )?)?;
+        Ok(matches.len())
+    }
 }
 
 impl fmt::Display for TextBuffer {
@@ -869,6 +978,28 @@ mod tests {
         assert_eq!(buffer.to_string(), "hello!");
         assert_eq!(buffer.selections(), &after);
         assert_eq!(buffer.version(), 3);
+    }
+
+    #[test]
+    fn multi_cursor_vertical_and_occurrence_selection_are_unicode_safe() {
+        let mut buffer = TextBuffer::new("écho\nécho\nécho");
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(1))))
+            .expect("selection");
+        buffer.add_cursor_below(4).expect("below cursor");
+        assert_eq!(buffer.selections().len(), 2);
+        let count = buffer
+            .select_all_occurrences("écho", crate::FindOptions::default())
+            .expect("occurrences");
+        assert_eq!(count, 3);
+        buffer.collapse_selections().expect("collapse");
+        assert!(
+            buffer
+                .selections()
+                .selections()
+                .iter()
+                .all(|selection| selection.is_cursor())
+        );
     }
 
     #[test]

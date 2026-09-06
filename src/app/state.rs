@@ -96,6 +96,9 @@ pub struct AppState {
     /// Persistent editor buffer backing the active document. The public text fields remain a
     /// lightweight projection for views and recovery serialization.
     pub(crate) buffer: TextBuffer,
+    /// Stable pane records; viewport and fold state survive frame construction.
+    pub(crate) panes: Vec<PaneState>,
+    pub(crate) focused_pane: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +136,28 @@ pub struct TabState {
     pub encoding: workspace_core::EncodingKind,
     pub with_bom: bool,
     pub line_endings: workspace_core::LineEndings,
+}
+
+/// Stable editor pane identity and persistent per-pane view state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneState {
+    pub id: u32,
+    pub displayed_tab: usize,
+    pub viewport: app_ui::editor::TextViewport,
+    pub folds: editor_core::FoldSet,
+    pub focused: bool,
+}
+
+impl PaneState {
+    fn new(id: u32, displayed_tab: usize, focused: bool) -> Self {
+        Self {
+            id,
+            displayed_tab,
+            viewport: app_ui::editor::TextViewport::default(),
+            folds: editor_core::FoldSet::default(),
+            focused,
+        }
+    }
 }
 
 impl TabState {
@@ -863,6 +888,8 @@ impl Default for AppState {
             input_mode: None,
             input_buffer: String::new(),
             palette: CommandPaletteState::new(vec![
+                CommandEntry::available("workbench.newFile", "New File"),
+                CommandEntry::available("workbench.openFolder", "Open Folder"),
                 CommandEntry::available("editor.save", "Save"),
                 CommandEntry::available("editor.undo", "Undo"),
                 CommandEntry::available("editor.redo", "Redo"),
@@ -874,6 +901,11 @@ impl Default for AppState {
                 CommandEntry::available("workbench.quickOpen", "Quick Open"),
                 CommandEntry::available("workspace.search", "Search Workspace"),
                 CommandEntry::available("editor.expandSelection", "Expand Selection"),
+                CommandEntry::available("editor.addCursorAbove", "Add Cursor Above"),
+                CommandEntry::available("editor.addCursorBelow", "Add Cursor Below"),
+                CommandEntry::available("editor.removeLastCursor", "Remove Last Cursor"),
+                CommandEntry::available("editor.collapseCursors", "Collapse Cursors"),
+                CommandEntry::available("editor.selectAllOccurrences", "Select All Occurrences"),
                 CommandEntry::available("editor.toggleLineComment", "Toggle Line Comment"),
                 CommandEntry::available("editor.toggleBlockComment", "Toggle Block Comment"),
                 CommandEntry::available("editor.insertSnippet", "Insert Snippet"),
@@ -889,6 +921,11 @@ impl Default for AppState {
                 CommandEntry::available("workbench.splitVertical", "Split Editor Vertical"),
                 CommandEntry::available("workbench.splitHorizontal", "Split Editor Horizontal"),
                 CommandEntry::available("workbench.closeSplit", "Close Editor Split"),
+                CommandEntry::available("workbench.closeActiveEditor", "Close Active Editor"),
+                CommandEntry::available("workbench.closeOtherEditors", "Close Other Editors"),
+                CommandEntry::available("workbench.nextEditor", "Next Editor"),
+                CommandEntry::available("workbench.previousEditor", "Previous Editor"),
+                CommandEntry::available("workbench.openRecent", "Open Recent Workspace"),
                 CommandEntry::available("workbench.showProblems", "Show Problems"),
                 CommandEntry::available("workbench.showGit", "Show Source Control"),
                 CommandEntry::available("workbench.showOutput", "Show Output"),
@@ -958,12 +995,69 @@ impl Default for AppState {
             latest_explorer_request: None,
             mouse_anchor: None,
             buffer: TextBuffer::default(),
+            panes: vec![PaneState::new(0, 0, true)],
+            focused_pane: 0,
         }
     }
 }
 
 impl AppState {
+    /// Returns the focused pane's stable record.
+    #[must_use]
+    pub fn focused_pane(&self) -> Option<&PaneState> {
+        self.panes
+            .iter()
+            .find(|pane| pane.id == self.focused_pane)
+            .or_else(|| self.panes.first())
+    }
+
+    /// Focuses a pane by stable id and keeps exactly one focused pane.
+    pub fn focus_pane(&mut self, id: u32) -> bool {
+        if !self.panes.iter().any(|pane| pane.id == id) {
+            return false;
+        }
+        self.focused_pane = id;
+        for pane in &mut self.panes {
+            pane.focused = pane.id == id;
+        }
+        true
+    }
+
+    /// Toggles the fold starting at `line` in the focused pane.
+    pub fn toggle_fold(&mut self, line: u32) -> bool {
+        self.panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+            .is_some_and(|pane| pane.folds.toggle_at(line))
+    }
+
+    /// Unfolds the region containing a logical line in the focused pane.
+    pub fn unfold_containing(&mut self, line: u32) {
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+        {
+            pane.folds.unfold_containing(line);
+        }
+    }
+
+    /// Updates the focused pane viewport using bounded values.
+    pub fn set_viewport(&mut self, top_line: u32, left_column: u16) {
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+        {
+            pane.viewport = app_ui::editor::TextViewport {
+                top_line,
+                left_column,
+            };
+        }
+    }
+
     /// Applies an editor-view action through the same root transition path used by terminal input.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_editor_action(&mut self, action: app_ui::editor::EditorAction) -> Transition {
         use app_ui::editor::EditorAction;
         match action {
@@ -1047,10 +1141,38 @@ impl AppState {
                     ..Transition::default()
                 }
             }
-            EditorAction::ToggleFold { .. } | EditorAction::Scroll { .. } => Transition {
-                render: true,
-                ..Transition::default()
-            },
+            EditorAction::ToggleFold { line } => self.apply_action(Action::ToggleFold { line }),
+            EditorAction::Scroll {
+                line_delta,
+                column_delta,
+            } => {
+                let pane = self.focused_pane().cloned();
+                if let Some(pane) = pane {
+                    let top_line = if line_delta.is_negative() {
+                        pane.viewport
+                            .top_line
+                            .saturating_sub(line_delta.unsigned_abs())
+                    } else {
+                        pane.viewport
+                            .top_line
+                            .saturating_add(line_delta.unsigned_abs())
+                    };
+                    let left_column = if column_delta.is_negative() {
+                        pane.viewport.left_column.saturating_sub(
+                            u16::try_from(column_delta.unsigned_abs()).unwrap_or(u16::MAX),
+                        )
+                    } else {
+                        pane.viewport.left_column.saturating_add(
+                            u16::try_from(column_delta.unsigned_abs()).unwrap_or(u16::MAX),
+                        )
+                    };
+                    self.set_viewport(top_line, left_column);
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
         }
     }
 
@@ -2399,6 +2521,30 @@ impl AppState {
             case_sensitive: options.case_sensitive,
             whole_word: options.whole_word,
             max_results: options.max_results,
+            includes: options
+                .include
+                .as_deref()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            excludes: options
+                .exclude
+                .as_deref()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             ..workspace_core::SearchOptions::default()
         };
         self.workspace_ui
@@ -2965,6 +3111,9 @@ impl AppState {
             self.tabs = vec![TabState::untitled()];
             self.active_tab = 0;
             self.workspace_roots = self.active_path.iter().cloned().collect();
+            if let Some(root) = self.workspace_roots.first().cloned() {
+                self.workspace_ui.remember_workspace(root);
+            }
             self.refresh_workspace_trust();
             self.refresh_explorer_entries();
             self.active_text.clear();
@@ -3568,6 +3717,110 @@ impl AppState {
                 }
                 self.explorer_refresh_transition()
             }
+            Action::OpenFolder(path) => {
+                if path.is_dir() {
+                    self.workspace_roots = vec![path.clone()];
+                    self.active_path = Some(path);
+                    if let Some(root) = self.workspace_roots.first().cloned() {
+                        self.workspace_ui.remember_workspace(root);
+                    }
+                    self.refresh_workspace_trust();
+                    self.refresh_explorer_entries();
+                } else {
+                    self.output.push(OutputMessage {
+                        subsystem: "workspace".to_owned(),
+                        operation: "open-folder".to_owned(),
+                        level: OutputLevel::Error,
+                        message: "selected path is not a folder".to_owned(),
+                    });
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::NewFile => {
+                if self.active_dirty {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "new-file".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: "save or discard the active buffer before creating a new file"
+                            .to_owned(),
+                    });
+                } else {
+                    self.tabs.push(TabState::untitled());
+                    self.active_tab = self.tabs.len().saturating_sub(1);
+                    self.active_path = None;
+                    self.buffer = TextBuffer::default();
+                    self.sync_buffer_projection();
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::Save => Transition {
+                effects: self.apply_command("editor.save").into_iter().collect(),
+                render: true,
+                ..Transition::default()
+            },
+            Action::CloseActive => self.apply_action_inner(Action::CloseTab(self.active_tab)),
+            Action::CloseOtherTabs => {
+                let active = self.active_tab;
+                let dirty_other = self
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .any(|(index, tab)| index != active && tab.buffer.is_dirty());
+                if dirty_other {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "close-other-tabs".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: "unsaved changes prevent closing other tabs".to_owned(),
+                    });
+                } else {
+                    let active_tab = self
+                        .tabs
+                        .get(active)
+                        .cloned()
+                        .unwrap_or_else(TabState::untitled);
+                    self.tabs = vec![active_tab];
+                    self.active_tab = 0;
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::NextTab => {
+                if !self.tabs.is_empty() {
+                    self.switch_tab((self.active_tab + 1) % self.tabs.len());
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::PreviousTab => {
+                if !self.tabs.is_empty() {
+                    self.switch_tab((self.active_tab + self.tabs.len() - 1) % self.tabs.len());
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::QuickOpenRecent => {
+                if let Some(path) = self.workspace_ui.recent_workspaces.first().cloned() {
+                    self.open_startup_path(path);
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
             Action::ReopenWithEncoding(encoding) => self.reopen_with_encoding(&encoding),
             Action::SetEncoding { encoding, with_bom } => {
                 self.sync_active_tab();
@@ -3674,6 +3927,12 @@ impl AppState {
                         .unwrap_or(self.active_tab)
                         .min(self.tabs.len().saturating_sub(1)),
                 );
+                if self.panes.len() < 2 {
+                    let secondary = self.split_secondary_tab.unwrap_or(self.active_tab);
+                    self.panes.push(PaneState::new(1, secondary, false));
+                } else if let Some(pane) = self.panes.get_mut(1) {
+                    pane.displayed_tab = self.split_secondary_tab.unwrap_or(self.active_tab);
+                }
                 Transition {
                     render: true,
                     ..Transition::default()
@@ -3682,6 +3941,8 @@ impl AppState {
             Action::CloseSplit => {
                 self.split_axis = None;
                 self.split_secondary_tab = None;
+                self.panes.truncate(1);
+                self.focus_pane(0);
                 Transition {
                     render: true,
                     ..Transition::default()
@@ -3691,6 +3952,137 @@ impl AppState {
                 if self.split_axis.is_some() {
                     self.split_ratio_percent = ratio_percent.clamp(10, 90);
                 }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::ToggleFold { line } => {
+                self.toggle_fold(line);
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::UnfoldContaining { line } => {
+                self.unfold_containing(line);
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::UnfoldAll => {
+                for pane in &mut self.panes {
+                    for region in pane.folds.regions().to_vec() {
+                        pane.folds.unfold_containing(region.end_line);
+                    }
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::FocusPane(id) => {
+                self.focus_pane(id);
+                if let Some(pane) = self.panes.iter().find(|pane| pane.id == id) {
+                    if pane.displayed_tab < self.tabs.len() && pane.displayed_tab != self.active_tab
+                    {
+                        self.switch_tab(pane.displayed_tab);
+                    }
+                }
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::SetViewport {
+                top_line,
+                left_column,
+            } => {
+                self.set_viewport(top_line, left_column);
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::AddCursorAbove => {
+                if let Err(error) = self.buffer.add_cursor_above(self.tab_width) {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "add-cursor-above".to_owned(),
+                        level: OutputLevel::Error,
+                        message: error.to_string(),
+                    });
+                }
+                self.sync_buffer_projection();
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::AddCursorBelow => {
+                if let Err(error) = self.buffer.add_cursor_below(self.tab_width) {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "add-cursor-below".to_owned(),
+                        level: OutputLevel::Error,
+                        message: error.to_string(),
+                    });
+                }
+                self.sync_buffer_projection();
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::AddCursorAt(offset) => {
+                if let Err(error) = self.buffer.add_cursor_at(offset) {
+                    self.output.push(OutputMessage {
+                        subsystem: "editor".to_owned(),
+                        operation: "add-cursor".to_owned(),
+                        level: OutputLevel::Error,
+                        message: error.to_string(),
+                    });
+                }
+                self.sync_buffer_projection();
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::RemoveLastCursor => {
+                let _ = self.buffer.remove_last_cursor();
+                self.sync_buffer_projection();
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::CollapseCursors => {
+                let _ = self.buffer.collapse_selections();
+                self.sync_buffer_projection();
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::SelectNextOccurrence { query, skip } => {
+                let _ = self.buffer.select_next_occurrence(
+                    &query,
+                    editor_core::FindOptions::default(),
+                    skip,
+                );
+                self.sync_buffer_projection();
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::SelectAllOccurrences { query } => {
+                let _ = self
+                    .buffer
+                    .select_all_occurrences(&query, editor_core::FindOptions::default());
+                self.sync_buffer_projection();
                 Transition {
                     render: true,
                     ..Transition::default()
@@ -3947,6 +4339,32 @@ impl AppState {
         if let InputEvent::Key(ref key) = input {
             if let Some(mode) = self.input_mode.clone() {
                 return self.apply_input_mode(mode, key);
+            }
+            if key.modifiers.contains(Modifier::Control) && key.modifiers.contains(Modifier::Alt) {
+                let action = match key.code {
+                    KeyCode::Up => Some(Action::AddCursorAbove),
+                    KeyCode::Down => Some(Action::AddCursorBelow),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    self.apply_action_inner(action);
+                    self.sync_buffer_projection();
+                    return None;
+                }
+            }
+            if key.modifiers.contains(Modifier::Control) {
+                if let KeyCode::Character('d') = key.code {
+                    let query = self.buffer.selections().primary().range();
+                    if let Ok(text) = self.buffer.snapshot().text_in_range(query) {
+                        let _ = self.buffer.select_next_occurrence(
+                            text,
+                            editor_core::FindOptions::default(),
+                            false,
+                        );
+                        self.sync_buffer_projection();
+                    }
+                    return None;
+                }
             }
             if key.code == KeyCode::Character('e')
                 && key.modifiers.contains(Modifier::Control)
@@ -4472,6 +4890,32 @@ impl AppState {
     #[allow(clippy::too_many_lines, clippy::needless_return)]
     fn apply_command(&mut self, command: &str) -> Option<Effect> {
         match command {
+            "workbench.newFile" => {
+                let _ = self.apply_action_inner(Action::NewFile);
+            }
+            "workbench.openFolder" => {
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "open-folder".to_owned(),
+                    level: OutputLevel::Information,
+                    message: "choose a folder path with Open Folder".to_owned(),
+                });
+            }
+            "workbench.closeActiveEditor" => {
+                let _ = self.apply_action_inner(Action::CloseActive);
+            }
+            "workbench.closeOtherEditors" => {
+                let _ = self.apply_action_inner(Action::CloseOtherTabs);
+            }
+            "workbench.nextEditor" => {
+                let _ = self.apply_action_inner(Action::NextTab);
+            }
+            "workbench.previousEditor" => {
+                let _ = self.apply_action_inner(Action::PreviousTab);
+            }
+            "workbench.openRecent" => {
+                let _ = self.apply_action_inner(Action::QuickOpenRecent);
+            }
             "editor.undo" => {
                 let _ = self.buffer.undo();
             }
@@ -4547,6 +4991,22 @@ impl AppState {
             }
             "editor.expandSelection" => {
                 let _ = self.apply_editor_action(app_ui::editor::EditorAction::ExpandSelection);
+            }
+            "editor.addCursorAbove" => {
+                let _ = self.apply_action_inner(Action::AddCursorAbove);
+            }
+            "editor.addCursorBelow" => {
+                let _ = self.apply_action_inner(Action::AddCursorBelow);
+            }
+            "editor.removeLastCursor" => {
+                let _ = self.apply_action_inner(Action::RemoveLastCursor);
+            }
+            "editor.collapseCursors" => {
+                let _ = self.apply_action_inner(Action::CollapseCursors);
+            }
+            "editor.selectAllOccurrences" => {
+                let query = self.find_query.clone();
+                let _ = self.apply_action_inner(Action::SelectAllOccurrences { query });
             }
             "editor.toggleLineComment" => self.toggle_line_comment(),
             "editor.toggleBlockComment" => self.toggle_block_comment(),
@@ -4648,15 +5108,23 @@ impl AppState {
                 self.split_axis = Some(app_ui::shell::SplitAxis::Vertical);
                 self.split_ratio_percent = 50;
                 self.split_secondary_tab = Some(self.active_tab);
+                if self.panes.len() < 2 {
+                    self.panes.push(PaneState::new(1, self.active_tab, false));
+                }
             }
             "workbench.splitHorizontal" => {
                 self.split_axis = Some(app_ui::shell::SplitAxis::Horizontal);
                 self.split_ratio_percent = 50;
                 self.split_secondary_tab = Some(self.active_tab);
+                if self.panes.len() < 2 {
+                    self.panes.push(PaneState::new(1, self.active_tab, false));
+                }
             }
             "workbench.closeSplit" => {
                 self.split_axis = None;
                 self.split_secondary_tab = None;
+                self.panes.truncate(1);
+                self.focus_pane(0);
             }
             "workbench.showProblems" => {
                 self.bottom_panel_view = BottomPanelView::Problems;
@@ -5304,6 +5772,29 @@ impl AppState {
                     && ticket.version == self.buffer.snapshot().version()
                 {
                     self.syntax_snapshot = update.snapshot;
+                    for pane in &mut self.panes {
+                        let regions = self
+                            .syntax_snapshot
+                            .folds
+                            .iter()
+                            .filter_map(|range| {
+                                let start = self.buffer.offset_to_position(range.start).ok()?.line;
+                                let end = self.buffer.offset_to_position(range.end).ok()?.line;
+                                let collapsed = pane
+                                    .folds
+                                    .regions()
+                                    .iter()
+                                    .find(|old| old.start_line == start && old.end_line == end)
+                                    .is_some_and(|old| old.collapsed);
+                                Some(editor_core::FoldRegion {
+                                    start_line: start,
+                                    end_line: end,
+                                    collapsed,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        pane.folds.set_regions(regions);
+                    }
                 }
             }
             Event::SearchStarted {

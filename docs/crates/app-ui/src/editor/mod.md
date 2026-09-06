@@ -53,3 +53,8 @@ Tests:
 - line parsing and trailing empty-line handling
 - 80x24 framebuffer snapshot with folds, Unicode, selections, and overview markers
 - color-depth semantic summary output
+# MVP gap integration
+
+The viewport receives a stable `pane_id`, persistent viewport/fold state, diagnostic decoration
+spans, and an opt-in whole-document overview mapping. Selection styling remains higher priority
+than diagnostics and syntax.

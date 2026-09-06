@@ -14,6 +14,9 @@ Invariants:
 - The primary selection index always points to one of the stored selections.
 - Duplicate selections are removed during construction and mapping.
 
+The selection set also exposes cursor composition helpers (`with_cursor`, `without_last_cursor`,
+and `collapse`) so multi-cursor edits preserve a distinguished primary selection.
+
 Data flow:
 
 - Cursor and selection movement code builds new `Selection` values and then re-normalizes them

@@ -1,6 +1,6 @@
 //! Normalized user intent accepted by the root state machine.
 
-use editor_types::{CommandId, InputEvent};
+use editor_types::{CharacterOffset, CommandId, InputEvent};
 use std::path::PathBuf;
 
 use super::effect::Effect;
@@ -15,6 +15,14 @@ pub enum Action {
     Git(app_ui::git::GitAction),
     SetWorkspaceTrust(bool),
     OpenPath(PathBuf),
+    NewFile,
+    OpenFolder(PathBuf),
+    Save,
+    CloseActive,
+    CloseOtherTabs,
+    NextTab,
+    PreviousTab,
+    QuickOpenRecent,
     /// Reopens the active file with a user-selected codec after clean-buffer confirmation.
     ReopenWithEncoding(workspace_core::EncodingKind),
     /// Changes the codec used by the next save and marks the document dirty.
@@ -31,6 +39,32 @@ pub enum Action {
     },
     CloseSplit,
     SetSplitRatio(u16),
+    /// Editor viewport/fold and pane routing actions remain root-owned so keyboard and mouse
+    /// dispatch share one transition path.
+    ToggleFold {
+        line: u32,
+    },
+    UnfoldContaining {
+        line: u32,
+    },
+    UnfoldAll,
+    FocusPane(u32),
+    SetViewport {
+        top_line: u32,
+        left_column: u16,
+    },
+    AddCursorAbove,
+    AddCursorBelow,
+    AddCursorAt(CharacterOffset),
+    RemoveLastCursor,
+    CollapseCursors,
+    SelectNextOccurrence {
+        query: String,
+        skip: bool,
+    },
+    SelectAllOccurrences {
+        query: String,
+    },
     AddWorkspaceRoot(PathBuf),
     ApplyReplacementPlan(workspace_core::ReplacementPlan),
     /// Starts a create/rename/move/delete confirmation flow for a planned filesystem operation.

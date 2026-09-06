@@ -21,3 +21,7 @@ Dependencies: `editor-types` for mouse-related helpers and screen coordinates, p
 workspace paths.
 
 Tests: unit tests in `mod.rs` exercise the state transitions through the render layer.
+# Workspace search and recents
+
+Search options include include/exclude globs in addition to literal/regex, case and whole-word
+controls. Recent workspace rows carry stable ids and missing-path state and are capped at twenty.

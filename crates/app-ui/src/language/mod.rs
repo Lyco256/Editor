@@ -368,6 +368,81 @@ pub struct CompletionView {
     pub details: PanelState,
 }
 
+/// A completion item retains the edit payload separately from its display label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionItemPayload {
+    pub id: String,
+    pub label: String,
+    pub insert_text: String,
+    pub detail: Option<String>,
+    pub documentation: Option<String>,
+}
+
+/// Anchored contextual surface used by completion, hover, signature, Quick Fix and rename UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayKind {
+    Completion,
+    Hover,
+    Signature,
+    QuickFix,
+    Rename,
+    Navigation,
+    References,
+    Symbols,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayPlacement {
+    pub anchor: LogicalPosition,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl OverlayPlacement {
+    #[must_use]
+    pub fn below_cursor(anchor: LogicalPosition, width: u16, height: u16) -> Self {
+        Self {
+            anchor,
+            width,
+            height,
+        }
+    }
+    #[must_use]
+    pub fn clamp_to(self, columns: u16, rows: u16) -> Self {
+        Self {
+            anchor: LogicalPosition {
+                line: self
+                    .anchor
+                    .line
+                    .min(u32::from(rows.saturating_sub(self.height))),
+                character: self
+                    .anchor
+                    .character
+                    .min(u32::from(columns.saturating_sub(self.width))),
+            },
+            ..self
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextualOverlay {
+    pub kind: OverlayKind,
+    pub placement: OverlayPlacement,
+    pub title: String,
+    pub rows: Vec<PanelRow>,
+    pub selected: usize,
+    pub dismiss_on_cursor_move: bool,
+}
+
+impl ContextualOverlay {
+    pub fn dismiss_if_cursor_moved(&mut self, moved: bool) {
+        if moved && self.dismiss_on_cursor_move {
+            self.rows.clear();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoverView {
     pub card: PanelState,

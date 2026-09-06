@@ -5,9 +5,10 @@ mod render;
 
 pub use model::{
     ExplorerLine, ExplorerState, QuickOpenAction, QuickOpenCandidate, QuickOpenDisposition,
-    QuickOpenState, ReplacePreview, SearchOptionsView, SearchResult, SearchState, SearchStatus,
-    WorkspaceEntry, WorkspaceEntryKind, WorkspaceModelEvent, WorkspacePrompt, WorkspaceTrustState,
-    WorkspaceUiState, infer_label, is_mouse_left_click, mouse_pick_from_row, quick_open_candidate,
+    QuickOpenState, RecentWorkspaceRow, ReplacePreview, SearchOptionsView, SearchResult,
+    SearchState, SearchStatus, WorkspaceEntry, WorkspaceEntryKind, WorkspaceModelEvent,
+    WorkspacePrompt, WorkspaceTrustState, WorkspaceUiState, infer_label, is_mouse_left_click,
+    mouse_pick_from_row, quick_open_candidate,
 };
 pub use render::{
     draw_quick_open, draw_search, draw_workspace, explorer_summary, framebuffer_lines,
@@ -202,6 +203,7 @@ mod tests {
                 case_sensitive: false,
                 whole_word: false,
                 max_results: Some(50),
+                ..SearchOptionsView::default()
             },
         );
         ui.state.search.push_result(
@@ -236,6 +238,7 @@ mod tests {
                 case_sensitive: true,
                 whole_word: true,
                 max_results: Some(10),
+                ..SearchOptionsView::default()
             },
         );
         ui.state.search.push_result(
@@ -266,6 +269,7 @@ mod tests {
                 case_sensitive: true,
                 whole_word: false,
                 max_results: None,
+                ..SearchOptionsView::default()
             },
         );
         ui.state.search.set_replace_preview(3, 9);

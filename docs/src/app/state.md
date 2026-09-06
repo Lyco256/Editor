@@ -95,3 +95,7 @@ refresh.
 In-document find and replace are root actions backed by editor-core; match ranges are retained for
 overview consumers and replace-all is undoable. Invalid search expressions are reported as typed
 editor Output errors and never silently converted to an empty result set.
+# Persistent integration state
+
+AppState keeps stable pane records, authoritative tab buffers, focused-pane status, fold state,
+recent workspace persistence and root-routed lifecycle/multi-cursor commands.

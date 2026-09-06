@@ -141,6 +141,131 @@ pub struct CommandPaletteState {
     selection: usize,
 }
 
+/// Feature-neutral picker row. Stable ids let callers route acceptance without parsing labels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerRow {
+    pub id: String,
+    pub label: String,
+    pub detail: Option<String>,
+    pub disabled: bool,
+}
+
+impl PickerRow {
+    #[must_use]
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            detail: None,
+            disabled: false,
+        }
+    }
+}
+
+/// Reusable modal/picker interaction contract shared by palette, quick-open and contextual UI.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GenericPicker {
+    pub title: String,
+    pub query: String,
+    rows: Vec<PickerRow>,
+    selected: usize,
+    pub scroll: usize,
+}
+
+impl GenericPicker {
+    #[must_use]
+    pub fn new(title: impl Into<String>, rows: Vec<PickerRow>) -> Self {
+        Self {
+            title: title.into(),
+            query: String::new(),
+            rows,
+            selected: 0,
+            scroll: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[PickerRow] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn visible_rows(&self) -> Vec<&PickerRow> {
+        let query = self.query.to_lowercase();
+        self.rows
+            .iter()
+            .filter(|row| {
+                query.is_empty()
+                    || row.label.to_lowercase().contains(&query)
+                    || row.id.to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn selected(&self) -> Option<&PickerRow> {
+        self.visible_rows().get(self.selected).copied()
+    }
+
+    pub fn set_query(&mut self, query: impl Into<String>) {
+        self.query = query.into();
+        self.selected = 0;
+        self.scroll = 0;
+    }
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.visible_rows().len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        let next = (isize::try_from(self.selected).unwrap_or(0) + delta)
+            .rem_euclid(isize::try_from(len).unwrap_or(isize::MAX));
+        self.selected = usize::try_from(next).unwrap_or(0);
+    }
+    pub fn select_index(&mut self, index: usize) {
+        self.selected = index.min(self.visible_rows().len().saturating_sub(1));
+    }
+    #[must_use]
+    pub fn accept(&self) -> Option<&str> {
+        self.selected()
+            .filter(|row| !row.disabled)
+            .map(|row| row.id.as_str())
+    }
+    pub fn cancel(&mut self) {
+        self.query.clear();
+        self.selected = 0;
+        self.scroll = 0;
+    }
+}
+
+/// Single command registry consumed by both keybinding and palette dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommandRegistry {
+    entries: Vec<CommandEntry>,
+}
+
+impl CommandRegistry {
+    pub fn register(&mut self, entry: CommandEntry) {
+        if let Some(existing) = self.entries.iter_mut().find(|item| item.id == entry.id) {
+            *existing = entry;
+        } else {
+            self.entries.push(entry);
+        }
+    }
+    #[must_use]
+    pub fn entries(&self) -> &[CommandEntry] {
+        &self.entries
+    }
+    #[must_use]
+    pub fn contains(&self, id: &CommandId) -> bool {
+        self.entries.iter().any(|entry| &entry.id == id)
+    }
+    #[must_use]
+    pub fn palette(&self) -> CommandPaletteState {
+        CommandPaletteState::new(self.entries.clone())
+    }
+}
+
 impl CommandPaletteState {
     #[must_use]
     pub fn new(commands: Vec<CommandEntry>) -> Self {
