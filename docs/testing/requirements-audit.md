@@ -142,9 +142,9 @@ is the release evidence for every finding in `Requirements/LATEST_UI_BUG_AUDIT.m
 | A-14 | 46 | `app::state::tests::mouse_click_and_drag_create_a_logical_selection` | PASS |
 | A-15 | 45 | `shell::tests::variable_width_tab_hit_testing_and_menu_labels_are_exact` | PASS |
 | A-16 | 50 | `app::state::tests::git_hunk_and_confirmed_discard_dispatch_typed_effects` | PASS |
-| A-17 | 48 | `terminal::tests::cleanup_state_is_ordered_and_idempotent` | PASS |
+| A-17 | 48 | `terminal::tests::native_cursor_presentation_emits_steady_bar_and_hides_when_unfocused` | PASS |
 | A-18 | 43 | `shell::tests::authoritative_snapshot_hit_testing_uses_current_geometry` | PASS |
-| A-19 | 50 | `app::runtime::tests::root_frame_projects_syntax_roles_and_folds` | PASS |
+| A-19 | 50 | `app::state::tests::git_hunk_and_confirmed_discard_dispatch_typed_effects` | PASS |
 | A-20 | 50 | `app::state::tests::workspace_search_events_update_only_the_active_session` | PASS |
 | A-21 | 50 | `app::runtime::tests::root_frame_renders_interactive_language_result_panel` | PASS |
 | A-22 | 48 | `shell::tests::chrome_policy_and_grapheme_metrics_preserve_data_cells` | PASS |
