@@ -276,6 +276,12 @@ impl CommandPaletteState {
         }
     }
 
+    /// Returns the registered commands without exposing palette selection state.
+    #[must_use]
+    pub fn commands(&self) -> &[CommandEntry] {
+        &self.commands
+    }
+
     #[must_use]
     pub fn query(&self) -> &str {
         &self.query

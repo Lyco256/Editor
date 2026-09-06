@@ -23,6 +23,7 @@ pub enum Action {
     NextTab,
     PreviousTab,
     QuickOpenRecent,
+    RemoveRecentWorkspace(PathBuf),
     /// Reopens the active file with a user-selected codec after clean-buffer confirmation.
     ReopenWithEncoding(workspace_core::EncodingKind),
     /// Changes the codec used by the next save and marks the document dirty.
@@ -30,6 +31,8 @@ pub enum Action {
         encoding: workspace_core::EncodingKind,
         with_bom: bool,
     },
+    /// Selects the line-ending convention used when saving the active document.
+    SetLineEndings(workspace_core::LineEndings),
     SwitchTab(usize),
     CloseTab(usize),
     SaveAs(PathBuf),

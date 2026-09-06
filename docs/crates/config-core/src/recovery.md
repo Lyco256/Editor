@@ -10,6 +10,7 @@ application identifier—never from a workspace or document path.
 ## Types and invariants
 
 `SessionState` is versioned and preserves additive unknown fields within the current format.
+It also stores the bounded `recentWorkspaces` list for restart-time Recent selection.
 `EditorSession` retains encoding, BOM, and line-ending metadata alongside enough state to restore
 both saved and untitled dirty buffers.
 `RecoveryStore::save` writes JSON to a same-directory temporary file, flushes and synchronizes it,

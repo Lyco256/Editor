@@ -770,6 +770,8 @@ pub struct LanguageModel {
     pub symbols: VersionedState<SymbolsView>,
     pub formatting: VersionedState<FormattingFeedbackView>,
     pub server_status: LanguageServerStatus,
+    /// Cursor-anchored popup currently visible above the editor surface.
+    pub contextual_overlay: Option<ContextualOverlay>,
 }
 
 impl LanguageModel {
@@ -791,6 +793,7 @@ impl LanguageModel {
             symbols: VersionedState::new(document_version),
             formatting: VersionedState::new(document_version),
             server_status: LanguageServerStatus::Stopped,
+            contextual_overlay: None,
         }
     }
 
@@ -813,7 +816,18 @@ impl LanguageModel {
 
     #[must_use]
     pub fn apply_result(&mut self, result: LanguageResult) -> bool {
-        match result {
+        let kind = match &result {
+            LanguageResult::Completion(_) => Some(OverlayKind::Completion),
+            LanguageResult::Hover(_) => Some(OverlayKind::Hover),
+            LanguageResult::Signature(_) => Some(OverlayKind::Signature),
+            LanguageResult::CodeActions(_) => Some(OverlayKind::QuickFix),
+            LanguageResult::Rename(_) => Some(OverlayKind::Rename),
+            LanguageResult::GoTo(_) => Some(OverlayKind::Navigation),
+            LanguageResult::References(_) => Some(OverlayKind::References),
+            LanguageResult::Symbols(_) => Some(OverlayKind::Symbols),
+            _ => None,
+        };
+        let accepted = match result {
             LanguageResult::Syntax(result) => self.syntax.apply(result),
             LanguageResult::Semantic(result) => self.semantic.apply(result),
             LanguageResult::Diagnostics(result) => self.diagnostics.apply(result),
@@ -831,7 +845,64 @@ impl LanguageModel {
                 self.server_status = status;
                 true
             }
+        };
+        if accepted {
+            if let Some(kind) = kind {
+                let (rows, title, selected) = match kind {
+                    OverlayKind::Completion => self.completion.current().map_or_else(
+                        || (Vec::new(), "Completion".to_owned(), 0),
+                        |view| {
+                            (
+                                view.list.rows.clone(),
+                                "Completion".to_owned(),
+                                view.list.selected.unwrap_or(0),
+                            )
+                        },
+                    ),
+                    OverlayKind::Hover => self.hover.current().map_or_else(
+                        || (Vec::new(), "Hover".to_owned(), 0),
+                        |view| (view.card.rows.clone(), "Hover".to_owned(), 0),
+                    ),
+                    OverlayKind::Signature => self.signature.current().map_or_else(
+                        || (Vec::new(), "Signature".to_owned(), 0),
+                        |view| (view.card.rows.clone(), "Signature".to_owned(), 0),
+                    ),
+                    OverlayKind::QuickFix => self.code_actions.current().map_or_else(
+                        || (Vec::new(), "Quick Fix".to_owned(), 0),
+                        |view| {
+                            (
+                                view.list.rows.clone(),
+                                "Quick Fix".to_owned(),
+                                view.list.selected.unwrap_or(0),
+                            )
+                        },
+                    ),
+                    OverlayKind::Rename => self.rename.current().map_or_else(
+                        || (Vec::new(), "Rename".to_owned(), 0),
+                        |view| (view.after.rows.clone(), "Rename Preview".to_owned(), 0),
+                    ),
+                    OverlayKind::Navigation => (Vec::new(), "Go to".to_owned(), 0),
+                    OverlayKind::References => (Vec::new(), "References".to_owned(), 0),
+                    OverlayKind::Symbols => (Vec::new(), "Symbols".to_owned(), 0),
+                };
+                self.contextual_overlay = Some(ContextualOverlay {
+                    kind,
+                    placement: OverlayPlacement::below_cursor(
+                        LogicalPosition {
+                            line: 0,
+                            character: 0,
+                        },
+                        48,
+                        rows.len().saturating_add(2).try_into().unwrap_or(u16::MAX),
+                    ),
+                    title,
+                    rows,
+                    selected,
+                    dismiss_on_cursor_move: true,
+                });
+            }
         }
+        accepted
     }
 }
 

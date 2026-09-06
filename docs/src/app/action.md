@@ -8,6 +8,9 @@ transition layer performs the corresponding model update and reports errors as o
 `Language` and `Git` carry typed app-ui panel actions into root transitions without embedding I/O.
 `ReopenWithEncoding` uses an explicit BOM-aware codec after refusing to replace dirty text, while
 `SetEncoding` changes the next-save codec and marks the buffer dirty so conversion cannot be lost.
+`SetLineEndings` selects LF, CRLF, or preserve/mixed line endings through the same save path.
+`RemoveRecentWorkspace` removes a typed recent-root entry and is persisted with the next session
+checkpoint.
 `SplitPane`, `CloseSplit`, and `SetSplitRatio` make horizontal/vertical editor layout changes
 explicit and keep them in the same state transition path as tab changes.
 `SaveAs` and `CloseTab` are explicit root actions; close refuses dirty buffers and Save As does not

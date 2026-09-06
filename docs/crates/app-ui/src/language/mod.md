@@ -3,7 +3,8 @@
 Role: owns the pure UI model for language intelligence. The module accepts versioned language-server
 results, rejects stale data, groups diagnostics into Problems, and exposes panel-oriented state for
 completion, hover, signature help, go-to and references choosers, rename previews, code actions,
-inlay hints, symbols, formatting feedback, and language-server status.
+inlay hints, symbols, formatting feedback, and language-server status. Accepted contextual results
+also expose a cursor-anchored overlay model for popup rendering.
 
 Important types:
 

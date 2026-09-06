@@ -13,7 +13,8 @@ work. Diagnostics are projected into the editor markers, status counts, and Prob
 The recovery-enabled interactive variant persists an atomic session checkpoint after each
 action so unexpected termination can restore unsaved buffers. Search, Git, and interactive
 language-result panels are blitted from pure renderers after shell layout computation. Headless tests cover enter, frame
-production, editing, quit, cleanup, and split/session round trips.
+production, editing, quit, cleanup, and split/session round trips. Cursor-anchored contextual
+language overlays are painted after shell and input surfaces.
 Deferred effects emitted while applying actions or asynchronous events are dispatched by the runtime,
 allowing format-on-save/paste, workspace search, and other service chains to remain outside the UI
 update path.

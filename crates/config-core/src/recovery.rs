@@ -79,6 +79,8 @@ pub struct EditorSession {
 pub struct SessionState {
     pub format_version: u32,
     pub workspace_roots: Vec<PathBuf>,
+    /// Recently opened workspace roots, bounded by the UI to twenty entries.
+    pub recent_workspaces: Vec<PathBuf>,
     pub editors: Vec<EditorSession>,
     pub tab_order: Vec<String>,
     pub split_layout: SplitLayout,
@@ -92,6 +94,7 @@ impl Default for SessionState {
         Self {
             format_version: CURRENT_SESSION_FORMAT,
             workspace_roots: Vec::new(),
+            recent_workspaces: Vec::new(),
             editors: Vec::new(),
             tab_order: Vec::new(),
             split_layout: SplitLayout::Empty,

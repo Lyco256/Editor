@@ -3,7 +3,7 @@
 Role: shared terminal UI helpers for `app-ui`.
 
 This module owns the reusable rectangle geometry, framebuffer drawing helpers, command-palette
-filtering state, and deterministic framebuffer snapshot formatting used by the shell and editor
+filtering state, generic picker/command-registry contracts, and deterministic framebuffer snapshot formatting used by the shell and editor
 tests.
 
 Important types:

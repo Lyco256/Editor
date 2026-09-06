@@ -1,0 +1,40 @@
+//! Dedicated acceptance coverage for the cross-feature MVP contracts.
+
+use app_ui::widgets::{GenericPicker, PickerRow};
+use editor::app::{action::Action, state::AppState};
+use editor_types::CommandId;
+
+#[test]
+fn root_wires_persistent_panes_eol_and_command_registry() {
+    let mut state = AppState::default();
+    assert_eq!(state.focused_pane().map(|pane| pane.id), Some(0));
+    state.apply_action(Action::SplitPane {
+        axis: app_ui::shell::SplitAxis::Vertical,
+        ratio_percent: 60,
+    });
+    assert_ne!(
+        state.session_state().split_layout,
+        config_core::SplitLayout::Empty
+    );
+    state.apply_action(Action::SetLineEndings(workspace_core::LineEndings::Crlf));
+    assert!(state.active_dirty);
+    assert!(
+        state
+            .command_registry()
+            .contains(&CommandId::new("editor.setEolCrlf"))
+    );
+}
+
+#[test]
+fn generic_picker_has_typed_ids_and_bounds_safe_navigation() {
+    let mut picker = GenericPicker::new(
+        "Recent",
+        vec![PickerRow::new("one", "One"), PickerRow::new("two", "Two")],
+    );
+    picker.move_selection(100);
+    assert_eq!(picker.accept(), Some("one"));
+    picker.set_query("two");
+    assert_eq!(picker.accept(), Some("two"));
+    picker.move_selection(-100);
+    assert_eq!(picker.accept(), Some("two"));
+}

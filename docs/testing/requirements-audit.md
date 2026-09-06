@@ -99,7 +99,7 @@ limitation) and promotion of this exact verified state to `main`.
 
 ## MVP gap-closure audit (Requirements 31–41)
 
-Automated verification rerun on `devenv` (commit `18e6e2e`): `cargo fmt --all`,
+Automated verification rerun on `devenv` (current working commit): `cargo fmt --all`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
 `cargo test --workspace --test doc_mirror`, and `tools/verify.ps1` all passed; the worktree is
 clean and no production `TODO`, `todo!`, or `unimplemented!` remains.
@@ -108,13 +108,13 @@ Implemented and covered: persistent tab-buffer rendering, pane ids with viewport
 cursor/selection status projection, Unicode-safe cursor composition and occurrence selection,
 diagnostic inline styling and whole-document overview mode, include/exclude search options, recent
 workspace row model (bounded to 20), lifecycle command routes, contextual overlay data contracts,
-generic picker/command-registry contracts, and pane-aware mouse hit routing.
+generic picker/command-registry contracts, pane-aware mouse hit routing, Git keyboard/mouse
+dispatch through the trust-gated root adapter, interactive Open Folder and EOL actions, contextual
+popup rendering, same-document split-buffer projection, and a dedicated `mvp_gap_acceptance` test.
 
-Remaining items found by source-to-requirement comparison (not counted as complete): Git marker
-spans are not yet populated from per-file status; `GenericPicker` and `CommandRegistry` are not
-the live palette/input registry; contextual language overlays and inline inlay hints remain rendered
-through the bottom Language panel; Git keyboard/mouse actions are not routed from the shell; EOL
-selection and Open Folder use a complete interactive picker; recent-workspace selection/removal is
-not persisted through root session state; same-document split panes still clone rather than share a
-single mutable buffer; and no dedicated Requirements-41 acceptance test module proves each of those
-reachability paths. These are concrete follow-up gaps despite the green existing test suite.
+Remaining items found by source-to-requirement comparison (not counted as complete): the generic
+picker/registry is exposed as a typed contract but palette input still has a separate state object;
+inline inlay hints remain represented in the bottom Language panel rather than editor-line
+decoration; recent-workspace removal and restoration are not yet serialized in `SessionState`; and
+the verified `devenv` state has not been promoted to `main`. These are concrete follow-up gaps
+despite the green existing test suite.

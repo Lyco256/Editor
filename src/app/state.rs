@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use app_ui::widgets::{CommandEntry, CommandPaletteState};
+use app_ui::widgets::{CommandEntry, CommandPaletteState, CommandRegistry};
 use editor_core::{Edit, PairConfig, TextBuffer, Transaction};
 use editor_types::{
     CharacterOffset, DocumentId, GitStatusSummary, InputEvent, KeyCode, LanguageServerStatus,
@@ -113,6 +113,7 @@ pub(crate) enum BottomPanelView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InputMode {
     QuickOpen,
+    OpenFolder,
     ProjectSearch,
     Find,
     ReplaceQuery,
@@ -916,6 +917,9 @@ impl Default for AppState {
                 CommandEntry::available("editor.convertUtf8", "Convert to UTF-8"),
                 CommandEntry::available("editor.convertUtf16Le", "Convert to UTF-16 LE"),
                 CommandEntry::available("editor.convertUtf16Be", "Convert to UTF-16 BE"),
+                CommandEntry::available("editor.setEolLf", "Set End of Line: LF"),
+                CommandEntry::available("editor.setEolCrlf", "Set End of Line: CRLF"),
+                CommandEntry::available("editor.setEolPreserve", "Preserve End of Line"),
                 CommandEntry::available("editor.toggleFormatOnSave", "Toggle Format on Save"),
                 CommandEntry::available("editor.toggleFormatOnPaste", "Toggle Format on Paste"),
                 CommandEntry::available("workbench.splitVertical", "Split Editor Vertical"),
@@ -1002,6 +1006,26 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Builds the single command registry consumed by palette and keybinding dispatch.
+    /// Keybindings that are configured but not present in the palette remain discoverable as
+    /// unavailable entries rather than silently disappearing.
+    #[must_use]
+    pub fn command_registry(&self) -> CommandRegistry {
+        let mut registry = CommandRegistry::default();
+        for entry in self.palette.commands() {
+            registry.register(entry.clone());
+        }
+        for binding in &self.keybindings {
+            let id = editor_types::CommandId::new(binding.command.clone());
+            if !registry.contains(&id) {
+                registry.register(CommandEntry::disabled(
+                    binding.command.clone(),
+                    binding.command.clone(),
+                ));
+            }
+        }
+        registry
+    }
     /// Returns the focused pane's stable record.
     #[must_use]
     pub fn focused_pane(&self) -> Option<&PaneState> {
@@ -2728,7 +2752,8 @@ impl AppState {
                 }
                 _ => {}
             },
-            InputMode::ProjectSearch
+            InputMode::OpenFolder
+            | InputMode::ProjectSearch
             | InputMode::Find
             | InputMode::ReplaceQuery
             | InputMode::ReplaceReplacement { .. } => {
@@ -2749,6 +2774,22 @@ impl AppState {
                     return None;
                 }
                 match mode {
+                    InputMode::OpenFolder => {
+                        let path = PathBuf::from(self.input_buffer.trim());
+                        if path.as_os_str().is_empty() {
+                            self.output.push(OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "open-folder".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "folder path must not be empty".to_owned(),
+                            });
+                        } else {
+                            let transition = self.apply_action_inner(Action::OpenFolder(path));
+                            self.deferred_effects.extend(transition.effects);
+                        }
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
                     InputMode::ProjectSearch => {
                         if self.input_buffer.trim().is_empty() {
                             self.output.push(OutputMessage {
@@ -2881,6 +2922,7 @@ impl AppState {
             .collect::<Vec<_>>();
         config_core::SessionState {
             workspace_roots: self.workspace_roots.clone(),
+            recent_workspaces: self.workspace_ui.recent_workspaces.clone(),
             editors,
             tab_order,
             split_layout: self.split_axis.map_or_else(
@@ -2919,6 +2961,9 @@ impl AppState {
     )]
     pub fn restore_session(&mut self, session: &config_core::SessionState) {
         self.workspace_roots.clone_from(&session.workspace_roots);
+        self.workspace_ui
+            .recent_workspaces
+            .clone_from(&session.recent_workspaces);
         if session.editors.is_empty() {
             return;
         }
@@ -3820,9 +3865,26 @@ impl AppState {
                 }
             }
             Action::QuickOpenRecent => {
-                if let Some(path) = self.workspace_ui.recent_workspaces.first().cloned() {
-                    self.open_startup_path(path);
+                let candidates = self
+                    .workspace_ui
+                    .recent_rows()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(recent_rank, row)| app_ui::workspace::QuickOpenCandidate {
+                        label: row.path.display().to_string(),
+                        path: row.path,
+                        recent_rank,
+                    })
+                    .collect();
+                self.workspace_ui.quick_open.set_candidates(candidates);
+                self.begin_input_mode(InputMode::QuickOpen);
+                Transition {
+                    render: true,
+                    ..Transition::default()
                 }
+            }
+            Action::RemoveRecentWorkspace(path) => {
+                self.workspace_ui.remove_recent(&path);
                 Transition {
                     render: true,
                     ..Transition::default()
@@ -3846,6 +3908,25 @@ impl AppState {
                         self.active_tab_state().encoding.canonical_name(),
                         if with_bom { " with BOM" } else { "" }
                     ),
+                });
+                Transition {
+                    render: true,
+                    ..Transition::default()
+                }
+            }
+            Action::SetLineEndings(line_endings) => {
+                self.sync_active_tab();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.line_endings = line_endings;
+                    tab.buffer.mark_recovered_dirty();
+                }
+                self.buffer.mark_recovered_dirty();
+                self.sync_buffer_projection();
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "line-endings".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!("next save uses {line_endings:?} line endings"),
                 });
                 Transition {
                     render: true,
@@ -4347,6 +4428,15 @@ impl AppState {
             if let Some(mode) = self.input_mode.clone() {
                 return self.apply_input_mode(mode, key);
             }
+            let cursor_moved = matches!(
+                key.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+            );
+            if cursor_moved {
+                if let Some(overlay) = self.language_ui.contextual_overlay.as_mut() {
+                    overlay.dismiss_if_cursor_moved(true);
+                }
+            }
             if key.modifiers.contains(Modifier::Control) && key.modifiers.contains(Modifier::Alt) {
                 let action = match key.code {
                     KeyCode::Up => Some(Action::AddCursorAbove),
@@ -4428,6 +4518,47 @@ impl AppState {
                 self.mark_explorer_cursor(&mut entries);
                 self.explorer_entries = entries;
                 return None;
+            }
+            // Git panel owns its keyboard focus and routes every mutation through the
+            // trust-gated root Git action adapter.
+            if self.bottom_panel_visible && matches!(self.bottom_panel_view, BottomPanelView::Git) {
+                let git_action = self.git_dashboard.as_ref().and_then(|dashboard| {
+                    let selected = dashboard.selected_file.unwrap_or(0);
+                    match key.code {
+                        KeyCode::Up if !dashboard.changes.is_empty() => Some(
+                            app_ui::git::GitAction::SelectChange(selected.saturating_sub(1)),
+                        ),
+                        KeyCode::Down if !dashboard.changes.is_empty() => {
+                            Some(app_ui::git::GitAction::SelectChange(
+                                (selected + 1).min(dashboard.changes.len().saturating_sub(1)),
+                            ))
+                        }
+                        KeyCode::Character(' ') => dashboard.changes.get(selected).map(|entry| {
+                            if entry.staged {
+                                app_ui::git::GitAction::UnstageFile(entry.path.clone())
+                            } else {
+                                app_ui::git::GitAction::StageFile(entry.path.clone())
+                            }
+                        }),
+                        KeyCode::Enter if !key.modifiers.contains(Modifier::Control) => dashboard
+                            .changes
+                            .get(selected)
+                            .map(|entry| app_ui::git::GitAction::OpenDiffFile(entry.path.clone())),
+                        KeyCode::Character('f') => Some(app_ui::git::GitAction::Fetch),
+                        KeyCode::Character('p') => Some(app_ui::git::GitAction::Push),
+                        KeyCode::Character('l') => Some(app_ui::git::GitAction::Pull),
+                        KeyCode::Character('s') => Some(app_ui::git::GitAction::CreateStash),
+                        KeyCode::Enter if key.modifiers.contains(Modifier::Control) => {
+                            Some(app_ui::git::GitAction::Commit)
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some(action) = git_action {
+                    let transition = self.apply_git_action(action);
+                    self.deferred_effects.extend(transition.effects);
+                    return self.deferred_effects.pop();
+                }
             }
             if !self.palette_visible {
                 if let Some(command) = self.configured_chord_command(key) {
@@ -4569,6 +4700,29 @@ impl AppState {
                 _ => Ok(()),
             },
             InputEvent::Mouse(mouse) => {
+                if self.bottom_panel_visible
+                    && matches!(self.bottom_panel_view, BottomPanelView::Git)
+                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
+                    && mouse.position.row >= 20
+                {
+                    let index = usize::from(mouse.position.row.saturating_sub(21));
+                    if let Some(dashboard) = self.git_dashboard.as_ref() {
+                        if let Some(entry) = dashboard.changes.get(index) {
+                            let action = if mouse.position.column < 8 {
+                                if entry.staged {
+                                    app_ui::git::GitAction::UnstageFile(entry.path.clone())
+                                } else {
+                                    app_ui::git::GitAction::StageFile(entry.path.clone())
+                                }
+                            } else {
+                                app_ui::git::GitAction::OpenDiffFile(entry.path.clone())
+                            };
+                            let transition = self.apply_git_action(action);
+                            self.deferred_effects.extend(transition.effects);
+                            return self.deferred_effects.pop();
+                        }
+                    }
+                }
                 if self.split_axis.is_some()
                     && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
                 {
@@ -4918,12 +5072,7 @@ impl AppState {
                 let _ = self.apply_action_inner(Action::NewFile);
             }
             "workbench.openFolder" => {
-                self.output.push(OutputMessage {
-                    subsystem: "workspace".to_owned(),
-                    operation: "open-folder".to_owned(),
-                    level: OutputLevel::Information,
-                    message: "choose a folder path with Open Folder".to_owned(),
-                });
+                self.begin_input_mode(InputMode::OpenFolder);
             }
             "workbench.closeActiveEditor" => {
                 let _ = self.apply_action_inner(Action::CloseActive);
@@ -4939,6 +5088,18 @@ impl AppState {
             }
             "workbench.openRecent" => {
                 let _ = self.apply_action_inner(Action::QuickOpenRecent);
+            }
+            "editor.setEolLf" => {
+                let _ = self
+                    .apply_action_inner(Action::SetLineEndings(workspace_core::LineEndings::Lf));
+            }
+            "editor.setEolCrlf" => {
+                let _ = self
+                    .apply_action_inner(Action::SetLineEndings(workspace_core::LineEndings::Crlf));
+            }
+            "editor.setEolPreserve" => {
+                let _ = self
+                    .apply_action_inner(Action::SetLineEndings(workspace_core::LineEndings::Mixed));
             }
             "editor.undo" => {
                 let _ = self.buffer.undo();

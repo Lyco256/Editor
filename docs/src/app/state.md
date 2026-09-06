@@ -10,6 +10,9 @@ buffer is clean; dirty quits surface a warning. `session_state` and `restore_ses
 active editor (including selections and unsaved text) to the versioned, atomic recovery format.
 Ctrl+B/Ctrl+J toggle the Explorer and Output panel, Ctrl+Shift+E focuses the Explorer, and Ctrl+P
 opens a keyboard-driven command palette whose commands route back through the root transition path.
+Open Folder is an explicit path prompt, while Recent opens a selectable typed candidate list.
+The command registry is derived from palette entries and configured keybindings, keeping discovery
+and dispatch on one typed-ID path.
 VS Code keybindings loaded through the resolved settings layer are matched before editor editing,
 including simple `when` predicates (`editorTextFocus`, selection/dirty state, language id, and
 platform) and two-stroke chords; matching commands dispatch through the same transition path.

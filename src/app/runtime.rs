@@ -252,6 +252,35 @@ fn frame_for_state(
         .collect::<Vec<_>>();
     let mut language_markers = diagnostic_markers.clone();
     language_markers.extend(syntax_error_markers);
+    let git_markers = state
+        .git_dashboard
+        .as_ref()
+        .into_iter()
+        .flat_map(|dashboard| dashboard.changes.iter())
+        .filter(|entry| {
+            state.active_path.as_ref().is_some_and(|path| {
+                let candidate = state
+                    .git_root
+                    .as_ref()
+                    .map_or_else(|| entry.path.clone(), |root| root.join(&entry.path));
+                candidate == *path
+                    || candidate.canonicalize().ok().as_ref() == path.canonicalize().ok().as_ref()
+            })
+        })
+        .map(|entry| app_ui::editor::MarkerSpan {
+            range: editor_types::TextRange {
+                start: editor_types::CharacterOffset(0),
+                end: editor_types::CharacterOffset(buffer.len_chars()),
+            },
+            kind: if entry.conflicted {
+                app_ui::editor::MarkerKind::Error
+            } else if entry.untracked || (entry.staged && !entry.unstaged) {
+                app_ui::editor::MarkerKind::Added
+            } else {
+                app_ui::editor::MarkerKind::Modified
+            },
+        })
+        .collect::<Vec<_>>();
     let mut folds = state
         .panes
         .iter()
@@ -401,6 +430,7 @@ fn frame_for_state(
         folds: folds.clone(),
         markers: SemanticMarkerSet {
             language: language_markers.clone(),
+            git: git_markers.clone(),
             diagnostics: diagnostic_markers,
             ..SemanticMarkerSet::default()
         },
@@ -491,6 +521,7 @@ fn frame_for_state(
         .split_secondary_tab
         .and_then(|index| state.tabs.get(index))
         .map(|tab| {
+            let shared = state.split_secondary_tab == Some(state.active_tab);
             let title = tab
                 .path
                 .as_ref()
@@ -502,7 +533,11 @@ fn frame_for_state(
             EditorViewportState {
                 pane_id: 1,
                 title,
-                snapshot: tab.buffer.snapshot(),
+                snapshot: if shared {
+                    buffer.snapshot()
+                } else {
+                    tab.buffer.snapshot()
+                },
                 viewport: state
                     .panes
                     .iter()
@@ -510,7 +545,11 @@ fn frame_for_state(
                         pane.displayed_tab == state.split_secondary_tab.unwrap_or(usize::MAX)
                     })
                     .map_or_else(app_ui::editor::TextViewport::default, |pane| pane.viewport),
-                selections: tab.buffer.selections().clone(),
+                selections: if shared {
+                    buffer.selections().clone()
+                } else {
+                    tab.buffer.selections().clone()
+                },
                 folds: state
                     .panes
                     .iter()
@@ -520,6 +559,7 @@ fn frame_for_state(
                     .map_or_else(|| folds.clone(), |pane| pane.folds.clone()),
                 markers: SemanticMarkerSet {
                     language: language_markers,
+                    git: git_markers,
                     ..SemanticMarkerSet::default()
                 },
                 syntax_spans: Vec::new(),
@@ -633,6 +673,65 @@ fn frame_for_state(
     if let Some(input) = input_overlay_for_state(state, size) {
         blit_frame(&mut frame, &input, 2, 1);
     }
+    if let Some(overlay) = state.language_ui.contextual_overlay.as_ref() {
+        if !overlay.rows.is_empty() {
+            let width = overlay.placement.width.min(size.0.saturating_sub(2)).max(8);
+            let height = overlay
+                .rows
+                .len()
+                .saturating_add(2)
+                .try_into()
+                .unwrap_or(u16::MAX)
+                .min(size.1.saturating_sub(2))
+                .max(3);
+            let x = u16::try_from(overlay.placement.anchor.character)
+                .unwrap_or(0)
+                .min(size.0.saturating_sub(width).saturating_sub(1));
+            let y = u16::try_from(overlay.placement.anchor.line)
+                .unwrap_or(0)
+                .saturating_add(1)
+                .min(size.1.saturating_sub(height).saturating_sub(1));
+            let mut popup = Framebuffer::new(width, height);
+            let rect = app_ui::widgets::Rect::new(0, 0, width, height);
+            app_ui::widgets::fill_rect(
+                &mut popup,
+                rect,
+                " ",
+                StyleRole::EditorText,
+                StyleRole::Panel,
+            );
+            app_ui::widgets::draw_border(&mut popup, rect, StyleRole::Gutter, StyleRole::Panel);
+            let _ = app_ui::widgets::write_text(
+                &mut popup,
+                1,
+                0,
+                &overlay.title,
+                StyleRole::Gutter,
+                StyleRole::Panel,
+            );
+            for (index, row) in overlay.rows.iter().enumerate() {
+                let text = row
+                    .cells
+                    .iter()
+                    .map(|cell| cell.symbol.as_str())
+                    .collect::<String>();
+                let row_y = u16::try_from(index.saturating_add(1)).unwrap_or(u16::MAX);
+                let _ = app_ui::widgets::write_text(
+                    &mut popup,
+                    1,
+                    row_y,
+                    &text,
+                    StyleRole::EditorText,
+                    if overlay.selected == index {
+                        StyleRole::Selection
+                    } else {
+                        StyleRole::Panel
+                    },
+                );
+            }
+            blit_frame(&mut frame, &popup, x, y);
+        }
+    }
     frame
 }
 
@@ -649,6 +748,7 @@ fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebu
         return Some(overlay);
     }
     let label = match mode {
+        super::state::InputMode::OpenFolder => "Open Folder",
         super::state::InputMode::ProjectSearch => "Search workspace",
         super::state::InputMode::Find => "Find",
         super::state::InputMode::ReplaceQuery => "Replace query",
