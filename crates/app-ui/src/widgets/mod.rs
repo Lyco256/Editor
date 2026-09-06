@@ -282,6 +282,16 @@ impl CommandPaletteState {
         &self.commands
     }
 
+    /// Materializes the registry view used by non-palette dispatchers.
+    #[must_use]
+    pub fn registry(&self) -> CommandRegistry {
+        let mut registry = CommandRegistry::default();
+        for command in &self.commands {
+            registry.register(command.clone());
+        }
+        registry
+    }
+
     #[must_use]
     pub fn query(&self) -> &str {
         &self.query

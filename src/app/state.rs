@@ -666,14 +666,27 @@ fn language_result_from_response(
             ))
         }
         "textDocument/inlayHint" => {
-            let rows = result
-                .as_array()
-                .map(|values| values.iter().map(json_label).map(panel_row).collect())
-                .unwrap_or_default();
+            let values = result.as_array().cloned().unwrap_or_default();
+            let rows = values.iter().map(json_label).map(panel_row).collect();
+            let positions = values
+                .iter()
+                .filter_map(|value| {
+                    let position = value.get("position")?;
+                    Some(app_ui::language::InlayHintView {
+                        label: panel_glyphs(&json_label(value)),
+                        document: DocumentId(1),
+                        position: LogicalPosition {
+                            line: position.get("line")?.as_u64()?.try_into().ok()?,
+                            character: position.get("character")?.as_u64()?.try_into().ok()?,
+                        },
+                    })
+                })
+                .collect();
             LanguageResult::InlayHints(Versioned::new(
                 version,
                 InlayHintsView {
                     list: PanelState::new(panel_glyphs("Inlay Hints")).with_rows(rows),
+                    positions,
                 },
             ))
         }
@@ -1011,10 +1024,7 @@ impl AppState {
     /// unavailable entries rather than silently disappearing.
     #[must_use]
     pub fn command_registry(&self) -> CommandRegistry {
-        let mut registry = CommandRegistry::default();
-        for entry in self.palette.commands() {
-            registry.register(entry.clone());
-        }
+        let mut registry = self.palette.registry();
         for binding in &self.keybindings {
             let id = editor_types::CommandId::new(binding.command.clone());
             if !registry.contains(&id) {
@@ -1025,6 +1035,11 @@ impl AppState {
             }
         }
         registry
+    }
+
+    fn command_is_registered(&self, command: &str) -> bool {
+        self.command_registry()
+            .contains(&editor_types::CommandId::new(command))
     }
     /// Returns the focused pane's stable record.
     #[must_use]
@@ -2607,6 +2622,7 @@ impl AppState {
                 keybinding_parts(binding).len() == 1
                     && keybinding_matches(binding, key)
                     && self.keybinding_when_matches(binding)
+                    && self.command_is_registered(&binding.command)
             })
             .map(|binding| binding.command.clone())
     }
@@ -2676,6 +2692,7 @@ impl AppState {
             parts.len() > 1
                 && keybinding_matches_token(parts[0], key)
                 && self.keybinding_when_matches(binding)
+                && self.command_is_registered(&binding.command)
         });
         if starts {
             self.pending_key_chord = Some(key.clone());
@@ -2694,6 +2711,7 @@ impl AppState {
                     && keybinding_matches_token(parts[0], &first)
                     && keybinding_matches_token(parts[1], key)
                     && self.keybinding_when_matches(binding)
+                    && self.command_is_registered(&binding.command)
             })
             .map(|binding| binding.command.clone())
     }

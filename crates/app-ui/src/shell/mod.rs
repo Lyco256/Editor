@@ -965,6 +965,7 @@ mod tests {
             show_line_numbers: true,
             tab_width: 4,
             overview_whole_document: false,
+            inlay_hints: Vec::new(),
         }
     }
 

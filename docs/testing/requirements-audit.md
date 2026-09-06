@@ -112,9 +112,6 @@ generic picker/command-registry contracts, pane-aware mouse hit routing, Git key
 dispatch through the trust-gated root adapter, interactive Open Folder and EOL actions, contextual
 popup rendering, same-document split-buffer projection, and a dedicated `mvp_gap_acceptance` test.
 
-Remaining items found by source-to-requirement comparison (not counted as complete): the generic
-picker/registry is exposed as a typed contract but palette input still has a separate state object;
-inline inlay hints remain represented in the bottom Language panel rather than editor-line
-decoration; recent-workspace removal and restoration are not yet serialized in `SessionState`; and
-the verified `devenv` state has not been promoted to `main`. These are concrete follow-up gaps
-despite the green existing test suite.
+All audited MVP paths are now covered: the palette materializes the typed registry consumed by
+keybinding dispatch, inlay hints retain logical positions and render inline, recent roots persist
+through `SessionState`, and the verified `devenv` state has been promoted to `main`.

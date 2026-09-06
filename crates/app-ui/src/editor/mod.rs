@@ -154,6 +154,8 @@ pub struct EditorViewportState {
     pub show_line_numbers: bool,
     pub tab_width: usize,
     pub overview_whole_document: bool,
+    /// Typed LSP inlay hints rendered at their logical line/character positions.
+    pub inlay_hints: Vec<crate::language::InlayHintView>,
 }
 
 impl EditorViewportState {
@@ -236,6 +238,47 @@ impl EditorViewportState {
             line_index = line_index.saturating_add(1);
         }
         self.render_overview(frame, area, overview_width);
+        self.render_inlay_hints(frame, area, text_left, text_right);
+    }
+
+    fn render_inlay_hints(
+        &self,
+        frame: &mut Framebuffer,
+        area: Rect,
+        text_left: u16,
+        text_right: u16,
+    ) {
+        for hint in &self.inlay_hints {
+            let Some(row) = hint
+                .position
+                .line
+                .checked_sub(self.viewport.top_line)
+                .and_then(|row| u16::try_from(row).ok())
+            else {
+                continue;
+            };
+            if row >= area.height {
+                continue;
+            }
+            let column = text_left
+                .saturating_add(u16::try_from(hint.position.character).unwrap_or(u16::MAX));
+            if column >= text_right {
+                continue;
+            }
+            let label = hint
+                .label
+                .iter()
+                .map(|glyph| glyph.symbol.as_str())
+                .collect::<String>();
+            let _ = write_text(
+                frame,
+                column,
+                area.y.saturating_add(row),
+                &format!(" {label}"),
+                StyleRole::Hint,
+                StyleRole::EditorBackground,
+            );
+        }
     }
 
     #[must_use]
@@ -987,6 +1030,7 @@ mod tests {
             show_line_numbers: true,
             tab_width: 4,
             overview_whole_document: false,
+            inlay_hints: Vec::new(),
         }
     }
 

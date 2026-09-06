@@ -5,6 +5,7 @@ results, rejects stale data, groups diagnostics into Problems, and exposes panel
 completion, hover, signature help, go-to and references choosers, rename previews, code actions,
 inlay hints, symbols, formatting feedback, and language-server status. Accepted contextual results
 also expose a cursor-anchored overlay model for popup rendering.
+`InlayHintsView.positions` retains logical line/character anchors for editor-line decoration.
 
 Important types:
 

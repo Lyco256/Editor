@@ -491,6 +491,7 @@ pub struct InlayHintView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlayHintsView {
     pub list: PanelState,
+    pub positions: Vec<InlayHintView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1630,6 +1631,7 @@ mod tests {
         let inlay_hints = InlayHintsView {
             list: PanelState::new(text_cells(&["Inlay hints"]))
                 .with_rows(vec![PanelRow::new(text_cells(&["param value 界"]))]),
+            positions: Vec::new(),
         };
         let symbols = SymbolsView {
             list: PanelState::new(text_cells(&["Symbols"]))

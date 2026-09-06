@@ -441,6 +441,11 @@ fn frame_for_state(
         show_line_numbers: state.show_line_numbers,
         tab_width: state.tab_width,
         overview_whole_document: true,
+        inlay_hints: state
+            .language_ui
+            .inlay_hints
+            .current()
+            .map_or_else(Vec::new, |view| view.positions.clone()),
     };
     let roots = state
         .workspace_roots
@@ -569,6 +574,11 @@ fn frame_for_state(
                 show_line_numbers: state.show_line_numbers,
                 tab_width: state.tab_width,
                 overview_whole_document: true,
+                inlay_hints: state
+                    .language_ui
+                    .inlay_hints
+                    .current()
+                    .map_or_else(Vec::new, |view| view.positions.clone()),
             }
         });
     let root = match (state.split_axis, second_viewport) {
