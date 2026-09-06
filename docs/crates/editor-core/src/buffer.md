@@ -52,3 +52,7 @@ Tests:
 - Module tests cover grapheme navigation, CRLF handling, undo/redo, overlapping edit rejection,
   and large-file suppression.
 - Fixture-backed tests read from `tests/fixtures/editor-core` for CRLF and Unicode coverage.
+# Navigation state
+
+Vertical movement stores one preferred display column per cursor, preserving VS Code-style columns
+through short and blank lines. Grapheme movement and forward deletion use Unicode grapheme bounds.

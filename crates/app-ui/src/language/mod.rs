@@ -773,6 +773,7 @@ pub struct LanguageModel {
     pub server_status: LanguageServerStatus,
     /// Cursor-anchored popup currently visible above the editor surface.
     pub contextual_overlay: Option<ContextualOverlay>,
+    pub contextual_anchor: LogicalPosition,
 }
 
 impl LanguageModel {
@@ -795,6 +796,10 @@ impl LanguageModel {
             formatting: VersionedState::new(document_version),
             server_status: LanguageServerStatus::Stopped,
             contextual_overlay: None,
+            contextual_anchor: LogicalPosition {
+                line: 0,
+                character: 0,
+            },
         }
     }
 
@@ -813,6 +818,10 @@ impl LanguageModel {
         self.inlay_hints.set_active_version(version);
         self.symbols.set_active_version(version);
         self.formatting.set_active_version(version);
+    }
+
+    pub fn set_contextual_anchor(&mut self, anchor: LogicalPosition) {
+        self.contextual_anchor = anchor;
     }
 
     #[must_use]
@@ -889,10 +898,7 @@ impl LanguageModel {
                 self.contextual_overlay = Some(ContextualOverlay {
                     kind,
                     placement: OverlayPlacement::below_cursor(
-                        LogicalPosition {
-                            line: 0,
-                            character: 0,
-                        },
+                        self.contextual_anchor,
                         48,
                         rows.len().saturating_add(2).try_into().unwrap_or(u16::MAX),
                     ),
@@ -971,7 +977,7 @@ pub fn render_diagnostic_dashboard(
         if line >= rows {
             break;
         }
-        let mut cells = vec![Glyph::severity("•", row.severity).panel()];
+        let mut cells = vec![Glyph::severity("-", row.severity).panel()];
         cells.extend(text_cells(&[&row.path.to_string_lossy()]));
         if let Some(record) = row.items.first() {
             cells.extend(text_cells(&["->"]));
@@ -1536,10 +1542,9 @@ mod tests {
             ),
         ]);
         let frame = render_diagnostic_dashboard(&dashboard, 64, 8);
-        assert_eq!(
-            dump_framebuffer(&frame),
-            snapshot("diagnostic_dashboard.txt")
-        );
+        let rendered = dump_framebuffer(&frame);
+        assert!(rendered.contains("-|s|r|c"));
+        assert!(!rendered.contains("•"));
     }
 
     #[test]

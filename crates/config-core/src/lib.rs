@@ -11,8 +11,9 @@ pub use encoding::{
     encode, inspect_line_endings, normalize_line_endings,
 };
 pub use recovery::{
-    CURRENT_SESSION_FORMAT, CursorState, EditorSession, RecoveryError, RecoveryLoad, RecoveryStore,
-    RecoveryWarning, SelectionState, SessionState, SplitAxis, SplitLayout,
+    CURRENT_SESSION_FORMAT, CursorState, EditorDisposition, EditorSession, RecoveryError,
+    RecoveryLoad, RecoveryStore, RecoveryWarning, SelectionState, SessionState, SplitAxis,
+    SplitLayout,
 };
 pub use settings::{
     AutoClosingPairs, EditorSettings, Keybinding, LineEndingPreference, LoadSettingsResult,

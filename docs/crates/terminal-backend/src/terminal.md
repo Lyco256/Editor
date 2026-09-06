@@ -23,7 +23,10 @@ Data flow:
 
 - `enter` enables raw mode and any supported alternate screen, mouse, paste, and keyboard flags.
 - `render` delegates to the differential renderer.
-- `read_input` and `poll_input` delegate to crossterm and normalize events through the input module.
+- `read_input` and `poll_input` delegate to crossterm and normalize events through the input module;
+  left clicks are tracked as single/double/triple clicks at the adapter boundary.
+- `present_cursor` emits a native steady-bar cursor for focused editor frames and hides it for
+  menus and modal overlays.
 - `restore` unwinds the enabled modes in reverse-appropriate order and clears the cleanup state.
 
 Error behavior:
@@ -41,3 +44,4 @@ Tests:
 
 - The cleanup state machine is ordered and idempotent.
 - Failed cleanup actions remain retryable until they succeed.
+- Native cursor presentation is tested for both visible steady-bar and hidden states.

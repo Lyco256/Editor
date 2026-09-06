@@ -19,3 +19,7 @@ malformed or unreadable settings as diagnosable issues.
 The implementation uses Serde for durable data and dedicated encoding modules for conversion.
 Module tests cover the behavior behind each export, while the repository documentation-mirror test
 keeps this file paired with `crates/config-core/src/lib.rs`.
+# Recovery exports
+
+The public recovery exports include `EditorDisposition` so root session serialization and restore
+preserve Preview/Open/Pinned tab state.

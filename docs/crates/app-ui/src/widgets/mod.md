@@ -49,3 +49,7 @@ Tests:
 
 `GenericPicker` provides typed stable rows, query filtering, bounded selection, accept and cancel;
 `CommandRegistry` is the shared registration surface for palette and keybinding routes.
+# Display-cell-safe chrome writing
+
+`write_text` segments grapheme clusters, uses terminal display widths, clips to framebuffer bounds,
+and never splits a wide user string across a continuation cell.

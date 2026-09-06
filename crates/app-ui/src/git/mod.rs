@@ -1356,22 +1356,7 @@ fn diff_change_label(change: &GitFileChange) -> &'static str {
 }
 
 fn truncate(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let count = text.chars().count();
-    if count <= width {
-        return text.to_owned();
-    }
-    if width == 1 {
-        return String::from("…");
-    }
-    let mut output = String::new();
-    for character in text.chars().take(width.saturating_sub(1)) {
-        output.push(character);
-    }
-    output.push('…');
-    output
+    terminal_backend::truncate_display(text, width)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1492,13 +1477,21 @@ pub fn write_text(
     background: StyleRole,
 ) -> u16 {
     let mut current = column;
-    for character in text.chars() {
+    for grapheme in terminal_backend::grapheme_clusters(text) {
+        let width = terminal_backend::grapheme_width(grapheme);
+        let Ok(width_u16) = u16::try_from(width) else {
+            break;
+        };
+        let (columns, _) = frame.size();
+        if current >= columns || current.saturating_add(width_u16) > columns {
+            break;
+        }
         if frame
             .set(
                 current,
                 row,
                 Cell {
-                    symbol: character.to_string(),
+                    symbol: grapheme.to_owned(),
                     foreground,
                     background,
                     bold: false,
@@ -1509,7 +1502,7 @@ pub fn write_text(
         {
             break;
         }
-        current = current.saturating_add(1);
+        current = current.saturating_add(width_u16);
     }
     current
 }

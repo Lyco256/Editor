@@ -157,6 +157,12 @@ pub struct MouseEvent {
     pub position: ScreenCell,
     pub action: MouseAction,
     pub modifiers: Modifiers,
+    #[serde(default = "default_click_count")]
+    pub click_count: u8,
+}
+
+fn default_click_count() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

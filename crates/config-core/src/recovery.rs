@@ -30,6 +30,16 @@ pub struct SelectionState {
     pub active: CursorState,
 }
 
+/// Persisted editor tab disposition. Unknown older records default to a permanent open tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EditorDisposition {
+    Preview,
+    #[default]
+    Open,
+    Pinned,
+}
+
 /// Split orientation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +79,7 @@ pub struct EditorSession {
     pub selections: Vec<SelectionState>,
     pub unsaved_text: Option<String>,
     pub dirty: bool,
+    pub disposition: EditorDisposition,
     #[serde(flatten)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -381,6 +392,7 @@ mod tests {
                 selections: vec![SelectionState::default()],
                 unsaved_text: Some(text.to_owned()),
                 dirty: true,
+                disposition: EditorDisposition::Open,
                 unknown: BTreeMap::new(),
             }],
             tab_order: vec!["editor-1".to_owned()],

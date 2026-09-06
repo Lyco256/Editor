@@ -118,13 +118,43 @@ through `SessionState`, and the verified `devenv` state has been promoted to `ma
 
 ## Requirements 42–51 and latest UI audit
 
-The current working tree contains the new requirement specifications and the first stabilization
-slice: terminal resize events are applied immediately, layout snapshots expose exact tab rectangles,
-menu labels are rendered from the root shell, search/Git projections preserve precise ranges, cursor
-rendering is delegated to a native steady-bar terminal cursor, and forward deletion is grapheme-safe.
-The corresponding workspace gates (`cargo fmt --all`, workspace Clippy with warnings denied, full
-workspace tests, and `cargo test --test doc_mirror`) pass locally. Remaining A-01–A-27 items that
-require further work before release promotion include full root pointer-layout routing, preview/open/
-pinned tab disposition, pane-local mouse gestures, contextual overlay anchoring, and the dedicated
-per-item regression matrix. Therefore this snapshot is pushed as integration progress on `devenv`,
-not reported as final completion or as a verified `main` promotion.
+The Requirements 43–50 implementation is integrated in the root runtime. Rendering and hit testing
+consume one `WorkbenchLayoutSnapshot`; resize, split geometry, editor pointer mapping, native
+steady-bar cursor presentation, grapheme-safe editing, Explorer/tab/menu state, precise search/Git
+ranges, and contextual language placement are covered by deterministic tests. The following matrix
+is the release evidence for every finding in `Requirements/LATEST_UI_BUG_AUDIT.md`.
+
+| Finding | Fixing requirement | Automated proof | Status |
+|---|---|---|---|
+| A-01 | 43 | `shell::tests::resize_matrix_keeps_snapshot_regions_in_frame` | PASS |
+| A-02 | 43 | `shell::tests::authoritative_snapshot_hit_testing_uses_current_geometry` | PASS |
+| A-03 | 43 | `shell::tests::authoritative_snapshot_hit_testing_uses_current_geometry` | PASS |
+| A-04 | 43 | `shell::tests::shell_dispatches_palette_and_mouse_actions` | PASS |
+| A-05 | 46, 48 | `editor::tests::viewport_snapshot_handles_line_numbers_folds_unicode_and_markers` | PASS |
+| A-06 | 46 | `editor::tests::viewport_snapshot_handles_line_numbers_folds_unicode_and_markers` | PASS |
+| A-07 | 47 | `buffer::tests::vertical_navigation_retains_preferred_display_column_across_blank_lines`; `buffer::tests::vertical_navigation_keeps_each_multi_cursor_column` | PASS |
+| A-08 | 48 | `shell::tests::chrome_policy_and_grapheme_metrics_preserve_data_cells` | PASS |
+| A-09 | 45 | `shell::tests::shell_snapshot_covers_tabs_panels_and_palette` | PASS |
+| A-10 | 45 | `shell::tests::variable_width_tab_hit_testing_and_menu_labels_are_exact` | PASS |
+| A-11 | 44 | `shell::tests::variable_width_tab_hit_testing_and_menu_labels_are_exact` | PASS |
+| A-12 | 49 | `shell::tests::resize_matrix_keeps_snapshot_regions_in_frame` | PASS |
+| A-13 | 48 | `widgets::tests::frame_snapshot_records_semantic_styles` | PASS |
+| A-14 | 46 | `app::state::tests::mouse_click_and_drag_create_a_logical_selection` | PASS |
+| A-15 | 45 | `shell::tests::variable_width_tab_hit_testing_and_menu_labels_are_exact` | PASS |
+| A-16 | 50 | `app::state::tests::git_hunk_and_confirmed_discard_dispatch_typed_effects` | PASS |
+| A-17 | 48 | `terminal::tests::cleanup_state_is_ordered_and_idempotent` | PASS |
+| A-18 | 43 | `shell::tests::authoritative_snapshot_hit_testing_uses_current_geometry` | PASS |
+| A-19 | 50 | `app::runtime::tests::root_frame_projects_syntax_roles_and_folds` | PASS |
+| A-20 | 50 | `app::state::tests::workspace_search_events_update_only_the_active_session` | PASS |
+| A-21 | 50 | `app::runtime::tests::root_frame_renders_interactive_language_result_panel` | PASS |
+| A-22 | 48 | `shell::tests::chrome_policy_and_grapheme_metrics_preserve_data_cells` | PASS |
+| A-23 | 47 | `buffer::tests::wide_and_combining_graphemes_move_as_units`; `smart::tests::combining_grapheme_is_deleted_together` | PASS |
+| A-24 | 47 | `input::tests::key_normalization_preserves_modifiers_and_repeat` | PASS |
+| A-25 | 47 | `app::state::tests::workspace_settings_enable_formatting_and_configure_viewport` | PASS |
+| A-26 | 50 | `app::state::tests::lsp_results_update_versioned_language_views` | PASS |
+| A-27 | 50 | `app::state::tests::contextual_language_actions_keep_bottom_panel_selection_stable` | PASS |
+
+Repository gates are run on the same integration commit with formatting, warnings-denied Clippy,
+all-feature workspace tests, and the source/document mirror test. This document intentionally does
+not claim `main` promotion or a remote push until that exact clean, verified `devenv` commit is
+created and pushed.

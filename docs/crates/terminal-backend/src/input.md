@@ -13,6 +13,8 @@ Invariants:
 - Key release reports are filtered out.
 - Unsupported legacy keys and mouse wheel directions that the editor does not consume are ignored.
 - Scroll wheel motion is normalized to line-based vertical scroll events.
+- Consecutive left-button presses at one cell are normalized to click counts 1, 2, and 3;
+  dragging resets the sequence.
 - Resize and paste events pass through unchanged.
 
 Data flow:
@@ -38,3 +40,4 @@ Tests:
 - Key release events are suppressed.
 - Mouse normalization preserves position and vertical scroll direction.
 - Resize events map to the shared resize input event.
+- Click tracking covers double/triple-click promotion and drag reset.

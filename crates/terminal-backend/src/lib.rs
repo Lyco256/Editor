@@ -13,7 +13,7 @@ pub use capability::{
 };
 pub use clipboard::{Clipboard, ClipboardError, MemoryClipboard, SystemClipboard};
 pub use framebuffer::{Cell, Framebuffer, FramebufferError};
-pub use input::{InputReader, normalize_event, normalize_key, normalize_mouse};
+pub use input::{InputReader, MouseClickTracker, normalize_event, normalize_key, normalize_mouse};
 pub use renderer::DifferentialRenderer;
 pub use terminal::{CrosstermBackend, CursorShape, TerminalError, restore_after_panic};
 
@@ -31,6 +31,11 @@ pub fn grapheme_width(grapheme: &str) -> usize {
 #[must_use]
 pub fn display_width(text: &str) -> usize {
     text.graphemes(true).map(grapheme_width).sum()
+}
+
+/// Iterates over terminal grapheme clusters without splitting combining sequences.
+pub fn grapheme_clusters(text: &str) -> impl Iterator<Item = &str> {
+    text.graphemes(true)
 }
 
 /// Truncates text to at most `width` terminal cells, appending ASCII `...` when needed.

@@ -144,6 +144,7 @@ pub struct TextBuffer {
     redo: Vec<HistoryEntry>,
     auto_pairs: Vec<AutoPairMarker>,
     large_file_threshold: usize,
+    preferred_display_columns: Option<Vec<usize>>,
 }
 
 impl Default for TextBuffer {
@@ -171,6 +172,7 @@ impl TextBuffer {
             redo: Vec::new(),
             auto_pairs: Vec::new(),
             large_file_threshold: threshold,
+            preferred_display_columns: None,
         }
     }
 
@@ -252,6 +254,7 @@ impl TextBuffer {
     pub fn set_selections(&mut self, selections: SelectionSet) -> Result<()> {
         validate_selections_in_text(&self.rope.to_string(), &selections)?;
         self.selections = selections;
+        self.preferred_display_columns = None;
         Ok(())
     }
 
@@ -332,6 +335,7 @@ impl TextBuffer {
         mut transaction: Transaction,
         additional_markers: Option<Vec<AutoPairMarker>>,
     ) -> Result<AppliedTransaction> {
+        self.preferred_display_columns = None;
         let original = self.rope.to_string();
         validate_transaction_in_text(&original, &transaction)?;
         transaction.edits.retain(|edit| {
@@ -425,6 +429,7 @@ impl TextBuffer {
     }
 
     pub fn move_left(&mut self, extend: bool) -> Result<()> {
+        self.preferred_display_columns = None;
         let text = self.rope.to_string();
         self.selections = self.selections.mapped(|selection| {
             let active = if !extend && !selection.is_cursor() {
@@ -437,7 +442,19 @@ impl TextBuffer {
         Ok(())
     }
 
+    /// Moves left to the beginning of the previous word boundary.
+    pub fn move_word_left(&mut self, extend: bool) -> Result<()> {
+        self.preferred_display_columns = None;
+        let text = self.rope.to_string();
+        self.selections = self.selections.mapped(|selection| {
+            let active = previous_word_offset(&text, selection.active);
+            selection.with_active(active, extend)
+        })?;
+        Ok(())
+    }
+
     pub fn move_right(&mut self, extend: bool) -> Result<()> {
+        self.preferred_display_columns = None;
         let text = self.rope.to_string();
         self.selections = self.selections.mapped(|selection| {
             let active = if !extend && !selection.is_cursor() {
@@ -450,12 +467,73 @@ impl TextBuffer {
         Ok(())
     }
 
-    pub fn move_vertical(&mut self, line_delta: i32, extend: bool, tab_width: usize) -> Result<()> {
+    /// Moves right to the beginning of the next word boundary.
+    pub fn move_word_right(&mut self, extend: bool) -> Result<()> {
+        self.preferred_display_columns = None;
+        let text = self.rope.to_string();
+        self.selections = self.selections.mapped(|selection| {
+            let active = next_word_offset(&text, selection.active);
+            selection.with_active(active, extend)
+        })?;
+        Ok(())
+    }
+
+    /// Moves every caret to the beginning of its logical line.
+    pub fn move_home(&mut self, extend: bool) -> Result<()> {
+        self.preferred_display_columns = None;
         let text = self.rope.to_string();
         let mut moved = Vec::with_capacity(self.selections.len());
         for selection in self.selections.selections() {
             let position = offset_to_position_in_text(&text, selection.active)?;
-            let desired = display_column_in_text(&text, selection.active, tab_width)?;
+            let active = position_to_offset_in_text(
+                &text,
+                LogicalPosition {
+                    line: position.line,
+                    character: 0,
+                },
+            )?;
+            moved.push(selection.with_active(active, extend));
+        }
+        self.selections = SelectionSet::new(moved, self.selections.primary_index())?;
+        Ok(())
+    }
+
+    /// Moves every caret to the end of its logical line.
+    pub fn move_end(&mut self, extend: bool) -> Result<()> {
+        self.preferred_display_columns = None;
+        let text = self.rope.to_string();
+        let mut moved = Vec::with_capacity(self.selections.len());
+        for selection in self.selections.selections() {
+            let position = offset_to_position_in_text(&text, selection.active)?;
+            let (_, end, _) =
+                line_bounds(&text, position.line).ok_or(crate::EditorError::InvalidPosition {
+                    line: position.line,
+                    character: position.character,
+                })?;
+            moved.push(selection.with_active(CharacterOffset(end), extend));
+        }
+        self.selections = SelectionSet::new(moved, self.selections.primary_index())?;
+        Ok(())
+    }
+
+    pub fn move_vertical(&mut self, line_delta: i32, extend: bool, tab_width: usize) -> Result<()> {
+        let text = self.rope.to_string();
+        let preferred_columns = if let Some(columns) = self
+            .preferred_display_columns
+            .clone()
+            .filter(|columns| columns.len() == self.selections.len())
+        {
+            columns
+        } else {
+            let mut columns = Vec::with_capacity(self.selections.len());
+            for selection in self.selections.selections() {
+                columns.push(display_column_in_text(&text, selection.active, tab_width)?);
+            }
+            columns
+        };
+        let mut moved = Vec::with_capacity(self.selections.len());
+        for (index, selection) in self.selections.selections().iter().enumerate() {
+            let position = offset_to_position_in_text(&text, selection.active)?;
             let last_line = line_bounds(&text, u32::MAX).map_or_else(
                 || text.chars().filter(|character| *character == '\n').count(),
                 |_| 0,
@@ -464,10 +542,12 @@ impl TextBuffer {
                 .saturating_add(i64::from(line_delta))
                 .clamp(0, i64::try_from(last_line).unwrap_or(i64::MAX));
             let line = u32::try_from(target).unwrap_or(u32::MAX);
-            let active = offset_for_display_column_in_text(&text, line, desired, tab_width)?;
+            let preferred = preferred_columns.get(index).copied().unwrap_or(0);
+            let active = offset_for_display_column_in_text(&text, line, preferred, tab_width)?;
             moved.push(selection.with_active(active, extend));
         }
         self.selections = SelectionSet::new(moved, self.selections.primary_index())?;
+        self.preferred_display_columns = Some(preferred_columns);
         Ok(())
     }
 
@@ -762,6 +842,38 @@ pub(crate) fn char_to_byte(text: &str, char_offset: usize) -> usize {
         .map_or(text.len(), |(byte, _)| byte)
 }
 
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn previous_word_offset(text: &str, offset: CharacterOffset) -> CharacterOffset {
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = offset.0.min(chars.len());
+    while index > 0 && chars[index - 1].is_whitespace() {
+        index -= 1;
+    }
+    let class = index.checked_sub(1).map(|at| is_word_character(chars[at]));
+    while index > 0 && index.checked_sub(1).map(|at| is_word_character(chars[at])) == class {
+        index -= 1;
+    }
+    CharacterOffset(index)
+}
+
+fn next_word_offset(text: &str, offset: CharacterOffset) -> CharacterOffset {
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = offset.0.min(chars.len());
+    if index < chars.len() {
+        let class = is_word_character(chars[index]);
+        while index < chars.len() && is_word_character(chars[index]) == class {
+            index += 1;
+        }
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+    }
+    CharacterOffset(index)
+}
+
 fn line_bounds(text: &str, requested_line: u32) -> Option<(usize, usize, usize)> {
     let requested = usize::try_from(requested_line).ok()?;
     let mut line = 0;
@@ -1010,6 +1122,48 @@ mod tests {
                 .iter()
                 .all(|selection| selection.is_cursor())
         );
+    }
+
+    #[test]
+    fn vertical_navigation_retains_preferred_display_column_across_blank_lines() {
+        let mut buffer = TextBuffer::new("abcde\n\nabcde");
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(5))))
+            .expect("selection");
+        buffer.move_vertical(1, false, 4).expect("down to blank");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(6));
+        buffer
+            .move_vertical(1, false, 4)
+            .expect("down to long line");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(12));
+    }
+
+    #[test]
+    fn vertical_navigation_keeps_each_multi_cursor_column() {
+        let mut buffer = TextBuffer::new("ab\ncdef\n\nuvwxyz");
+        buffer
+            .set_selections(
+                SelectionSet::new(
+                    vec![
+                        Selection::cursor(CharacterOffset(1)),
+                        Selection::cursor(CharacterOffset(4)),
+                    ],
+                    0,
+                )
+                .expect("selections"),
+            )
+            .expect("selection");
+        buffer.move_vertical(1, false, 4).expect("down to blank");
+        buffer
+            .move_vertical(1, false, 4)
+            .expect("down to short line");
+        let offsets = buffer
+            .selections()
+            .selections()
+            .iter()
+            .map(|selection| selection.active.0)
+            .collect::<Vec<_>>();
+        assert_eq!(offsets, vec![8, 10]);
     }
 
     #[test]

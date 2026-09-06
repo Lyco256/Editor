@@ -29,3 +29,7 @@ recovery data therefore cannot block startup. Directory and write failures use `
 Tests simulate restart and repeated atomic publication, assert that unsaved text never appears at
 the original workspace path, verify corrupt-newest fallback and all-corrupt safe failure, exercise
 format-version compatibility, and reject path-traversing application identifiers.
+# Tab disposition
+
+`EditorSession.disposition` persists Preview, Open, and Pinned editor semantics while remaining
+backward-compatible with older recovery records through an Open default.

@@ -46,12 +46,20 @@ pub trait InteractiveTerminal: TerminalAdapter + InputReader {}
 
 impl<T> InteractiveTerminal for T where T: TerminalAdapter + InputReader {}
 
+#[derive(Debug, Clone)]
+struct RenderScene {
+    frame: Framebuffer,
+    layout: app_ui::shell::WorkbenchLayoutSnapshot,
+    cursor: Option<(u16, u16)>,
+}
+
 pub struct AppRuntime<T, I, D> {
     terminal: T,
     input: I,
     dispatcher: D,
     state: AppState,
     size: (u16, u16),
+    layout_snapshot: Option<app_ui::shell::WorkbenchLayoutSnapshot>,
     recovery: Option<config_core::RecoveryStore>,
 }
 
@@ -80,6 +88,7 @@ where
             dispatcher,
             state,
             size,
+            layout_snapshot: None,
             recovery: None,
         }
     }
@@ -99,6 +108,7 @@ where
             dispatcher,
             state,
             size,
+            layout_snapshot: None,
             recovery: Some(recovery),
         }
     }
@@ -143,6 +153,7 @@ where
                 }
                 continue;
             }
+            let action = self.translate_pointer_action(action);
             let transition = self.state.apply_action(action);
             for event in transition.events {
                 self.state.apply_event(event);
@@ -171,15 +182,41 @@ where
         if self.size.0 == 0 || self.size.1 == 0 {
             return Ok(());
         }
-        let frame = frame_for_state(&self.state, self.size, self.terminal.capabilities());
+        let scene = scene_for_state(&self.state, self.size, self.terminal.capabilities());
+        self.layout_snapshot = Some(scene.layout.clone());
         self.terminal
-            .render(&frame)
+            .render(&scene.frame)
             .map_err(|error| RuntimeError::Render(error.to_string()))?;
         self.terminal
-            .present_cursor(cursor_for_state(&self.state, self.size))
+            .present_cursor(scene.cursor)
             .map_err(|error| RuntimeError::Render(error.to_string()))?;
         self.state.frame_number += 1;
         Ok(())
+    }
+
+    fn translate_pointer_action(&self, action: Action) -> Action {
+        let Action::Input(InputEvent::Mouse(mouse)) = action else {
+            return action;
+        };
+        let Some(layout) = self.layout_snapshot.as_ref() else {
+            return Action::Input(InputEvent::Mouse(mouse));
+        };
+        if let Some(target) = layout.pointer_target(mouse.position.column, mouse.position.row) {
+            return Action::Pointer(app_ui::shell::PointerEvent {
+                target,
+                screen: mouse.position,
+                action: mouse.action,
+                modifiers: mouse.modifiers,
+                click_count: mouse.click_count,
+            });
+        }
+        Action::Pointer(app_ui::shell::PointerEvent {
+            target: app_ui::shell::PointerTarget::Outside,
+            screen: mouse.position,
+            action: mouse.action,
+            modifiers: mouse.modifiers,
+            click_count: mouse.click_count,
+        })
     }
 
     fn persist_checkpoint(&mut self) {
@@ -197,75 +234,22 @@ where
     }
 }
 
-fn cursor_for_state(state: &AppState, size: (u16, u16)) -> Option<(u16, u16)> {
-    if state.explorer_focus || size.0 == 0 || size.1 == 0 {
-        return None;
-    }
-    let buffer = state
-        .tabs
-        .get(state.active_tab)
-        .map_or(&state.buffer, |tab| &tab.buffer);
-    let position = buffer
-        .offset_to_position(buffer.selections().primary().active)
-        .ok()?;
-    let layout = app_ui::shell::ShellState {
-        explorer: ExplorerState {
-            roots: Vec::new(),
-            entries: Vec::new(),
-            visible: state.explorer_visible,
-        },
-        tabs: Vec::new(),
-        root: PaneNode::leaf(EditorViewportState {
-            pane_id: state.focused_pane,
-            title: String::new(),
-            snapshot: buffer.snapshot(),
-            viewport: state
-                .panes
-                .iter()
-                .find(|pane| pane.id == state.focused_pane)
-                .map_or_else(app_ui::editor::TextViewport::default, |pane| pane.viewport),
-            selections: buffer.selections().clone(),
-            folds: editor_core::FoldSet::default(),
-            markers: SemanticMarkerSet::default(),
-            syntax_spans: Vec::new(),
-            search_matches: Vec::new(),
-            bracket_matches: Vec::new(),
-            status: EditorStatusData::default(),
-            show_line_numbers: state.show_line_numbers,
-            tab_width: state.tab_width,
-            overview_whole_document: true,
-            inlay_hints: Vec::new(),
-        }),
-        bottom: BottomPanelState {
-            title: String::new(),
-            entries: Vec::new(),
-            visible: false,
-        },
-        palette: app_ui::widgets::CommandPaletteState::default(),
-        focus: ShellFocus::Editor,
-        status: EditorStatusData::default(),
-    }
-    .layout(app_ui::widgets::Rect::new(0, 0, size.0, size.1));
-    // The shell's editor viewport owns exact gutter/scroll metrics; this fallback keeps the
-    // native cursor visible for the common unscrolled case while avoiding a source-cell glyph.
-    let x = layout
-        .editor
-        .x
-        .saturating_add(2)
-        .saturating_add(u16::try_from(position.character).ok()?);
-    let y = layout
-        .editor
-        .y
-        .saturating_add(u16::try_from(position.line).ok()?);
-    (x < layout.editor.right() && y < layout.editor.bottom()).then_some((x, y))
-}
-
+#[cfg(test)]
 #[allow(clippy::too_many_lines)]
 fn frame_for_state(
     state: &AppState,
     size: (u16, u16),
     capabilities: editor_types::TerminalCapabilities,
 ) -> Framebuffer {
+    scene_for_state(state, size, capabilities).frame
+}
+
+#[allow(clippy::too_many_lines)]
+fn scene_for_state(
+    state: &AppState,
+    size: (u16, u16),
+    capabilities: editor_types::TerminalCapabilities,
+) -> RenderScene {
     let mut frame = empty_frame(size.0, size.1);
     // The active tab buffer is authoritative. `active_text` is a projection used by recovery and
     // serialization; reconstructing a TextBuffer here would reset selections and undo history on
@@ -396,8 +380,15 @@ fn frame_for_state(
                 .position_to_offset(editor_types::LogicalPosition { line, character: 0 })
                 .ok()?;
             let line_text = snapshot.line_text(line).ok()?;
-            let start_byte = result.line_byte_range.start.min(line_text.len());
-            let end_byte = result.line_byte_range.end.min(line_text.len());
+            if buffer.is_dirty() && line_text != result.line_text {
+                return None;
+            }
+            let start_byte = result.line_byte_range.start;
+            let end_byte = result.line_byte_range.end;
+            let matched = line_text.get(start_byte..end_byte)?;
+            if matched != result.matched_text {
+                return None;
+            }
             let start_chars = line_text[..start_byte].chars().count();
             let end_chars = line_text[..end_byte].chars().count();
             let start = editor_core::CharacterOffset(line_start.0.saturating_add(start_chars));
@@ -506,6 +497,7 @@ fn frame_for_state(
             label: entry.label.clone(),
             active: entry.active,
             expanded: entry.expanded,
+            is_directory: entry.is_directory,
         })
         .collect();
     let mut output_entries: Vec<PanelEntry> = state
@@ -658,6 +650,7 @@ fn frame_for_state(
                 dirty: tab.buffer.is_dirty(),
                 active: index == state.active_tab,
                 closeable: true,
+                disposition: tab.disposition,
             })
             .collect(),
         root,
@@ -667,7 +660,6 @@ fn frame_for_state(
                 super::state::BottomPanelView::Problems => "Problems",
                 super::state::BottomPanelView::Search => "Search",
                 super::state::BottomPanelView::Git => "Source Control",
-                super::state::BottomPanelView::Language => "Language",
             }
             .to_owned(),
             entries: output_entries,
@@ -681,19 +673,20 @@ fn frame_for_state(
         palette: state.palette.clone(),
         focus: if state.palette_visible {
             ShellFocus::CommandPalette
+        } else if state.menu_open {
+            ShellFocus::Menu
         } else if state.explorer_focus {
             ShellFocus::Explorer
         } else {
             ShellFocus::Editor
         },
         status,
+        menu_open: state.menu_open,
+        menu_category: state.menu_category,
+        menu_item: state.menu_item,
     };
-    shell.render(
-        &mut frame,
-        app_ui::widgets::Rect::new(0, 0, size.0, size.1),
-        capabilities,
-    );
-    let layout = shell.layout(app_ui::widgets::Rect::new(0, 0, size.0, size.1));
+    let layout = shell.layout_snapshot(app_ui::widgets::Rect::new(0, 0, size.0, size.1));
+    shell.render_snapshot(&mut frame, &layout, capabilities);
     if let Some(bottom) = layout.bottom {
         let panel = match state.bottom_panel_view {
             super::state::BottomPanelView::Output => None,
@@ -720,7 +713,6 @@ fn frame_for_state(
                 );
                 panel
             }),
-            super::state::BottomPanelView::Language => language_panel_for_state(state, bottom),
         };
         if let Some(panel) = panel {
             blit_frame(&mut frame, &panel, bottom.x, bottom.y);
@@ -740,13 +732,17 @@ fn frame_for_state(
                 .unwrap_or(u16::MAX)
                 .min(size.1.saturating_sub(2))
                 .max(3);
-            let x = u16::try_from(overlay.placement.anchor.character)
-                .unwrap_or(0)
-                .min(size.0.saturating_sub(width).saturating_sub(1));
-            let y = u16::try_from(overlay.placement.anchor.line)
-                .unwrap_or(0)
+            let (anchor_x, anchor_y) = screen_anchor_for_overlay(
+                &shell.root,
+                layout.editor,
+                state.focused_pane,
+                overlay.placement.anchor,
+            )
+            .unwrap_or((layout.editor.x, layout.editor.y));
+            let x = anchor_x.min(size.0.saturating_sub(width));
+            let y = anchor_y
                 .saturating_add(1)
-                .min(size.1.saturating_sub(height).saturating_sub(1));
+                .min(size.1.saturating_sub(height));
             let mut popup = Framebuffer::new(width, height);
             let rect = app_ui::widgets::Rect::new(0, 0, width, height);
             app_ui::widgets::fill_rect(
@@ -779,7 +775,7 @@ fn frame_for_state(
                     &text,
                     StyleRole::EditorText,
                     if overlay.selected == index {
-                        StyleRole::Selection
+                        StyleRole::SelectionBackground
                     } else {
                         StyleRole::Panel
                     },
@@ -788,7 +784,202 @@ fn frame_for_state(
             blit_frame(&mut frame, &popup, x, y);
         }
     }
-    frame
+    let cursor = if matches!(shell.focus, ShellFocus::Editor) {
+        cursor_for_panes(&shell.root, layout.editor, state.focused_pane)
+    } else {
+        None
+    };
+    RenderScene {
+        frame,
+        layout,
+        cursor,
+    }
+}
+
+fn cursor_for_panes(
+    node: &PaneNode,
+    rect: app_ui::widgets::Rect,
+    focused_pane: u32,
+) -> Option<(u16, u16)> {
+    match node {
+        PaneNode::Leaf(viewport) if viewport.pane_id == focused_pane => {
+            let content = if rect.height > 1 {
+                app_ui::widgets::Rect::new(
+                    rect.x,
+                    rect.y.saturating_add(1),
+                    rect.width,
+                    rect.height.saturating_sub(1),
+                )
+            } else {
+                rect
+            };
+            viewport.cursor_cell(content)
+        }
+        PaneNode::Leaf(_) => None,
+        PaneNode::Split {
+            axis,
+            ratio_percent,
+            first,
+            second,
+        } => {
+            let inner = rect;
+            match axis {
+                app_ui::shell::SplitAxis::Vertical => {
+                    let left_width = inner
+                        .width
+                        .saturating_mul(*ratio_percent)
+                        .saturating_div(100)
+                        .max(1);
+                    let divider = inner.x.saturating_add(left_width);
+                    cursor_for_panes(
+                        first,
+                        app_ui::widgets::Rect::new(inner.x, inner.y, left_width, inner.height),
+                        focused_pane,
+                    )
+                    .or_else(|| {
+                        cursor_for_panes(
+                            second,
+                            app_ui::widgets::Rect::new(
+                                divider.saturating_add(1),
+                                inner.y,
+                                inner.width.saturating_sub(left_width).saturating_sub(1),
+                                inner.height,
+                            ),
+                            focused_pane,
+                        )
+                    })
+                }
+                app_ui::shell::SplitAxis::Horizontal => {
+                    let top_height = inner
+                        .height
+                        .saturating_mul(*ratio_percent)
+                        .saturating_div(100)
+                        .max(1);
+                    let divider = inner.y.saturating_add(top_height);
+                    cursor_for_panes(
+                        first,
+                        app_ui::widgets::Rect::new(inner.x, inner.y, inner.width, top_height),
+                        focused_pane,
+                    )
+                    .or_else(|| {
+                        cursor_for_panes(
+                            second,
+                            app_ui::widgets::Rect::new(
+                                inner.x,
+                                divider.saturating_add(1),
+                                inner.width,
+                                inner.height.saturating_sub(top_height).saturating_sub(1),
+                            ),
+                            focused_pane,
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn screen_anchor_for_overlay(
+    node: &PaneNode,
+    rect: app_ui::widgets::Rect,
+    pane_id: u32,
+    anchor: editor_types::LogicalPosition,
+) -> Option<(u16, u16)> {
+    match node {
+        PaneNode::Leaf(viewport) if viewport.pane_id == pane_id => {
+            let content = if rect.height > 1 {
+                app_ui::widgets::Rect::new(
+                    rect.x,
+                    rect.y.saturating_add(1),
+                    rect.width,
+                    rect.height.saturating_sub(1),
+                )
+            } else {
+                rect
+            };
+            let geometry = viewport.geometry(content);
+            let text_left = geometry.text.x;
+            let text_right = geometry.text.right();
+            let row = anchor.line.checked_sub(viewport.viewport.top_line)?;
+            if row >= u32::from(content.height) {
+                return None;
+            }
+            let offset = viewport.snapshot.position_to_offset(anchor).ok()?;
+            let display = viewport
+                .snapshot
+                .display_column(offset, viewport.tab_width)
+                .ok()?;
+            let column = display.saturating_sub(usize::from(viewport.viewport.left_column));
+            let x = text_left.saturating_add(u16::try_from(column).ok()?);
+            let y = content.y.saturating_add(u16::try_from(row).ok()?);
+            (x < text_right && y < content.bottom()).then_some((x, y))
+        }
+        PaneNode::Leaf(_) => None,
+        PaneNode::Split {
+            axis,
+            ratio_percent,
+            first,
+            second,
+        } => {
+            let inner = rect;
+            match axis {
+                app_ui::shell::SplitAxis::Vertical => {
+                    let left = inner
+                        .width
+                        .saturating_mul(*ratio_percent)
+                        .saturating_div(100)
+                        .max(1);
+                    let divider = inner.x.saturating_add(left);
+                    screen_anchor_for_overlay(
+                        first,
+                        app_ui::widgets::Rect::new(inner.x, inner.y, left, inner.height),
+                        pane_id,
+                        anchor,
+                    )
+                    .or_else(|| {
+                        screen_anchor_for_overlay(
+                            second,
+                            app_ui::widgets::Rect::new(
+                                divider.saturating_add(1),
+                                inner.y,
+                                inner.width.saturating_sub(left).saturating_sub(1),
+                                inner.height,
+                            ),
+                            pane_id,
+                            anchor,
+                        )
+                    })
+                }
+                app_ui::shell::SplitAxis::Horizontal => {
+                    let top = inner
+                        .height
+                        .saturating_mul(*ratio_percent)
+                        .saturating_div(100)
+                        .max(1);
+                    let divider = inner.y.saturating_add(top);
+                    screen_anchor_for_overlay(
+                        first,
+                        app_ui::widgets::Rect::new(inner.x, inner.y, inner.width, top),
+                        pane_id,
+                        anchor,
+                    )
+                    .or_else(|| {
+                        screen_anchor_for_overlay(
+                            second,
+                            app_ui::widgets::Rect::new(
+                                inner.x,
+                                divider.saturating_add(1),
+                                inner.width,
+                                inner.height.saturating_sub(top).saturating_sub(1),
+                            ),
+                            pane_id,
+                            anchor,
+                        )
+                    })
+                }
+            }
+        }
+    }
 }
 
 /// Projects Git diff hunks into precise document ranges for the editor gutter and overview.
@@ -931,88 +1122,7 @@ fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebu
 }
 
 fn write_overlay_line(frame: &mut Framebuffer, row: u16, text: &str, foreground: StyleRole) {
-    let (columns, rows) = frame.size();
-    if row >= rows {
-        return;
-    }
-    for (column, character) in text.chars().enumerate() {
-        let Ok(column) = u16::try_from(column) else {
-            break;
-        };
-        if column >= columns {
-            break;
-        }
-        let _ = frame.set(
-            column,
-            row,
-            terminal_backend::Cell {
-                symbol: character.to_string(),
-                foreground,
-                background: StyleRole::Panel,
-                ..terminal_backend::Cell::default()
-            },
-        );
-    }
-}
-
-fn language_panel_for_state(state: &AppState, area: app_ui::widgets::Rect) -> Option<Framebuffer> {
-    let width = area.width;
-    let height = area.height;
-    match state.last_language_method.as_deref()? {
-        "textDocument/completion" => state
-            .language_ui
-            .completion
-            .current()
-            .map(|view| app_ui::language::render_completion_view(view, width, height)),
-        "textDocument/hover" => state
-            .language_ui
-            .hover
-            .current()
-            .map(|view| app_ui::language::render_hover_view(view, width, height)),
-        "textDocument/signatureHelp" => state
-            .language_ui
-            .signature
-            .current()
-            .map(|view| app_ui::language::render_signature_view(view, width, height)),
-        "textDocument/definition" | "textDocument/declaration" | "textDocument/implementation" => {
-            state
-                .language_ui
-                .go_to
-                .current()
-                .map(|view| app_ui::language::render_location_chooser(view, width, height))
-        }
-        "textDocument/references" => state
-            .language_ui
-            .references
-            .current()
-            .map(|view| app_ui::language::render_location_chooser(view, width, height)),
-        "textDocument/rename" => state
-            .language_ui
-            .rename
-            .current()
-            .map(|view| app_ui::language::render_rename_preview(view, width, height)),
-        "textDocument/codeAction" => state
-            .language_ui
-            .code_actions
-            .current()
-            .map(|view| app_ui::language::render_code_actions(view, width, height)),
-        "textDocument/inlayHint" => state
-            .language_ui
-            .inlay_hints
-            .current()
-            .map(|view| app_ui::language::render_inlay_hints(view, width, height)),
-        "textDocument/documentSymbol" | "workspace/symbol" => state
-            .language_ui
-            .symbols
-            .current()
-            .map(|view| app_ui::language::render_symbols(view, width, height)),
-        "textDocument/formatting" | "textDocument/rangeFormatting" => state
-            .language_ui
-            .formatting
-            .current()
-            .map(|view| app_ui::language::render_formatting_feedback(view, width, height)),
-        _ => None,
-    }
+    let _ = app_ui::widgets::write_text(frame, 0, row, text, foreground, StyleRole::Panel);
 }
 
 fn blit_frame(destination: &mut Framebuffer, source: &Framebuffer, x: u16, y: u16) {

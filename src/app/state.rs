@@ -66,6 +66,9 @@ pub struct AppState {
     pub bottom_panel_visible: bool,
     pub(crate) bottom_panel_view: BottomPanelView,
     pub palette_visible: bool,
+    pub menu_open: bool,
+    pub menu_category: usize,
+    pub menu_item: usize,
     pub(crate) input_mode: Option<InputMode>,
     pub(crate) input_buffer: String,
     pub(crate) palette: CommandPaletteState,
@@ -107,7 +110,6 @@ pub(crate) enum BottomPanelView {
     Problems,
     Search,
     Git,
-    Language,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +120,12 @@ pub(crate) enum InputMode {
     Find,
     ReplaceQuery,
     ReplaceReplacement { query: String },
+}
+
+#[allow(clippy::large_enum_variant)]
+enum MenuKeyOutcome {
+    NotHandled,
+    Handled(Option<Effect>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +145,7 @@ pub struct TabState {
     pub encoding: workspace_core::EncodingKind,
     pub with_bom: bool,
     pub line_endings: workspace_core::LineEndings,
+    pub disposition: app_ui::shell::TabDisposition,
 }
 
 /// Stable editor pane identity and persistent per-pane view state.
@@ -169,6 +178,7 @@ impl TabState {
             encoding: workspace_core::EncodingKind::Utf8,
             with_bom: false,
             line_endings: workspace_core::LineEndings::Lf,
+            disposition: app_ui::shell::TabDisposition::Open,
         }
     }
 }
@@ -851,6 +861,78 @@ fn workspace_line_endings_to_config(
     }
 }
 
+fn language_request_anchor(
+    request: &app_ui::language::LanguageEffectRequest,
+) -> Option<LogicalPosition> {
+    use app_ui::language::LanguageEffectRequest;
+    match request {
+        LanguageEffectRequest::RequestCompletion { position, .. }
+        | LanguageEffectRequest::RequestHover { position, .. }
+        | LanguageEffectRequest::RequestSignatureHelp { position, .. }
+        | LanguageEffectRequest::RequestGoTo { position, .. }
+        | LanguageEffectRequest::RequestDeclaration { position, .. }
+        | LanguageEffectRequest::RequestImplementation { position, .. }
+        | LanguageEffectRequest::RequestReferences { position, .. }
+        | LanguageEffectRequest::RequestRenamePreview { position, .. }
+        | LanguageEffectRequest::RequestPrepareRename { position, .. } => Some(*position),
+        _ => None,
+    }
+}
+
+fn language_request_document(
+    request: &app_ui::language::LanguageEffectRequest,
+) -> Option<DocumentId> {
+    use app_ui::language::LanguageEffectRequest;
+    match request {
+        LanguageEffectRequest::RequestWorkspaceSymbols { .. }
+        | LanguageEffectRequest::RestartLanguageServer => None,
+        LanguageEffectRequest::RequestCompletion { document, .. }
+        | LanguageEffectRequest::RefreshSyntax { document, .. }
+        | LanguageEffectRequest::RefreshSemanticTokens { document, .. }
+        | LanguageEffectRequest::RefreshDiagnostics { document, .. }
+        | LanguageEffectRequest::RequestHover { document, .. }
+        | LanguageEffectRequest::RequestSignatureHelp { document, .. }
+        | LanguageEffectRequest::RequestGoTo { document, .. }
+        | LanguageEffectRequest::RequestDeclaration { document, .. }
+        | LanguageEffectRequest::RequestImplementation { document, .. }
+        | LanguageEffectRequest::RequestReferences { document, .. }
+        | LanguageEffectRequest::RequestRenamePreview { document, .. }
+        | LanguageEffectRequest::RequestPrepareRename { document, .. }
+        | LanguageEffectRequest::RequestCompletionResolve { document, .. }
+        | LanguageEffectRequest::RequestCodeActions { document, .. }
+        | LanguageEffectRequest::RequestInlayHints { document, .. }
+        | LanguageEffectRequest::RequestDocumentSymbols { document, .. }
+        | LanguageEffectRequest::RequestFormatting { document, .. }
+        | LanguageEffectRequest::RequestRangeFormatting { document, .. } => Some(*document),
+    }
+}
+
+fn language_request_version(request: &app_ui::language::LanguageEffectRequest) -> Option<u64> {
+    use app_ui::language::LanguageEffectRequest;
+    match request {
+        LanguageEffectRequest::RestartLanguageServer => None,
+        LanguageEffectRequest::RequestWorkspaceSymbols { version, .. }
+        | LanguageEffectRequest::RefreshSyntax { version, .. }
+        | LanguageEffectRequest::RefreshSemanticTokens { version, .. }
+        | LanguageEffectRequest::RefreshDiagnostics { version, .. }
+        | LanguageEffectRequest::RequestCompletion { version, .. }
+        | LanguageEffectRequest::RequestHover { version, .. }
+        | LanguageEffectRequest::RequestSignatureHelp { version, .. }
+        | LanguageEffectRequest::RequestGoTo { version, .. }
+        | LanguageEffectRequest::RequestDeclaration { version, .. }
+        | LanguageEffectRequest::RequestImplementation { version, .. }
+        | LanguageEffectRequest::RequestReferences { version, .. }
+        | LanguageEffectRequest::RequestRenamePreview { version, .. }
+        | LanguageEffectRequest::RequestPrepareRename { version, .. }
+        | LanguageEffectRequest::RequestCompletionResolve { version, .. }
+        | LanguageEffectRequest::RequestCodeActions { version, .. }
+        | LanguageEffectRequest::RequestInlayHints { version, .. }
+        | LanguageEffectRequest::RequestDocumentSymbols { version, .. }
+        | LanguageEffectRequest::RequestFormatting { version, .. }
+        | LanguageEffectRequest::RequestRangeFormatting { version, .. } => Some(*version),
+    }
+}
+
 impl Default for AppState {
     #[allow(clippy::too_many_lines)]
     fn default() -> Self {
@@ -899,6 +981,9 @@ impl Default for AppState {
             bottom_panel_visible: false,
             bottom_panel_view: BottomPanelView::Output,
             palette_visible: false,
+            menu_open: false,
+            menu_category: 0,
+            menu_item: 0,
             input_mode: None,
             input_buffer: String::new(),
             palette: CommandPaletteState::new(vec![
@@ -946,6 +1031,8 @@ impl Default for AppState {
                 CommandEntry::available("workbench.showProblems", "Show Problems"),
                 CommandEntry::available("workbench.showGit", "Show Source Control"),
                 CommandEntry::available("workbench.showOutput", "Show Output"),
+                CommandEntry::available("workbench.toggleExplorer", "Toggle Explorer"),
+                CommandEntry::available("workbench.commandPalette", "Command Palette"),
                 CommandEntry::available("workspace.confirmFileOperation", "Confirm File Operation"),
                 CommandEntry::available("workspace.cancelFileOperation", "Cancel File Operation"),
                 CommandEntry::available("editor.quit", "Quit"),
@@ -986,6 +1073,28 @@ impl Default for AppState {
                     "language.requestRangeFormatting",
                     "Request Range Formatting",
                 ),
+                // Menu-only command IDs remain in the authoritative registry even when a
+                // platform-specific implementation is not available in the current state.
+                CommandEntry::disabled("workbench.openFile", "Open File"),
+                CommandEntry::disabled("workspace.addRoot", "Add Folder to Workspace"),
+                CommandEntry::disabled("editor.saveAs", "Save As"),
+                CommandEntry::disabled("editor.reopenEncoding", "Reopen with Encoding"),
+                CommandEntry::disabled("editor.saveEncoding", "Save with Encoding"),
+                CommandEntry::disabled("workspace.replace", "Replace in Files"),
+                CommandEntry::disabled("editor.selectAll", "Select All"),
+                CommandEntry::disabled("editor.selectLine", "Select Line"),
+                CommandEntry::disabled("editor.selectNextOccurrence", "Select Next Match"),
+                CommandEntry::disabled("editor.skipNextOccurrence", "Skip Current Selection"),
+                CommandEntry::disabled("workbench.focusLeft", "Focus Left Group"),
+                CommandEntry::disabled("workbench.focusRight", "Focus Right Group"),
+                CommandEntry::disabled("workbench.focusAbove", "Focus Group Above"),
+                CommandEntry::disabled("workbench.focusBelow", "Focus Group Below"),
+                CommandEntry::available("workbench.toggleLineNumbers", "Toggle Line Numbers"),
+                CommandEntry::disabled("editor.goToLine", "Go to Line/Column"),
+                CommandEntry::disabled("workbench.nextProblem", "Next Problem"),
+                CommandEntry::disabled("workbench.previousProblem", "Previous Problem"),
+                CommandEntry::disabled("workbench.keyboardShortcuts", "Show Keyboard Shortcuts"),
+                CommandEntry::disabled("workbench.about", "About Editor"),
             ]),
             tabs: vec![TabState::untitled()],
             active_tab: 0,
@@ -1530,8 +1639,6 @@ impl AppState {
             }
             LanguageAction::AcceptCompletion { index } => {
                 self.last_language_method = Some("textDocument/completion".to_owned());
-                self.bottom_panel_view = BottomPanelView::Language;
-                self.bottom_panel_visible = true;
                 let applied = self.apply_completion_item(index);
                 self.output.push(OutputMessage {
                     subsystem: "lsp".to_owned(),
@@ -1546,8 +1653,6 @@ impl AppState {
             }
             LanguageAction::ExpandCompletionDetails { index } => {
                 self.last_language_method = Some("textDocument/completion".to_owned());
-                self.bottom_panel_view = BottomPanelView::Language;
-                self.bottom_panel_visible = true;
                 let transition = self.apply_language_effect_request(
                     app_ui::language::LanguageEffectRequest::RequestCompletionResolve {
                         document: self.document_id,
@@ -1567,8 +1672,6 @@ impl AppState {
             }
             LanguageAction::PrepareRename => {
                 self.last_language_method = Some("textDocument/prepareRename".to_owned());
-                self.bottom_panel_view = BottomPanelView::Language;
-                self.bottom_panel_visible = true;
                 return self.apply_language_effect_request(
                     app_ui::language::LanguageEffectRequest::RequestPrepareRename {
                         document: self.document_id,
@@ -1579,18 +1682,12 @@ impl AppState {
             }
             LanguageAction::OpenHover => {
                 self.last_language_method = Some("textDocument/hover".to_owned());
-                self.bottom_panel_view = BottomPanelView::Language;
-                self.bottom_panel_visible = true;
             }
             LanguageAction::OpenSignatureHelp => {
                 self.last_language_method = Some("textDocument/signatureHelp".to_owned());
-                self.bottom_panel_view = BottomPanelView::Language;
-                self.bottom_panel_visible = true;
             }
             LanguageAction::AcceptRenamePreview => {
                 self.last_language_method = Some("textDocument/rename".to_owned());
-                self.bottom_panel_view = BottomPanelView::Language;
-                self.bottom_panel_visible = true;
                 let Some(edit) = self.lsp_results.get("textDocument/rename").cloned() else {
                     self.output.push(OutputMessage {
                         subsystem: "lsp".to_owned(),
@@ -1620,8 +1717,6 @@ impl AppState {
             }
             LanguageAction::AcceptCodeAction { index } => {
                 self.last_language_method = Some("textDocument/codeAction".to_owned());
-                self.bottom_panel_view = BottomPanelView::Language;
-                self.bottom_panel_visible = true;
                 if let Some(edit) = self
                     .lsp_results
                     .get("textDocument/codeAction")
@@ -1813,6 +1908,37 @@ impl AppState {
                 render: true,
                 ..Transition::default()
             };
+        }
+        if let Some(document) = language_request_document(&request)
+            && document != self.document_id
+        {
+            self.output.push(OutputMessage {
+                subsystem: "lsp".to_owned(),
+                operation: "document-identity".to_owned(),
+                level: OutputLevel::Warning,
+                message: "ignored language request for a document that is not active".to_owned(),
+            });
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        }
+        if let Some(version) = language_request_version(&request)
+            && version != self.buffer.snapshot().version()
+        {
+            self.output.push(OutputMessage {
+                subsystem: "lsp".to_owned(),
+                operation: "version-identity".to_owned(),
+                level: OutputLevel::Warning,
+                message: "ignored language request for a stale document version".to_owned(),
+            });
+            return Transition {
+                render: true,
+                ..Transition::default()
+            };
+        }
+        if let Some(anchor) = language_request_anchor(&request) {
+            self.language_ui.set_contextual_anchor(anchor);
         }
         let (method, params, version) = match request {
             LanguageEffectRequest::RequestCompletion {
@@ -2930,6 +3056,15 @@ impl AppState {
                     selections: selection,
                     unsaved_text: tab.buffer.is_dirty().then(|| tab.buffer.to_string()),
                     dirty: tab.buffer.is_dirty(),
+                    disposition: match tab.disposition {
+                        app_ui::shell::TabDisposition::Preview => {
+                            config_core::EditorDisposition::Preview
+                        }
+                        app_ui::shell::TabDisposition::Open => config_core::EditorDisposition::Open,
+                        app_ui::shell::TabDisposition::Pinned => {
+                            config_core::EditorDisposition::Pinned
+                        }
+                    },
                     unknown: std::collections::BTreeMap::new(),
                 }
             })
@@ -3098,6 +3233,13 @@ impl AppState {
                 encoding,
                 with_bom,
                 line_endings,
+                disposition: match editor.disposition {
+                    config_core::EditorDisposition::Preview => {
+                        app_ui::shell::TabDisposition::Preview
+                    }
+                    config_core::EditorDisposition::Pinned => app_ui::shell::TabDisposition::Pinned,
+                    config_core::EditorDisposition::Open => app_ui::shell::TabDisposition::Open,
+                },
             });
         }
         if self.tabs.is_empty() {
@@ -3201,6 +3343,7 @@ impl AppState {
                     encoding: document.encoding,
                     with_bom: document.had_bom,
                     line_endings,
+                    disposition: app_ui::shell::TabDisposition::Open,
                 }];
                 self.active_tab = 0;
                 self.workspace_roots = self
@@ -3251,6 +3394,7 @@ impl AppState {
             encoding: document.encoding,
             with_bom: document.had_bom,
             line_endings,
+            disposition: app_ui::shell::TabDisposition::Open,
         });
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.active_path = Some(document.path);
@@ -3261,6 +3405,39 @@ impl AppState {
         self.refresh_explorer_entries();
         self.queue_lsp_did_open();
         Ok(())
+    }
+
+    fn open_preview_tab(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), workspace_core::DocumentOpenError> {
+        if let Some(index) = self.tabs.iter().position(|tab| {
+            tab.disposition == app_ui::shell::TabDisposition::Preview && !tab.buffer.is_dirty()
+        }) {
+            self.close_tab_if_clean(index);
+        }
+        self.open_tab(path)?;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.disposition = app_ui::shell::TabDisposition::Preview;
+        }
+        Ok(())
+    }
+
+    fn close_tab_if_clean(&mut self, index: usize) {
+        if index >= self.tabs.len() || self.tabs[index].buffer.is_dirty() {
+            return;
+        }
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.tabs.push(TabState::untitled());
+        }
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len().saturating_sub(1);
+        } else if index < self.active_tab {
+            self.active_tab = self.active_tab.saturating_sub(1);
+        }
+        self.buffer = self.tabs[self.active_tab].buffer.clone();
+        self.sync_buffer_projection();
     }
 
     #[must_use]
@@ -3451,6 +3628,7 @@ impl AppState {
                     encoding: document.encoding,
                     with_bom: document.had_bom,
                     line_endings: document.line_endings,
+                    disposition: app_ui::shell::TabDisposition::Open,
                 };
                 self.active_path = Some(document.path);
                 self.buffer = self.tabs[self.active_tab].buffer.clone();
@@ -3666,6 +3844,11 @@ impl AppState {
         let before_version = self.buffer.snapshot().version();
         let mut transition = self.apply_action_inner(action);
         if self.buffer.snapshot().version() != before_version {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                if tab.disposition == app_ui::shell::TabDisposition::Preview {
+                    tab.disposition = app_ui::shell::TabDisposition::Open;
+                }
+            }
             self.language_ui
                 .set_document_version(self.buffer.snapshot().version());
             transition.effects.push(self.syntax_effect());
@@ -3690,6 +3873,7 @@ impl AppState {
         match action {
             Action::Language(action) => return self.apply_language_action(action),
             Action::Git(action) => return self.apply_git_action(action),
+            Action::Pointer(pointer) => return self.apply_pointer(pointer),
             Action::Quit => {
                 if self.active_dirty {
                     self.output.push(OutputMessage {
@@ -4436,6 +4620,280 @@ impl AppState {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn apply_pointer(&mut self, pointer: app_ui::shell::PointerEvent) -> Transition {
+        use app_ui::shell::PointerTarget;
+        let mut effects = Vec::new();
+        if self.menu_open
+            && matches!(pointer.action, MouseAction::Down(MouseButton::Left))
+            && !matches!(
+                pointer.target,
+                PointerTarget::Menu(_) | PointerTarget::MenuItem { .. }
+            )
+        {
+            self.menu_open = false;
+        }
+        match pointer.target {
+            PointerTarget::Tab(index) => {
+                if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
+                    self.switch_tab(index);
+                }
+            }
+            PointerTarget::Explorer(index) => {
+                if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
+                    let entry_index = index.saturating_sub(1);
+                    if let Some(entry) = self.explorer_entries.get(entry_index).cloned() {
+                        self.explorer_cursor = entry_index;
+                        self.focus_explorer();
+                        if entry.is_directory {
+                            // A row click selects the directory; expansion is an explicit
+                            // affordance (or a double click), never an accidental toggle.
+                            if pointer.click_count < 2 {
+                                return Transition {
+                                    effects,
+                                    render: true,
+                                    ..Transition::default()
+                                };
+                            }
+                            if self.explorer_expanded.contains(&entry.path) {
+                                self.explorer_expanded.remove(&entry.path);
+                            } else {
+                                self.explorer_expanded.insert(entry.path.clone());
+                            }
+                            effects.extend(self.explorer_refresh_transition().effects);
+                        } else {
+                            self.blur_explorer();
+                            if pointer.click_count >= 2 {
+                                let _ = self.open_tab(entry.path);
+                            } else {
+                                let _ = self.open_preview_tab(entry.path);
+                            }
+                        }
+                    }
+                }
+            }
+            PointerTarget::ExplorerRow {
+                entry_index,
+                is_directory,
+                toggle,
+            } => {
+                if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
+                    if let Some(entry_index) = entry_index {
+                        if let Some(entry) = self.explorer_entries.get(entry_index).cloned() {
+                            self.explorer_cursor = entry_index;
+                            self.focus_explorer();
+                            if is_directory {
+                                if !toggle && pointer.click_count < 2 {
+                                    return Transition {
+                                        effects,
+                                        render: true,
+                                        ..Transition::default()
+                                    };
+                                }
+                                if self.explorer_expanded.contains(&entry.path) {
+                                    self.explorer_expanded.remove(&entry.path);
+                                } else {
+                                    self.explorer_expanded.insert(entry.path.clone());
+                                }
+                                effects.extend(self.explorer_refresh_transition().effects);
+                            } else if toggle {
+                                if self.explorer_expanded.contains(&entry.path) {
+                                    self.explorer_expanded.remove(&entry.path);
+                                } else {
+                                    self.explorer_expanded.insert(entry.path.clone());
+                                }
+                                effects.extend(self.explorer_refresh_transition().effects);
+                            } else {
+                                self.blur_explorer();
+                                if pointer.click_count >= 2 {
+                                    let _ = self.open_tab(entry.path);
+                                } else {
+                                    let _ = self.open_preview_tab(entry.path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            PointerTarget::Editor {
+                pane_id,
+                local,
+                region,
+                text_origin,
+                text_width,
+            } => {
+                if self.focus_pane(pane_id) {
+                    self.apply_editor_pointer(pointer, local, region, text_origin, text_width);
+                }
+            }
+            PointerTarget::Bottom(index) => {
+                if matches!(pointer.action, MouseAction::Down(MouseButton::Left))
+                    && matches!(self.bottom_panel_view, BottomPanelView::Git)
+                    && let Some(entry) = self
+                        .git_dashboard
+                        .as_ref()
+                        .and_then(|dashboard| dashboard.changes.get(index))
+                {
+                    let action = app_ui::git::GitAction::OpenDiffFile(entry.path.clone());
+                    let transition = self.apply_git_action(action);
+                    self.deferred_effects.extend(transition.effects);
+                }
+            }
+            PointerTarget::Menu(category) => {
+                if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
+                    if self.menu_open && self.menu_category == category {
+                        self.menu_item = 0;
+                    }
+                    self.menu_category = category.min(5);
+                    self.menu_open = true;
+                    self.palette_visible = false;
+                }
+            }
+            PointerTarget::MenuItem { category, index } => {
+                if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
+                    self.menu_category = category.min(5);
+                    self.menu_item = index;
+                    if let Some(entry) = app_ui::shell::menu_entries(self.menu_category).get(index)
+                    {
+                        let available = self
+                            .palette
+                            .commands()
+                            .iter()
+                            .find(|command| command.id.as_str() == entry.command)
+                            .is_some_and(|command| command.available);
+                        if available {
+                            let _ = self.apply_command(entry.command);
+                            self.menu_open = false;
+                        }
+                    }
+                }
+            }
+            PointerTarget::Status | PointerTarget::Palette(_) => {}
+            PointerTarget::Outside => self.menu_open = false,
+        }
+        Transition {
+            effects,
+            render: true,
+            ..Transition::default()
+        }
+    }
+
+    fn apply_editor_pointer(
+        &mut self,
+        pointer: app_ui::shell::PointerEvent,
+        local: editor_types::ScreenCell,
+        region: app_ui::shell::EditorPointerRegion,
+        text_origin: u16,
+        text_width: u16,
+    ) {
+        let pane = self
+            .panes
+            .iter()
+            .find(|pane| pane.id == self.focused_pane)
+            .cloned();
+        let Some(pane) = pane else {
+            return;
+        };
+        let requested_line = pane.viewport.top_line.saturating_add(u32::from(local.row));
+        let snapshot = self.buffer.snapshot();
+        let last_line = u32::try_from(snapshot.line_count().saturating_sub(1)).unwrap_or(u32::MAX);
+        let line = requested_line.min(last_line);
+        if !matches!(region, app_ui::shell::EditorPointerRegion::Text) {
+            if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
+                if matches!(region, app_ui::shell::EditorPointerRegion::LineNumber) {
+                    if let Some((start, end)) = Self::line_range(&snapshot, line) {
+                        let _ = self
+                            .buffer
+                            .set_selections(editor_core::SelectionSet::single(
+                                editor_core::Selection::new(start, end),
+                            ));
+                    }
+                } else if matches!(region, app_ui::shell::EditorPointerRegion::Gutter) {
+                    let _ = self.apply_action_inner(Action::ToggleFold { line });
+                }
+            }
+            return;
+        }
+        if let MouseAction::ScrollLines(delta) = pointer.action {
+            if let Some(pane) = self
+                .panes
+                .iter_mut()
+                .find(|pane| pane.id == self.focused_pane)
+            {
+                let next = u32::try_from(
+                    i64::from(pane.viewport.top_line)
+                        .saturating_add(i64::from(delta))
+                        .max(0),
+                )
+                .unwrap_or(u32::MAX);
+                pane.viewport.top_line = next;
+            }
+            return;
+        }
+        let local_column = local.column.saturating_sub(text_origin).min(text_width);
+        let column = pane.viewport.left_column.saturating_add(local_column);
+        let snapshot = self.buffer.snapshot();
+        let Ok(offset) =
+            snapshot.offset_for_display_column(line, usize::from(column), self.tab_width)
+        else {
+            return;
+        };
+        match pointer.action {
+            MouseAction::Down(MouseButton::Left) => {
+                if pointer.click_count >= 3 {
+                    if let Some((start, end)) = Self::line_range(&snapshot, line) {
+                        let _ = self
+                            .buffer
+                            .set_selections(editor_core::SelectionSet::single(
+                                editor_core::Selection::new(start, end),
+                            ));
+                        self.mouse_anchor = Some(start);
+                    }
+                } else {
+                    self.mouse_anchor = Some(offset);
+                    let _ = self
+                        .buffer
+                        .set_selections(editor_core::SelectionSet::single(
+                            editor_core::Selection::cursor(offset),
+                        ));
+                }
+            }
+            MouseAction::Drag(MouseButton::Left) => {
+                let anchor = self.mouse_anchor.unwrap_or(offset);
+                let _ = self
+                    .buffer
+                    .set_selections(editor_core::SelectionSet::single(
+                        editor_core::Selection::new(anchor, offset),
+                    ));
+            }
+            MouseAction::Up(MouseButton::Left) => self.mouse_anchor = None,
+            _ => {}
+        }
+    }
+
+    fn line_range(
+        snapshot: &editor_core::TextSnapshot,
+        line: u32,
+    ) -> Option<(CharacterOffset, CharacterOffset)> {
+        let start = snapshot
+            .position_to_offset(LogicalPosition { line, character: 0 })
+            .ok()?;
+        let end = if usize::try_from(line).ok()? + 1 < snapshot.line_count() {
+            snapshot
+                .position_to_offset(LogicalPosition {
+                    line: line.saturating_add(1),
+                    character: 0,
+                })
+                .ok()?
+        } else {
+            let character = u32::try_from(snapshot.line_text(line).ok()?.chars().count()).ok()?;
+            snapshot
+                .position_to_offset(LogicalPosition { line, character })
+                .ok()?
+        };
+        Some((start, end))
+    }
+
     #[allow(
         clippy::too_many_lines,
         clippy::cast_possible_truncation,
@@ -4445,6 +4903,9 @@ impl AppState {
         if let InputEvent::Key(ref key) = input {
             if let Some(mode) = self.input_mode.clone() {
                 return self.apply_input_mode(mode, key);
+            }
+            if let MenuKeyOutcome::Handled(effect) = self.apply_menu_key(key) {
+                return effect;
             }
             let cursor_moved = matches!(
                 key.code,
@@ -4695,12 +5156,24 @@ impl AppState {
                     .map(|_| ()),
                 KeyCode::Backspace => self.buffer.smart_backspace().map(|_| ()),
                 KeyCode::Delete => self.delete_forward(),
+                KeyCode::Left if key.modifiers.contains(Modifier::Control) => self
+                    .buffer
+                    .move_word_left(key.modifiers.contains(Modifier::Shift)),
+                KeyCode::Right if key.modifiers.contains(Modifier::Control) => self
+                    .buffer
+                    .move_word_right(key.modifiers.contains(Modifier::Shift)),
                 KeyCode::Left => self
                     .buffer
                     .move_left(key.modifiers.contains(Modifier::Shift)),
                 KeyCode::Right => self
                     .buffer
                     .move_right(key.modifiers.contains(Modifier::Shift)),
+                KeyCode::Home => self
+                    .buffer
+                    .move_home(key.modifiers.contains(Modifier::Shift)),
+                KeyCode::End => self
+                    .buffer
+                    .move_end(key.modifiers.contains(Modifier::Shift)),
                 KeyCode::Up => self.buffer.move_vertical(
                     -1,
                     key.modifiers.contains(Modifier::Shift),
@@ -4711,6 +5184,22 @@ impl AppState {
                     key.modifiers.contains(Modifier::Shift),
                     self.tab_width,
                 ),
+                KeyCode::PageUp => {
+                    let lines = 1_u16;
+                    self.buffer.move_vertical(
+                        -i32::from(lines),
+                        key.modifiers.contains(Modifier::Shift),
+                        self.tab_width,
+                    )
+                }
+                KeyCode::PageDown => {
+                    let lines = 1_u16;
+                    self.buffer.move_vertical(
+                        i32::from(lines),
+                        key.modifiers.contains(Modifier::Shift),
+                        self.tab_width,
+                    )
+                }
                 KeyCode::Character('z') if key.modifiers.contains(Modifier::Control) => {
                     self.buffer.undo().map(|_| ())
                 }
@@ -4719,140 +5208,10 @@ impl AppState {
                 }
                 _ => Ok(()),
             },
-            InputEvent::Mouse(mouse) => {
-                if self.bottom_panel_visible
-                    && matches!(self.bottom_panel_view, BottomPanelView::Git)
-                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
-                    && mouse.position.row >= 20
-                {
-                    let index = usize::from(mouse.position.row.saturating_sub(21));
-                    if let Some(dashboard) = self.git_dashboard.as_ref() {
-                        if let Some(entry) = dashboard.changes.get(index) {
-                            let action = if mouse.position.column < 8 {
-                                if entry.staged {
-                                    app_ui::git::GitAction::UnstageFile(entry.path.clone())
-                                } else {
-                                    app_ui::git::GitAction::StageFile(entry.path.clone())
-                                }
-                            } else {
-                                app_ui::git::GitAction::OpenDiffFile(entry.path.clone())
-                            };
-                            let transition = self.apply_git_action(action);
-                            self.deferred_effects.extend(transition.effects);
-                            return self.deferred_effects.pop();
-                        }
-                    }
-                }
-                if self.split_axis.is_some()
-                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
-                {
-                    let secondary = match self.split_axis {
-                        Some(app_ui::shell::SplitAxis::Vertical) => mouse.position.column >= 60,
-                        Some(app_ui::shell::SplitAxis::Horizontal) => mouse.position.row >= 20,
-                        None => false,
-                    };
-                    let pane_id = u32::from(secondary);
-                    if self.focus_pane(pane_id) {
-                        if let Some(tab) = self.panes.iter().find(|pane| pane.id == pane_id) {
-                            if tab.displayed_tab < self.tabs.len() {
-                                self.switch_tab(tab.displayed_tab);
-                            }
-                        }
-                    }
-                }
-                if matches!(self.input_mode, Some(InputMode::QuickOpen))
-                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
-                {
-                    let index = usize::from(mouse.position.row.saturating_sub(3));
-                    let _ = self.apply_workspace_action(
-                        app_ui::workspace::QuickOpenAction::MousePick(index),
-                    );
-                    return None;
-                }
-                if self.input_mode.is_none()
-                    && self.explorer_visible
-                    && mouse.position.column < 24
-                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
-                    && mouse.position.row >= 3
-                {
-                    let index = usize::from(mouse.position.row.saturating_sub(3));
-                    if let Some(entry) = self.explorer_entries.get(index).cloned() {
-                        self.explorer_cursor = index;
-                        self.focus_explorer();
-                        if entry.is_directory {
-                            if self.explorer_expanded.contains(&entry.path) {
-                                self.explorer_expanded.remove(&entry.path);
-                            } else {
-                                self.explorer_expanded.insert(entry.path.clone());
-                            }
-                            return self
-                                .explorer_refresh_transition()
-                                .effects
-                                .into_iter()
-                                .next();
-                        }
-                        self.blur_explorer();
-                        let _ = self.open_tab(entry.path);
-                        return None;
-                    }
-                }
-                if mouse.position.row == 0
-                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
-                {
-                    let index = usize::from(mouse.position.column / 20);
-                    self.switch_tab(index);
-                    return None;
-                }
-                if matches!(mouse.action, MouseAction::Drag(MouseButton::Left)) {
-                    if let Some(axis) = self.split_axis {
-                        let (coordinate, total) = match axis {
-                            app_ui::shell::SplitAxis::Vertical => (
-                                mouse
-                                    .position
-                                    .column
-                                    .saturating_sub(if self.explorer_visible { 25 } else { 1 }),
-                                80_u16.saturating_sub(if self.explorer_visible { 25 } else { 1 }),
-                            ),
-                            app_ui::shell::SplitAxis::Horizontal => {
-                                (mouse.position.row.saturating_sub(1), 23)
-                            }
-                        };
-                        if total > 0 {
-                            self.split_ratio_percent = (u32::from(coordinate)
-                                .saturating_mul(100)
-                                .checked_div(u32::from(total))
-                                .unwrap_or(50)
-                                .clamp(10, 90))
-                                as u16;
-                            return None;
-                        }
-                    }
-                }
-                if let Some(offset) = self.mouse_offset(mouse.position.row, mouse.position.column) {
-                    match mouse.action {
-                        MouseAction::Down(MouseButton::Left) => {
-                            self.mouse_anchor = Some(offset);
-                            let _ = self
-                                .buffer
-                                .set_selections(editor_core::SelectionSet::single(
-                                    editor_core::Selection::cursor(offset),
-                                ));
-                        }
-                        MouseAction::Drag(MouseButton::Left) => {
-                            let anchor = self.mouse_anchor.unwrap_or(offset);
-                            let _ = self
-                                .buffer
-                                .set_selections(editor_core::SelectionSet::single(
-                                    editor_core::Selection::new(anchor, offset),
-                                ));
-                        }
-                        MouseAction::Up(MouseButton::Left) => self.mouse_anchor = None,
-                        _ => {}
-                    }
-                }
-                Ok(())
-            }
-            InputEvent::Resize { .. } => Ok(()),
+            // Raw screen coordinates are translated by the runtime into `Action::Pointer` using
+            // the last rendered layout snapshot. AppState deliberately does not infer workbench
+            // geometry from terminal coordinates.
+            InputEvent::Mouse(_) | InputEvent::Resize { .. } => Ok(()),
         };
         if let Err(error) = result {
             self.output.push(OutputMessage {
@@ -4875,6 +5234,75 @@ impl AppState {
         }
         self.sync_buffer_projection();
         None
+    }
+
+    /// Handles Edit-like menu navigation before editor key dispatch.
+    fn apply_menu_key(&mut self, key: &editor_types::KeyEvent) -> MenuKeyOutcome {
+        let alt = key.modifiers.contains(Modifier::Alt);
+        let access = match key.code {
+            KeyCode::Character('f' | 'F') if alt => Some(0),
+            KeyCode::Character('e' | 'E') if alt => Some(1),
+            KeyCode::Character('s' | 'S') if alt => Some(2),
+            KeyCode::Character('v' | 'V') if alt => Some(3),
+            KeyCode::Character('g' | 'G') if alt => Some(4),
+            KeyCode::Character('h' | 'H') if alt => Some(5),
+            _ => None,
+        };
+        if let Some(category) = access {
+            self.menu_category = category;
+            self.menu_item = 0;
+            self.menu_open = true;
+            return MenuKeyOutcome::Handled(None);
+        }
+        if matches!(key.code, KeyCode::Function(10)) {
+            self.menu_open = !self.menu_open;
+            self.menu_item = 0;
+            return MenuKeyOutcome::Handled(None);
+        }
+        if !self.menu_open {
+            return MenuKeyOutcome::NotHandled;
+        }
+        match key.code {
+            KeyCode::Left => {
+                self.menu_category = (self.menu_category + 5) % 6;
+                self.menu_item = 0;
+            }
+            KeyCode::Right => {
+                self.menu_category = (self.menu_category + 1) % 6;
+                self.menu_item = 0;
+            }
+            KeyCode::Up => {
+                let len = app_ui::shell::menu_entries(self.menu_category).len();
+                self.menu_item = (self.menu_item + len.saturating_sub(1)) % len.max(1);
+            }
+            KeyCode::Down => {
+                let len = app_ui::shell::menu_entries(self.menu_category).len();
+                self.menu_item = (self.menu_item + 1) % len.max(1);
+            }
+            KeyCode::Enter => {
+                if let Some(entry) =
+                    app_ui::shell::menu_entries(self.menu_category).get(self.menu_item)
+                {
+                    let available = self
+                        .palette
+                        .commands()
+                        .iter()
+                        .find(|command| command.id.as_str() == entry.command)
+                        .is_some_and(|command| command.available);
+                    if available {
+                        let effect = self.apply_command(entry.command);
+                        self.menu_open = false;
+                        return MenuKeyOutcome::Handled(effect);
+                    }
+                }
+            }
+            KeyCode::Escape => {
+                self.menu_open = false;
+                return MenuKeyOutcome::Handled(None);
+            }
+            _ => {}
+        }
+        MenuKeyOutcome::Handled(None)
     }
 
     fn delete_forward(&mut self) -> editor_core::Result<()> {
@@ -5092,8 +5520,21 @@ impl AppState {
             "workbench.newFile" => {
                 let _ = self.apply_action_inner(Action::NewFile);
             }
-            "workbench.openFolder" => {
+            "workbench.openFolder" | "workbench.addRoot" | "workspace.addRoot" => {
                 self.begin_input_mode(InputMode::OpenFolder);
+            }
+            "workbench.openFile" | "workbench.quickOpen" => {
+                self.begin_input_mode(InputMode::QuickOpen);
+            }
+            "workbench.commandPalette" => {
+                self.palette_visible = true;
+            }
+            "workbench.toggleExplorer" => {
+                self.explorer_visible = !self.explorer_visible;
+            }
+            "workbench.showOutput" => {
+                self.bottom_panel_view = BottomPanelView::Output;
+                self.bottom_panel_visible = true;
             }
             "workbench.closeActiveEditor" => {
                 let _ = self.apply_action_inner(Action::CloseActive);
@@ -5107,6 +5548,7 @@ impl AppState {
             "workbench.previousEditor" => {
                 let _ = self.apply_action_inner(Action::PreviousTab);
             }
+            "workbench.toggleLineNumbers" => self.show_line_numbers = !self.show_line_numbers,
             "workbench.openRecent" => {
                 let _ = self.apply_action_inner(Action::QuickOpenRecent);
             }
@@ -5228,7 +5670,6 @@ impl AppState {
             }
             "editor.find" => self.begin_input_mode(InputMode::Find),
             "editor.replace" => self.begin_input_mode(InputMode::ReplaceQuery),
-            "workbench.quickOpen" => self.begin_input_mode(InputMode::QuickOpen),
             "workspace.search" => {
                 self.begin_input_mode(InputMode::ProjectSearch);
                 self.bottom_panel_view = BottomPanelView::Search;
@@ -5507,10 +5948,6 @@ impl AppState {
                     },
                 );
             }
-            "workbench.showOutput" => {
-                self.bottom_panel_view = BottomPanelView::Output;
-                self.bottom_panel_visible = true;
-            }
             "workspace.confirmFileOperation" => return self.confirmed_file_operation_effect(),
             "workspace.cancelFileOperation" => {
                 self.cancel_file_operation();
@@ -5698,26 +6135,6 @@ impl AppState {
             render: true,
             ..Transition::default()
         }
-    }
-
-    fn mouse_offset(&self, screen_row: u16, screen_column: u16) -> Option<CharacterOffset> {
-        // The shell reserves one row for tabs and a narrow Explorer gutter. On compact layouts
-        // the subtraction saturates, keeping clicks within the first document line.
-        let pane = self.focused_pane();
-        let line = u32::from(screen_row.saturating_sub(2))
-            .saturating_add(pane.map_or(0, |pane| pane.viewport.top_line));
-        let column = u32::from(if self.explorer_visible {
-            screen_column.saturating_sub(25)
-        } else {
-            screen_column.saturating_sub(1)
-        })
-        .saturating_add(u32::from(pane.map_or(0, |pane| pane.viewport.left_column)));
-        self.buffer
-            .position_to_offset(LogicalPosition {
-                line,
-                character: column,
-            })
-            .ok()
     }
 
     #[allow(clippy::too_many_lines)]
@@ -6066,15 +6483,6 @@ impl AppState {
                         language_result_from_response(&method, &result, version, self.document_id)
                     {
                         let _ = self.language_ui.apply_result(language_result);
-                    }
-                    if !matches!(
-                        method.as_str(),
-                        "textDocument/semanticTokens/full"
-                            | "textDocument/diagnostic"
-                            | "textDocument/publishDiagnostics"
-                    ) {
-                        self.bottom_panel_view = BottomPanelView::Language;
-                        self.bottom_panel_visible = true;
                     }
                     self.language_server = LanguageServerStatus::Running { name: status_name };
                 }
@@ -6902,7 +7310,7 @@ mod tests {
     }
 
     #[test]
-    fn every_language_panel_action_updates_root_visibility_and_selection_state() {
+    fn contextual_language_actions_keep_bottom_panel_selection_stable() {
         let mut state = AppState::default();
         let cases = [
             (
@@ -6933,8 +7341,8 @@ mod tests {
         for (action, method) in cases {
             let transition = state.apply_language_action(action);
             assert!(transition.render);
-            assert!(state.bottom_panel_visible);
-            assert_eq!(state.bottom_panel_view, super::BottomPanelView::Language);
+            assert!(!state.bottom_panel_visible);
+            assert_eq!(state.bottom_panel_view, super::BottomPanelView::Output);
             assert_eq!(state.last_language_method.as_deref(), method);
         }
         let transition =
@@ -7307,26 +7715,40 @@ mod tests {
 
     #[test]
     fn mouse_click_and_drag_create_a_logical_selection() {
-        use editor_types::{
-            InputEvent, Modifiers, MouseAction, MouseButton, MouseEvent, ScreenCell,
-        };
+        use editor_types::{Modifiers, MouseAction, MouseButton, ScreenCell};
         let mut state = AppState {
             buffer: TextBuffer::new("hello world"),
             ..AppState::default()
         };
         state.sync_buffer_projection();
-        let click = MouseEvent {
-            position: ScreenCell { row: 2, column: 25 },
+        let click = app_ui::shell::PointerEvent {
+            target: app_ui::shell::PointerTarget::Editor {
+                pane_id: 0,
+                local: ScreenCell { row: 0, column: 0 },
+                region: app_ui::shell::EditorPointerRegion::Text,
+                text_origin: 0,
+                text_width: 80,
+            },
+            screen: ScreenCell { row: 2, column: 25 },
             action: MouseAction::Down(MouseButton::Left),
             modifiers: Modifiers::default(),
+            click_count: 1,
         };
-        let drag = MouseEvent {
-            position: ScreenCell { row: 2, column: 30 },
+        let drag = app_ui::shell::PointerEvent {
+            target: app_ui::shell::PointerTarget::Editor {
+                pane_id: 0,
+                local: ScreenCell { row: 0, column: 5 },
+                region: app_ui::shell::EditorPointerRegion::Text,
+                text_origin: 0,
+                text_width: 80,
+            },
+            screen: ScreenCell { row: 2, column: 30 },
             action: MouseAction::Drag(MouseButton::Left),
             modifiers: Modifiers::default(),
+            click_count: 1,
         };
-        let _ = state.apply_action(Action::Input(InputEvent::Mouse(click)));
-        let _ = state.apply_action(Action::Input(InputEvent::Mouse(drag)));
+        let _ = state.apply_action(Action::Pointer(click));
+        let _ = state.apply_action(Action::Pointer(drag));
         assert_eq!(state.buffer.selections().primary().range().start.0, 0);
         assert_eq!(state.buffer.selections().primary().range().end.0, 5);
     }
@@ -7334,9 +7756,7 @@ mod tests {
     #[test]
     fn explorer_directory_click_toggles_async_expansion() {
         use super::ExplorerProjection;
-        use editor_types::{
-            InputEvent, Modifiers, MouseAction, MouseButton, MouseEvent, ScreenCell,
-        };
+        use editor_types::{Modifiers, MouseAction, MouseButton, ScreenCell};
 
         let directory = tempfile::tempdir().expect("workspace");
         let source = directory.path().join("src");
@@ -7354,11 +7774,17 @@ mod tests {
             }],
             ..AppState::default()
         };
-        let transition = state.apply_action(Action::Input(InputEvent::Mouse(MouseEvent {
-            position: ScreenCell { row: 3, column: 2 },
+        let transition = state.apply_action(Action::Pointer(app_ui::shell::PointerEvent {
+            target: app_ui::shell::PointerTarget::ExplorerRow {
+                entry_index: Some(0),
+                is_directory: true,
+                toggle: true,
+            },
+            screen: ScreenCell { row: 3, column: 2 },
             action: MouseAction::Down(MouseButton::Left),
             modifiers: Modifiers::default(),
-        })));
+            click_count: 1,
+        }));
         assert!(state.explorer_expanded.contains(&source));
         assert!(transition.effects.iter().any(|effect| {
             matches!(

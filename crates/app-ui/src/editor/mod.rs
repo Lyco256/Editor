@@ -25,10 +25,28 @@ use terminal_backend::{Cell, Framebuffer};
 
 use crate::widgets::{Rect, cell, fill_rect, write_text};
 
+pub mod cursor;
+pub mod pointer;
+pub mod selection;
+pub mod viewport;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TextViewport {
     pub top_line: u32,
     pub left_column: u16,
+}
+
+/// Cell regions used by both viewport rendering and pointer/cursor projection.
+///
+/// Keeping these rectangles in one value prevents input code from guessing gutter or overview
+/// widths that differ from what the renderer actually painted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorGeometry {
+    pub area: Rect,
+    pub line_number: Rect,
+    pub gutter: Rect,
+    pub text: Rect,
+    pub overview: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,14 +177,8 @@ pub struct EditorViewportState {
 }
 
 impl EditorViewportState {
-    /// Resolves the native terminal cursor cell for this viewport without painting a glyph.
     #[must_use]
-    pub fn cursor_cell(&self, area: Rect) -> Option<(u16, u16)> {
-        if area.is_empty() {
-            return None;
-        }
-        let cursor = self.selections.primary().active;
-        let position = self.snapshot.offset_to_position(cursor).ok()?;
+    pub fn geometry(&self, area: Rect) -> EditorGeometry {
         let lines = parse_lines(&self.snapshot);
         let digits = line_number_digits(lines.len().max(1));
         let gutter_width = if area.width >= 8 { 2 } else { 1 };
@@ -181,11 +193,50 @@ impl EditorViewportState {
         } else {
             0
         };
-        let text_left = area
+        let gutter = Rect::new(area.x, area.y, gutter_width.min(area.width), area.height);
+        let line_number = Rect::new(
+            area.x.saturating_add(gutter.width),
+            area.y,
+            line_number_width.min(area.width.saturating_sub(gutter.width)),
+            area.height,
+        );
+        let text_x = area
             .x
             .saturating_add(gutter_width)
             .saturating_add(line_number_width);
         let text_right = area.right().saturating_sub(overview_width);
+        let text = Rect::new(
+            text_x.min(text_right),
+            area.y,
+            text_right.saturating_sub(text_x),
+            area.height,
+        );
+        let overview = Rect::new(
+            text_right,
+            area.y,
+            overview_width.min(area.width),
+            area.height,
+        );
+        EditorGeometry {
+            area,
+            line_number,
+            gutter,
+            text,
+            overview,
+        }
+    }
+
+    /// Resolves the native terminal cursor cell for this viewport without painting a glyph.
+    #[must_use]
+    pub fn cursor_cell(&self, area: Rect) -> Option<(u16, u16)> {
+        if area.is_empty() {
+            return None;
+        }
+        let cursor = self.selections.primary().active;
+        let position = self.snapshot.offset_to_position(cursor).ok()?;
+        let geometry = self.geometry(area);
+        let text_left = geometry.text.x;
+        let text_right = geometry.text.right();
         let row = position.line.saturating_sub(self.viewport.top_line);
         if row >= u32::from(area.height) || position.line < self.viewport.top_line {
             return None;
@@ -213,25 +264,13 @@ impl EditorViewportState {
         );
 
         let lines = parse_lines(&self.snapshot);
-        let digits = line_number_digits(lines.len().max(1));
-        let gutter_width = if area.width >= 8 { 2 } else { 1 };
-        let line_number_width = if self.show_line_numbers && area.width > digits + gutter_width + 3
-        {
-            digits + 1
-        } else {
-            0
-        };
-        let overview_width = if area.width > gutter_width + line_number_width + 6 {
-            1
-        } else {
-            0
-        };
-        let text_left = area
-            .x
-            .saturating_add(gutter_width)
-            .saturating_add(line_number_width);
-        let text_right = area.right().saturating_sub(overview_width);
-        let content_width = text_right.saturating_sub(text_left);
+        let geometry = self.geometry(area);
+        let gutter_width = geometry.gutter.width;
+        let line_number_width = geometry.line_number.width;
+        let overview_width = geometry.overview.width;
+        let text_left = geometry.text.x;
+        let text_right = geometry.text.right();
+        let content_width = geometry.text.width;
 
         let mut row = 0_u16;
         let mut line_index = self.viewport.top_line;
@@ -301,8 +340,16 @@ impl EditorViewportState {
             if row >= area.height {
                 continue;
             }
-            let column = text_left
-                .saturating_add(u16::try_from(hint.position.character).unwrap_or(u16::MAX));
+            let offset = self.snapshot.position_to_offset(hint.position).ok();
+            let display_column = offset
+                .and_then(|offset| self.snapshot.display_column(offset, self.tab_width).ok())
+                .unwrap_or(usize::try_from(hint.position.character).unwrap_or(usize::MAX));
+            let column = text_left.saturating_add(
+                u16::try_from(
+                    display_column.saturating_sub(usize::from(self.viewport.left_column)),
+                )
+                .unwrap_or(u16::MAX),
+            );
             if column >= text_right {
                 continue;
             }
@@ -342,9 +389,9 @@ impl EditorViewportState {
         let y = area.y.saturating_add(row);
         let line_background = StyleRole::CurrentLine;
         let marker = if self.status.cursor_line == line_index.saturating_add(1) {
-            "›"
+            ">"
         } else {
-            "▸"
+            "+"
         };
         let marker_background = if self.status.cursor_line == line_index.saturating_add(1) {
             StyleRole::CurrentLine
@@ -463,13 +510,9 @@ impl EditorViewportState {
     ) {
         let visible_left = usize::from(self.viewport.left_column);
         let visible_right = visible_left.saturating_add(usize::from(content_width));
-        let mut pending = String::new();
-        let mut pending_start_offset = line.start_offset;
-        let mut pending_start_column = 0_usize;
-        let mut index = 0_usize;
-
-        for (char_index, character) in line.text.chars().enumerate() {
-            let offset = line.start_offset.saturating_add(char_index);
+        let mut offset = line.start_offset;
+        for grapheme in terminal_backend::grapheme_clusters(&line.text) {
+            let grapheme_len = grapheme.chars().count();
             let start_column = self
                 .snapshot
                 .display_column(editor_core::CharacterOffset(offset), self.tab_width)
@@ -477,54 +520,25 @@ impl EditorViewportState {
             let end_column = self
                 .snapshot
                 .display_column(
-                    editor_core::CharacterOffset(offset.saturating_add(1)),
+                    editor_core::CharacterOffset(offset.saturating_add(grapheme_len)),
                     self.tab_width,
                 )
                 .unwrap_or(start_column);
-            if pending.is_empty() {
-                pending_start_offset = offset;
-                pending_start_column = start_column;
+            if end_column > start_column {
+                self.paint_pending(
+                    frame,
+                    row,
+                    text_left,
+                    text_right,
+                    visible_left,
+                    visible_right,
+                    row_background,
+                    offset,
+                    start_column,
+                    grapheme,
+                );
             }
-            pending.push(character);
-            index = char_index;
-            let width = end_column.saturating_sub(start_column);
-            if width == 0 {
-                continue;
-            }
-            self.paint_pending(
-                frame,
-                row,
-                text_left,
-                text_right,
-                visible_left,
-                visible_right,
-                row_background,
-                pending_start_offset,
-                pending_start_column,
-                &pending,
-            );
-            pending.clear();
-        }
-
-        if !pending.is_empty() {
-            let end_offset = line.start_offset.saturating_add(index.saturating_add(1));
-            let end_column = self
-                .snapshot
-                .display_column(editor_core::CharacterOffset(end_offset), self.tab_width)
-                .unwrap_or(pending_start_column);
-            let _ = end_column;
-            self.paint_pending(
-                frame,
-                row,
-                text_left,
-                text_right,
-                visible_left,
-                visible_right,
-                row_background,
-                pending_start_offset,
-                pending_start_column,
-                &pending,
-            );
+            offset = offset.saturating_add(grapheme_len);
         }
     }
 
@@ -542,10 +556,7 @@ impl EditorViewportState {
         pending_start_column: usize,
         pending: &str,
     ) {
-        let width = pending
-            .chars()
-            .map(char_width)
-            .fold(0_usize, usize::saturating_add);
+        let width = terminal_backend::display_width(pending);
         if width == 0 {
             return;
         }
@@ -593,39 +604,6 @@ impl EditorViewportState {
         // glyph into the source cell would overwrite user text and made selections destructive.
         // Secondary cursors are represented by style-only overlays in `style_for_range`.
         let _ = (frame, line, row, text_left, text_right, row_background);
-        /*
-        let visible_left = usize::from(self.viewport.left_column);
-        let visible_right =
-            visible_left.saturating_add(usize::from(text_right.saturating_sub(text_left)));
-        for selection in self.selections.selections() {
-            let cursor = selection.cursor_offset().0;
-            if cursor < line.start_offset || cursor > line.end_offset {
-                continue;
-            }
-            let column = if cursor == line.end_offset {
-                self.snapshot
-                    .display_column(editor_core::CharacterOffset(cursor), self.tab_width)
-                    .unwrap_or(0)
-            } else {
-                self.snapshot
-                    .display_column(editor_core::CharacterOffset(cursor), self.tab_width)
-                    .unwrap_or(0)
-            };
-            if column < visible_left || column >= visible_right {
-                continue;
-            }
-            let draw_column = column.saturating_sub(visible_left);
-            let draw_column = u16::try_from(draw_column).unwrap_or(0);
-            if text_left.saturating_add(draw_column) >= text_right {
-                continue;
-            }
-            let _ = frame.set(
-                text_left.saturating_add(draw_column),
-                row,
-                cell("▌", StyleRole::Selection, row_background, true),
-            );
-        }
-        */
     }
 
     fn render_overview(&self, frame: &mut Framebuffer, area: Rect, overview_width: u16) {
@@ -675,7 +653,11 @@ impl EditorViewportState {
 
     fn style_for_range(&self, range: TextRange, row_background: StyleRole) -> GlyphStyle {
         if self.range_hits_any_selection(&range, &self.selections) {
-            return GlyphStyle::new(StyleRole::Selection, row_background, true);
+            return GlyphStyle::new(
+                StyleRole::SelectionForeground,
+                StyleRole::SelectionBackground,
+                true,
+            );
         }
         if self.range_hits_any_ranges(&range, &self.search_matches) {
             return GlyphStyle::new(StyleRole::SearchMatch, row_background, false);
@@ -815,9 +797,9 @@ fn fold_start_region(folds: &FoldSet, line: u32) -> Option<FoldRegion> {
 
 fn gutter_marker(line: u32, current: bool, folds: &FoldSet) -> &'static str {
     if current {
-        "›"
+        ">"
     } else if fold_start_region(folds, line).is_some() {
-        "▸"
+        "+"
     } else if folds.is_line_hidden(line) {
         "·"
     } else {
@@ -835,7 +817,7 @@ fn overview_marker_for_line(
     folds: &FoldSet,
 ) -> &'static str {
     if fold_start_region(folds, line).is_some() {
-        return "▸";
+        return "+";
     }
     let mut best = None;
     for marker in markers
@@ -879,15 +861,10 @@ fn overview_marker_for_line(
 
 fn range_contains_line(
     snapshot: &TextSnapshot,
-    whole_document: bool,
+    _whole_document: bool,
     range: TextRange,
     line: u32,
 ) -> bool {
-    if !whole_document {
-        let start = u32::try_from(range.start.0).unwrap_or(u32::MAX);
-        let end = u32::try_from(range.end.0.max(range.start.0)).unwrap_or(u32::MAX);
-        return line >= start && line <= end;
-    }
     let start = snapshot
         .offset_to_position(range.start)
         .ok()
@@ -903,20 +880,6 @@ fn intersects(left: TextRange, right: TextRange) -> bool {
     left.start < right.end && right.start < left.end
 }
 
-fn char_width(character: char) -> usize {
-    match character {
-        '\t' => 1,
-        '\u{0000}'..='\u{001f}' | '\u{007f}' => 0,
-        '\u{0300}'..='\u{036f}'
-        | '\u{1ab0}'..='\u{1aff}'
-        | '\u{1dc0}'..='\u{1dff}'
-        | '\u{20d0}'..='\u{20ff}'
-        | '\u{fe20}'..='\u{fe2f}' => 0,
-        _ if character.is_ascii() => 1,
-        _ => 2,
-    }
-}
-
 fn line_number_digits(lines: usize) -> u16 {
     let mut digits = 1_u16;
     let mut value = lines.max(1);
@@ -928,19 +891,7 @@ fn line_number_digits(lines: usize) -> u16 {
 }
 
 fn ellipsize(text: &str, limit: usize) -> String {
-    if limit == 0 {
-        return String::new();
-    }
-    let mut output = String::new();
-    for character in text.chars().take(limit.saturating_sub(1)) {
-        output.push(character);
-    }
-    if text.chars().count() > limit {
-        output.push('…');
-    } else {
-        output = text.chars().take(limit).collect();
-    }
-    output
+    terminal_backend::truncate_display(text, limit)
 }
 
 #[cfg(test)]

@@ -8,6 +8,8 @@ use super::effect::Effect;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Input(InputEvent),
+    /// Mouse input translated against the most recently rendered workbench geometry.
+    Pointer(app_ui::shell::PointerEvent),
     Invoke(CommandId),
     /// Typed language-panel action routed through root state.
     Language(app_ui::language::LanguageAction),

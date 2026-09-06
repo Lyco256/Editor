@@ -10,6 +10,7 @@ The crate exports a small adapter surface:
 - `Clipboard` for copy, cut, and paste integration.
 - `Framebuffer` and `Cell` for virtual terminal presentation.
 - `display_width` and `truncate_display` provide grapheme-aware terminal-cell metrics for chrome.
+- `MouseClickTracker` provides deterministic single/double/triple-click normalization.
 
 Data flow stays local to this crate. Higher layers build semantic state, pass it into the framebuffer,
 and consume normalized input events. This crate emits escape sequences and platform clipboard calls,

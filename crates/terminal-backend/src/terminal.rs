@@ -19,8 +19,8 @@ use editor_types::{InputEvent, TerminalCapabilities, TerminalFeature};
 use thiserror::Error;
 
 use crate::{
-    DifferentialRenderer, Framebuffer, InputReader, TerminalAdapter, Theme, detect_capabilities,
-    normalize_event,
+    DifferentialRenderer, Framebuffer, InputReader, MouseClickTracker, TerminalAdapter, Theme,
+    detect_capabilities, normalize_event,
 };
 
 /// Cursor shapes exposed without leaking crossterm types to higher layers.
@@ -54,6 +54,7 @@ pub struct CrosstermBackend<W: Write> {
     renderer: DifferentialRenderer<W>,
     cleanup: CleanupState,
     entered: bool,
+    click_tracker: MouseClickTracker,
 }
 
 impl<W: Write> CrosstermBackend<W> {
@@ -68,6 +69,7 @@ impl<W: Write> CrosstermBackend<W> {
             renderer: DifferentialRenderer::new(writer, capabilities, Theme::default()),
             cleanup: CleanupState::default(),
             entered: false,
+            click_tracker: MouseClickTracker::new(),
         }
     }
 
@@ -351,7 +353,14 @@ impl<W: Write> InputReader for CrosstermBackend<W> {
                 operation: "read input",
                 source,
             })?;
-            if let Some(input) = normalize_event(event) {
+            let input = match event {
+                crossterm::event::Event::Mouse(mouse) => self
+                    .click_tracker
+                    .normalize(mouse, std::time::Instant::now())
+                    .map(InputEvent::Mouse),
+                other => normalize_event(other),
+            };
+            if let Some(input) = input {
                 return Ok(input);
             }
         }
@@ -479,7 +488,9 @@ impl CleanupState {
 
 #[cfg(test)]
 mod tests {
-    use super::{CleanupAction, CleanupState};
+    use super::{CleanupAction, CleanupState, CrosstermBackend};
+    use crate::TerminalAdapter;
+    use editor_types::TerminalCapabilities;
 
     #[test]
     fn cleanup_state_is_ordered_and_idempotent() {
@@ -515,5 +526,22 @@ mod tests {
         state.mark(CleanupAction::Raw);
         assert_eq!(state.pending(), vec![CleanupAction::Raw]);
         assert_eq!(state.pending(), vec![CleanupAction::Raw]);
+    }
+
+    #[test]
+    fn native_cursor_presentation_emits_steady_bar_and_hides_when_unfocused() {
+        let mut backend =
+            CrosstermBackend::with_capabilities(Vec::<u8>::new(), TerminalCapabilities::default());
+        backend.entered = true;
+        backend
+            .present_cursor(Some((4, 2)))
+            .expect("cursor presentation");
+        assert!(!backend.renderer.writer_mut().is_empty());
+
+        let mut backend =
+            CrosstermBackend::with_capabilities(Vec::<u8>::new(), TerminalCapabilities::default());
+        backend.entered = true;
+        backend.present_cursor(None).expect("cursor hide");
+        assert!(!backend.renderer.writer_mut().is_empty());
     }
 }

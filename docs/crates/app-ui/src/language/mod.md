@@ -36,3 +36,7 @@ overlay render paths used by the language UI.
 
 Language surfaces expose payload-preserving completion items plus anchored contextual overlay
 placement for completion, hover, signature, Quick Fix, rename, navigation, references and symbols.
+# Contextual overlay anchoring
+
+`LanguageModel` stores a logical request anchor and the root maps it through the focused pane
+viewport before painting. Contextual actions do not select a generic bottom-panel language view.

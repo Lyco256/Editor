@@ -454,13 +454,28 @@ pub fn write_text(
     background: StyleRole,
 ) -> u16 {
     let mut current = column;
-    for character in text.chars() {
+    let (_, frame_rows) = frame.size();
+    if row >= frame_rows {
+        return current;
+    }
+    for grapheme in terminal_backend::grapheme_clusters(text) {
+        let width = terminal_backend::grapheme_width(grapheme);
+        if width == 0 {
+            continue;
+        }
+        let Ok(width_u16) = u16::try_from(width) else {
+            break;
+        };
+        let (frame_columns, _) = frame.size();
+        if current >= frame_columns || current.saturating_add(width_u16) > frame_columns {
+            break;
+        }
         if frame
             .set(
                 current,
                 row,
                 Cell {
-                    symbol: character.to_string(),
+                    symbol: grapheme.to_owned(),
                     foreground,
                     background,
                     bold: false,
@@ -471,7 +486,7 @@ pub fn write_text(
         {
             break;
         }
-        current = current.saturating_add(1);
+        current = current.saturating_add(width_u16);
     }
     current
 }

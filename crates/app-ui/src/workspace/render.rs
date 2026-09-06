@@ -389,20 +389,31 @@ fn write_line(frame: &mut Framebuffer, row: u16, text: &str, foreground: StyleRo
     if row >= rows {
         return;
     }
-    let mut chars = text.chars();
-    for column in 0..columns {
-        let ch = chars.next().unwrap_or(' ');
-        let _ = frame.set(
-            column,
-            row,
-            Cell {
-                symbol: ch.to_string(),
-                foreground,
-                background: StyleRole::EditorBackground,
-                bold: false,
-                continuation: false,
-            },
-        );
+    let mut column = terminal_backend::grapheme_clusters(text)
+        .try_fold(0_u16, |column, grapheme| {
+            let width = u16::try_from(terminal_backend::grapheme_width(grapheme)).ok()?;
+            if width == 0 || column.saturating_add(width) > columns {
+                return Some(column);
+            }
+            frame
+                .set(
+                    column,
+                    row,
+                    Cell {
+                        symbol: grapheme.to_owned(),
+                        foreground,
+                        background: StyleRole::EditorBackground,
+                        bold: false,
+                        continuation: false,
+                    },
+                )
+                .ok()?;
+            Some(column.saturating_add(width))
+        })
+        .unwrap_or(0);
+    while column < columns {
+        let _ = frame.set(column, row, Cell::default());
+        column = column.saturating_add(1);
     }
 }
 

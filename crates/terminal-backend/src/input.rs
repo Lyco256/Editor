@@ -1,6 +1,6 @@
 //! Crossterm event normalization into protocol-neutral editor input.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     Event, KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyEventKind, KeyModifiers,
@@ -30,6 +30,48 @@ pub trait InputReader {
     ///
     /// Returns an adapter error when the host input handle cannot be polled.
     fn poll_input(&mut self, timeout: Duration) -> Result<bool, Self::Error>;
+}
+
+/// Normalizes consecutive left-button clicks into single, double, or triple clicks.
+#[derive(Debug, Clone)]
+pub struct MouseClickTracker {
+    last: Option<(ScreenCell, Instant, u8)>,
+    max_interval: Duration,
+}
+
+impl Default for MouseClickTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MouseClickTracker {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            last: None,
+            max_interval: Duration::from_millis(500),
+        }
+    }
+
+    #[must_use]
+    pub fn normalize(&mut self, event: CrosstermMouseEvent, now: Instant) -> Option<MouseEvent> {
+        let mut normalized = normalize_mouse(event)?;
+        if let MouseAction::Down(MouseButton::Left) = normalized.action {
+            let count = self
+                .last
+                .filter(|(position, timestamp, _)| {
+                    *position == normalized.position
+                        && now.saturating_duration_since(*timestamp) <= self.max_interval
+                })
+                .map_or(1, |(_, _, count)| count.saturating_add(1).min(3));
+            normalized.click_count = count;
+            self.last = Some((normalized.position, now, count));
+        } else if matches!(normalized.action, MouseAction::Drag(MouseButton::Left)) {
+            self.last = None;
+        }
+        Some(normalized)
+    }
 }
 
 /// Normalizes one crossterm event. Focus and unsupported legacy events are intentionally ignored.
@@ -109,6 +151,7 @@ pub fn normalize_mouse(event: CrosstermMouseEvent) -> Option<MouseEvent> {
         },
         action,
         modifiers: normalize_modifiers(event.modifiers),
+        click_count: 1,
     })
 }
 
@@ -141,9 +184,11 @@ fn normalize_modifiers(modifiers: KeyModifiers) -> Modifiers {
 mod tests {
     use crossterm::event::{
         Event, KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyEventKind,
-        KeyEventState, KeyModifiers, MouseEvent as CrosstermMouseEvent, MouseEventKind,
+        KeyEventState, KeyModifiers, MouseButton as CrosstermMouseButton,
+        MouseEvent as CrosstermMouseEvent, MouseEventKind,
     };
     use editor_types::{InputEvent, KeyCode, Modifier, MouseAction};
+    use std::time::{Duration, Instant};
 
     use super::{normalize_event, normalize_key, normalize_mouse};
 
@@ -195,6 +240,70 @@ mod tests {
                 columns: 120,
                 rows: 40
             })
+        );
+    }
+
+    #[test]
+    fn click_tracker_counts_and_resets() {
+        let mut tracker = super::MouseClickTracker::new();
+        let base = Instant::now();
+        let event = CrosstermMouseEvent {
+            kind: MouseEventKind::Down(CrosstermMouseButton::Left),
+            column: 2,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            tracker.normalize(event, base).expect("click").click_count,
+            1
+        );
+        assert_eq!(
+            tracker
+                .normalize(event, base + Duration::from_millis(100))
+                .expect("click")
+                .click_count,
+            2
+        );
+        assert_eq!(
+            tracker
+                .normalize(event, base + Duration::from_millis(200))
+                .expect("click")
+                .click_count,
+            3
+        );
+        assert_eq!(
+            tracker
+                .normalize(event, base + Duration::from_millis(800))
+                .expect("click")
+                .click_count,
+            1
+        );
+    }
+
+    #[test]
+    fn click_tracker_drag_breaks_chain() {
+        let mut tracker = super::MouseClickTracker::new();
+        let base = Instant::now();
+        let down = CrosstermMouseEvent {
+            kind: MouseEventKind::Down(CrosstermMouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        let drag = CrosstermMouseEvent {
+            kind: MouseEventKind::Drag(CrosstermMouseButton::Left),
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(tracker.normalize(down, base).expect("click").click_count, 1);
+        let _ = tracker.normalize(drag, base + Duration::from_millis(20));
+        assert_eq!(
+            tracker
+                .normalize(down, base + Duration::from_millis(30))
+                .expect("click")
+                .click_count,
+            1
         );
     }
 }
