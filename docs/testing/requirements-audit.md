@@ -154,7 +154,6 @@ is the release evidence for every finding in `Requirements/LATEST_UI_BUG_AUDIT.m
 | A-26 | 50 | `app::state::tests::lsp_results_update_versioned_language_views` | PASS |
 | A-27 | 50 | `app::state::tests::contextual_language_actions_keep_bottom_panel_selection_stable` | PASS |
 
-Repository gates are run on the same integration commit with formatting, warnings-denied Clippy,
-all-feature workspace tests, and the source/document mirror test. This document intentionally does
-not claim `main` promotion or a remote push until that exact clean, verified `devenv` commit is
-created and pushed.
+Repository gates were run on commit `d31a20f` with formatting, warnings-denied Clippy, all-feature
+workspace tests, the source/document mirror test, release build, and redirected startup. The exact
+clean commit is present on both `origin/devenv` and `origin/main`.
