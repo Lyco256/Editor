@@ -297,6 +297,7 @@ fn replacement_plans_apply_and_report_failures() {
             line_number: 1,
             line_text: "foo foo".to_owned(),
             byte_range: 0..3,
+            line_byte_range: 0..3,
             matched_text: "foo".to_owned(),
         },
         SearchHit {
@@ -304,6 +305,7 @@ fn replacement_plans_apply_and_report_failures() {
             line_number: 1,
             line_text: "foo foo".to_owned(),
             byte_range: 4..7,
+            line_byte_range: 4..7,
             matched_text: "foo".to_owned(),
         },
         SearchHit {
@@ -311,6 +313,7 @@ fn replacement_plans_apply_and_report_failures() {
             line_number: 1,
             line_text: "bar".to_owned(),
             byte_range: 0..3,
+            line_byte_range: 0..3,
             matched_text: "bar".to_owned(),
         },
         SearchHit {
@@ -318,6 +321,7 @@ fn replacement_plans_apply_and_report_failures() {
             line_number: 1,
             line_text: "bar".to_owned(),
             byte_range: 0..3,
+            line_byte_range: 0..3,
             matched_text: "bar".to_owned(),
         },
     ];

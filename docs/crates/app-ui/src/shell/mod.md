@@ -6,6 +6,11 @@ This module lays out the persistent Explorer sidebar, tab strip, split editor tr
 command palette, and status bar. It also normalizes keyboard and mouse interaction into shell
 actions without performing external I/O.
 
+`WorkbenchLayoutSnapshot` is the shared geometry contract for rendering and hit testing. It carries
+the menu bar, exact tab rectangles, and all pane-local regions; `dispatch_mouse_at` consumes the
+same terminal area rather than assuming a fixed size. The menu presents File, Edit, Selection,
+View, Go, and Help.
+
 Important types:
 
 - `ShellFocus` for high-level focus routing.

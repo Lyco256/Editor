@@ -6,6 +6,8 @@ Trust is keyed by canonical workspace roots through the persisted `TrustStore`; 
 updates both the active policy bit and the store entry.
 The active `TextBuffer` is retained in root state so character input, smart pairs, navigation,
 undo/redo, and dirty tracking survive frame renders. Control-Q and Control-C exit only when the
+forward-delete path uses the buffer's grapheme boundary API and LSP formatting inherits the active
+document indentation settings.
 buffer is clean; dirty quits surface a warning. `session_state` and `restore_session` bridge the
 active editor (including selections and unsaved text) to the versioned, atomic recovery format.
 Ctrl+B/Ctrl+J toggle the Explorer and Output panel, Ctrl+Shift+E focuses the Explorer, and Ctrl+P

@@ -416,10 +416,22 @@ fn trust_label(trust: WorkspaceTrustState) -> &'static str {
 #[must_use]
 pub fn selected_result_range(state: &SearchState) -> Option<TextRange> {
     let result = state.selected_result()?;
-    let start = result.line_text.find(&result.matched_text)?;
+    let start = result
+        .line_text
+        .get(..result.line_byte_range.start.min(result.line_text.len()))?
+        .chars()
+        .count();
+    let length = result
+        .line_text
+        .get(
+            result.line_byte_range.start.min(result.line_text.len())
+                ..result.line_byte_range.end.min(result.line_text.len()),
+        )?
+        .chars()
+        .count();
     Some(TextRange {
         start: editor_types::CharacterOffset(start),
-        end: editor_types::CharacterOffset(start + result.matched_text.len()),
+        end: editor_types::CharacterOffset(start + length),
     })
 }
 

@@ -76,6 +76,8 @@ pub struct SearchHit {
     pub line_number: usize,
     pub line_text: String,
     pub byte_range: Range<usize>,
+    /// Match range relative to the reported line, for exact UI marker placement.
+    pub line_byte_range: Range<usize>,
     pub matched_text: String,
 }
 
@@ -463,6 +465,7 @@ fn search_text_file(
                 line_number: line_number + 1,
                 line_text: line_text.to_owned(),
                 byte_range: line_start + capture.start()..line_start + capture.end(),
+                line_byte_range: capture.start()..capture.end(),
                 matched_text: capture.as_str().to_owned(),
             });
         }
@@ -586,6 +589,7 @@ impl RgEnvelope {
             line_number,
             line_text,
             byte_range: absolute_offset + submatch.start..absolute_offset + submatch.end,
+            line_byte_range: submatch.start..submatch.end,
             matched_text: submatch.matched.text,
         })
     }
@@ -630,6 +634,7 @@ mod tests {
                 line_number: 1,
                 line_text: "foo".to_owned(),
                 byte_range: 0..3,
+                line_byte_range: 0..3,
                 matched_text: "foo".to_owned(),
             },
             SearchHit {
@@ -637,6 +642,7 @@ mod tests {
                 line_number: 2,
                 line_text: "bar".to_owned(),
                 byte_range: 4..7,
+                line_byte_range: 0..3,
                 matched_text: "bar".to_owned(),
             },
         ];

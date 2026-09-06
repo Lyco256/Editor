@@ -2,6 +2,7 @@
 
 Role: converts environment hints and semantic styles into terminal-friendly capabilities and color
 choices.
+The built-in dark theme uses a true black editor background and distinct semantic chrome roles.
 
 Important types:
 

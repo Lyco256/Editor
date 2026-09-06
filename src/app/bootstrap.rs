@@ -1533,6 +1533,8 @@ impl EffectDispatcher for ServiceDispatcher {
                                                 line_number: hit.line_number,
                                                 line_text: hit.line_text,
                                                 matched_text: hit.matched_text,
+                                                byte_range: hit.byte_range,
+                                                line_byte_range: hit.line_byte_range,
                                             },
                                         });
                                     }

@@ -197,6 +197,16 @@ impl TextBuffer {
         self.rope.len_lines()
     }
 
+    /// Returns the next grapheme boundary at or after `offset`.
+    ///
+    /// Keeping this operation on the buffer ensures editor commands never split a
+    /// user-perceived character such as an emoji sequence or combining mark.
+    #[must_use]
+    pub fn next_grapheme_offset(&self, offset: CharacterOffset) -> CharacterOffset {
+        let text = self.rope.to_string();
+        next_grapheme_offset(&text, offset)
+    }
+
     #[must_use]
     pub const fn version(&self) -> u64 {
         self.version

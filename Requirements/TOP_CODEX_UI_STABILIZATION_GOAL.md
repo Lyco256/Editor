@@ -1,0 +1,10 @@
+
+# Top Codex goal prompt — UI/editor stabilization
+
+Requirements 42〜51を既存00〜41の続きとしてすべて実装し、最新`devenv`で確認されたUI・入力・編集挙動の不具合A-01〜A-27を全て解消する。完成状態では、terminal resize直後に全workbenchとstatusが新サイズへ追従し、描画とmouse hit-testが同一の実レイアウト情報を使用し、固定120x40・固定Explorer幅・固定split座標・固定tab幅などの推測座標経路がproduction codeから消えていること。Editを最低基準とする`File / Edit / Selection / View / Go / Help`メニュー、VS Code型の高密度workbench、明確なfile/directory表示、Preview/Open/Pinned tab、paneごとの正確なgeometry、黒背景で読めるthemeを備え、装飾UIはASCIIとBox Drawingだけで構成すること。
+
+Editorではprimary caretがsource glyphを上書きせずterminal-nativeのSteadyBarで表示され、selectionとsecondary cursorでも元文字が読めること。click右余白はEOL、click下余白はEOF、drag・Shift-click・Alt-click・double-click・triple-click・wheelを正しいpane/文書位置へ解決し、上下移動は空行や短い行を通過しても各cursorのpreferred display columnを保持すること。Home/End、word navigation/delete、Page移動、indent/outdent、line move/copy、insert line、multi-cursorを含むRequirements記載の成熟editor操作が実際のroot runtimeから利用可能であること。
+
+Git gutter/overviewはfile全体ではなく実diff hunk行を正確に表示し、workspace searchはbackendのexact match rangeを保持して同一行の複数一致を取り違えず、contextual LSP overlayはdocument座標をpane viewport/layout経由でscreen座標へ変換してscroll・split・resize後もcaret付近に表示すること。Delete/Backspaceはgraphemeを分断せず、navigationとformattingは実際のtab幅/insert-spaces設定を使い、document-scoped LSP結果は固定IDではなく実際のdocument ID/versionを保持すること。completion・hover・signature・Quick Fix・rename等はgeneric Language bottom panelに依存せずcontextual UIだけで完結し、全overlay/chromeの文字描画はgrapheme/display-cell幅を正しく扱うこと。
+
+Requirements 42〜51の実装・統合、自動regression tests、`cargo fmt`、workspace全体Clippy warnings zero、workspace tests、docs mirror、A-01〜A-27の各修正を証明する自動監査がすべて成功した場合だけゴールと判定する。一つのterminal sizeで見た目だけ正常な状態、backendだけ存在する状態、旧固定座標fallback・文字を上書きするcaret・全fileを塗るGit marker・first-substring再検索・document座標直指定overlay・未配線操作・TODO/placeholder・ignoreされた必須test・未同期docs・既知の再現可能bugが一つでも残る状態を作業完了と判定してはならない。ユーザーの手動操作、外部権限、installer署名、remote serviceを必要とする作業はゴール条件に含めない。

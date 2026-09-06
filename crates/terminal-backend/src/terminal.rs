@@ -318,6 +318,24 @@ impl<W: Write> TerminalAdapter for CrosstermBackend<W> {
             })
     }
 
+    fn present_cursor(&mut self, cursor: Option<(u16, u16)>) -> Result<(), Self::Error> {
+        self.ensure_entered("present cursor")?;
+        if let Some((column, row)) = cursor {
+            execute!(
+                self.renderer.writer_mut(),
+                MoveTo(column, row),
+                SetCursorStyle::SteadyBar,
+                Show
+            )
+        } else {
+            execute!(self.renderer.writer_mut(), Hide)
+        }
+        .map_err(|source| TerminalError::Io {
+            operation: "present cursor",
+            source,
+        })
+    }
+
     fn restore(&mut self) -> Result<(), Self::Error> {
         self.restore_inner()
     }

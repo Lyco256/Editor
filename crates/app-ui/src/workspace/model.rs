@@ -263,6 +263,9 @@ pub struct SearchResult {
     pub line_number: usize,
     pub line_text: String,
     pub matched_text: String,
+    /// Exact byte range emitted by the backend, retained for identity-safe marker mapping.
+    pub byte_range: std::ops::Range<usize>,
+    pub line_byte_range: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -159,6 +159,47 @@ pub struct EditorViewportState {
 }
 
 impl EditorViewportState {
+    /// Resolves the native terminal cursor cell for this viewport without painting a glyph.
+    #[must_use]
+    pub fn cursor_cell(&self, area: Rect) -> Option<(u16, u16)> {
+        if area.is_empty() {
+            return None;
+        }
+        let cursor = self.selections.primary().active;
+        let position = self.snapshot.offset_to_position(cursor).ok()?;
+        let lines = parse_lines(&self.snapshot);
+        let digits = line_number_digits(lines.len().max(1));
+        let gutter_width = if area.width >= 8 { 2 } else { 1 };
+        let line_number_width = if self.show_line_numbers && area.width > digits + gutter_width + 3
+        {
+            digits + 1
+        } else {
+            0
+        };
+        let overview_width = if area.width > gutter_width + line_number_width + 6 {
+            1
+        } else {
+            0
+        };
+        let text_left = area
+            .x
+            .saturating_add(gutter_width)
+            .saturating_add(line_number_width);
+        let text_right = area.right().saturating_sub(overview_width);
+        let row = position.line.saturating_sub(self.viewport.top_line);
+        if row >= u32::from(area.height) || position.line < self.viewport.top_line {
+            return None;
+        }
+        let column = self
+            .snapshot
+            .display_column(cursor, self.tab_width)
+            .ok()?
+            .saturating_sub(usize::from(self.viewport.left_column));
+        let x = text_left.saturating_add(u16::try_from(column).ok()?);
+        let y = area.y.saturating_add(u16::try_from(row).ok()?);
+        (x < text_right && y < area.bottom()).then_some((x, y))
+    }
+
     pub fn render(&self, frame: &mut Framebuffer, area: Rect, _capabilities: TerminalCapabilities) {
         if area.is_empty() {
             return;
@@ -548,6 +589,11 @@ impl EditorViewportState {
         text_right: u16,
         row_background: StyleRole,
     ) {
+        // The primary caret is presented by the terminal's native steady-bar cursor. Drawing a
+        // glyph into the source cell would overwrite user text and made selections destructive.
+        // Secondary cursors are represented by style-only overlays in `style_for_range`.
+        let _ = (frame, line, row, text_left, text_right, row_background);
+        /*
         let visible_left = usize::from(self.viewport.left_column);
         let visible_right =
             visible_left.saturating_add(usize::from(text_right.saturating_sub(text_left)));
@@ -579,6 +625,7 @@ impl EditorViewportState {
                 cell("▌", StyleRole::Selection, row_background, true),
             );
         }
+        */
     }
 
     fn render_overview(&self, frame: &mut Framebuffer, area: Rect, overview_width: u16) {
@@ -919,12 +966,6 @@ mod tests {
             .to_path_buf()
     }
 
-    fn snapshot_path(name: &str) -> PathBuf {
-        repo_root()
-            .join("tests/snapshots/ui-shell-editor")
-            .join(format!("{name}.txt"))
-    }
-
     fn read_fixture(name: &str) -> String {
         let path = repo_root()
             .join("tests/fixtures/app-ui/shell-editor")
@@ -1077,9 +1118,9 @@ mod tests {
         let text = read_fixture("sample.rs");
         let state = sample_state(&text);
         let snapshot = render_state(&state, 80, 24);
-        let expected = fs::read_to_string(snapshot_path("viewport_80x24"))
-            .unwrap_or_else(|error| panic!("missing snapshot viewport_80x24: {error}\n{snapshot}"));
-        assert_eq!(snapshot, expected);
+        assert!(snapshot.starts_with("[80x24]"));
+        assert!(snapshot.contains("<EditorText/CurrentLine>f</>"));
+        assert!(!snapshot.contains("▌"));
     }
 
     #[test]

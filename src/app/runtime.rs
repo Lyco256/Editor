@@ -9,7 +9,7 @@ use app_ui::{
         BottomPanelState, ExplorerState, PaneNode, PanelEntry, ShellFocus, ShellState, TabEntry,
     },
 };
-use editor_types::{OutputLevel, StyleRole};
+use editor_types::{InputEvent, OutputLevel, StyleRole};
 use terminal_backend::{Framebuffer, InputReader, TerminalAdapter};
 use thiserror::Error;
 
@@ -136,6 +136,13 @@ where
             let Some(action) = self.input.next_action() else {
                 break;
             };
+            if let Action::Input(InputEvent::Resize { columns, rows }) = action {
+                if columns > 0 && rows > 0 {
+                    self.size = (columns, rows);
+                    self.render()?;
+                }
+                continue;
+            }
             let transition = self.state.apply_action(action);
             for event in transition.events {
                 self.state.apply_event(event);
@@ -161,9 +168,15 @@ where
     }
 
     fn render(&mut self) -> Result<(), RuntimeError> {
+        if self.size.0 == 0 || self.size.1 == 0 {
+            return Ok(());
+        }
         let frame = frame_for_state(&self.state, self.size, self.terminal.capabilities());
         self.terminal
             .render(&frame)
+            .map_err(|error| RuntimeError::Render(error.to_string()))?;
+        self.terminal
+            .present_cursor(cursor_for_state(&self.state, self.size))
             .map_err(|error| RuntimeError::Render(error.to_string()))?;
         self.state.frame_number += 1;
         Ok(())
@@ -182,6 +195,69 @@ where
             });
         }
     }
+}
+
+fn cursor_for_state(state: &AppState, size: (u16, u16)) -> Option<(u16, u16)> {
+    if state.explorer_focus || size.0 == 0 || size.1 == 0 {
+        return None;
+    }
+    let buffer = state
+        .tabs
+        .get(state.active_tab)
+        .map_or(&state.buffer, |tab| &tab.buffer);
+    let position = buffer
+        .offset_to_position(buffer.selections().primary().active)
+        .ok()?;
+    let layout = app_ui::shell::ShellState {
+        explorer: ExplorerState {
+            roots: Vec::new(),
+            entries: Vec::new(),
+            visible: state.explorer_visible,
+        },
+        tabs: Vec::new(),
+        root: PaneNode::leaf(EditorViewportState {
+            pane_id: state.focused_pane,
+            title: String::new(),
+            snapshot: buffer.snapshot(),
+            viewport: state
+                .panes
+                .iter()
+                .find(|pane| pane.id == state.focused_pane)
+                .map_or_else(app_ui::editor::TextViewport::default, |pane| pane.viewport),
+            selections: buffer.selections().clone(),
+            folds: editor_core::FoldSet::default(),
+            markers: SemanticMarkerSet::default(),
+            syntax_spans: Vec::new(),
+            search_matches: Vec::new(),
+            bracket_matches: Vec::new(),
+            status: EditorStatusData::default(),
+            show_line_numbers: state.show_line_numbers,
+            tab_width: state.tab_width,
+            overview_whole_document: true,
+            inlay_hints: Vec::new(),
+        }),
+        bottom: BottomPanelState {
+            title: String::new(),
+            entries: Vec::new(),
+            visible: false,
+        },
+        palette: app_ui::widgets::CommandPaletteState::default(),
+        focus: ShellFocus::Editor,
+        status: EditorStatusData::default(),
+    }
+    .layout(app_ui::widgets::Rect::new(0, 0, size.0, size.1));
+    // The shell's editor viewport owns exact gutter/scroll metrics; this fallback keeps the
+    // native cursor visible for the common unscrolled case while avoiding a source-cell glyph.
+    let x = layout
+        .editor
+        .x
+        .saturating_add(2)
+        .saturating_add(u16::try_from(position.character).ok()?);
+    let y = layout
+        .editor
+        .y
+        .saturating_add(u16::try_from(position.line).ok()?);
+    (x < layout.editor.right() && y < layout.editor.bottom()).then_some((x, y))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -252,35 +328,7 @@ fn frame_for_state(
         .collect::<Vec<_>>();
     let mut language_markers = diagnostic_markers.clone();
     language_markers.extend(syntax_error_markers);
-    let git_markers = state
-        .git_dashboard
-        .as_ref()
-        .into_iter()
-        .flat_map(|dashboard| dashboard.changes.iter())
-        .filter(|entry| {
-            state.active_path.as_ref().is_some_and(|path| {
-                let candidate = state
-                    .git_root
-                    .as_ref()
-                    .map_or_else(|| entry.path.clone(), |root| root.join(&entry.path));
-                candidate == *path
-                    || candidate.canonicalize().ok().as_ref() == path.canonicalize().ok().as_ref()
-            })
-        })
-        .map(|entry| app_ui::editor::MarkerSpan {
-            range: editor_types::TextRange {
-                start: editor_types::CharacterOffset(0),
-                end: editor_types::CharacterOffset(buffer.len_chars()),
-            },
-            kind: if entry.conflicted {
-                app_ui::editor::MarkerKind::Error
-            } else if entry.untracked || (entry.staged && !entry.unstaged) {
-                app_ui::editor::MarkerKind::Added
-            } else {
-                app_ui::editor::MarkerKind::Modified
-            },
-        })
-        .collect::<Vec<_>>();
+    let git_markers = git_markers_for_buffer(state, buffer);
     let mut folds = state
         .panes
         .iter()
@@ -343,19 +391,17 @@ fn frame_for_state(
         .iter()
         .filter(|result| state.active_path.as_ref() == Some(&result.path))
         .filter_map(|result| {
-            let character = result
-                .line_text
-                .find(&result.matched_text)
-                .map(|byte| result.line_text[..byte].chars().count())?;
-            let start = buffer
-                .position_to_offset(editor_types::LogicalPosition {
-                    line: u32::try_from(result.line_number.saturating_sub(1)).ok()?,
-                    character: u32::try_from(character).ok()?,
-                })
+            let line = u32::try_from(result.line_number.saturating_sub(1)).ok()?;
+            let line_start = snapshot
+                .position_to_offset(editor_types::LogicalPosition { line, character: 0 })
                 .ok()?;
-            let end = editor_core::CharacterOffset(
-                start.0.saturating_add(result.matched_text.chars().count()),
-            );
+            let line_text = snapshot.line_text(line).ok()?;
+            let start_byte = result.line_byte_range.start.min(line_text.len());
+            let end_byte = result.line_byte_range.end.min(line_text.len());
+            let start_chars = line_text[..start_byte].chars().count();
+            let end_chars = line_text[..end_byte].chars().count();
+            let start = editor_core::CharacterOffset(line_start.0.saturating_add(start_chars));
+            let end = editor_core::CharacterOffset(line_start.0.saturating_add(end_chars));
             Some(editor_core::TextRange { start, end })
         })
         .collect::<Vec<_>>();
@@ -745,6 +791,110 @@ fn frame_for_state(
     frame
 }
 
+/// Projects Git diff hunks into precise document ranges for the editor gutter and overview.
+///
+/// A status entry describes a file, but painting the whole file as changed is misleading for
+/// large documents. Hunk line numbers are one-based and refer to the working-tree document.
+fn git_markers_for_buffer(
+    state: &AppState,
+    buffer: &editor_core::TextBuffer,
+) -> Vec<app_ui::editor::MarkerSpan> {
+    let Some(path) = state.active_path.as_ref() else {
+        return Vec::new();
+    };
+    let Some(dashboard) = state.git_dashboard.as_ref() else {
+        return Vec::new();
+    };
+    let matches_path = |candidate: &std::path::Path| {
+        candidate == path
+            || candidate.canonicalize().ok().as_ref() == path.canonicalize().ok().as_ref()
+    };
+    let mut markers = Vec::new();
+    for file in &dashboard.diff_files {
+        let candidate = state
+            .git_root
+            .as_ref()
+            .map_or_else(|| file.path.clone(), |root| root.join(&file.path));
+        if !matches_path(&candidate) {
+            continue;
+        }
+        for hunk in &file.hunks {
+            let mut line = hunk.new_range.0.max(1);
+            let has_addition = hunk
+                .lines
+                .iter()
+                .any(|diff| matches!(diff.kind, vcs_git::GitDiffLineKind::Addition));
+            let kind = if has_addition {
+                app_ui::editor::MarkerKind::Modified
+            } else {
+                app_ui::editor::MarkerKind::Deleted
+            };
+            for diff in &hunk.lines {
+                match diff.kind {
+                    vcs_git::GitDiffLineKind::Addition => {
+                        if let Some(range) = line_range(buffer, line) {
+                            markers.push(app_ui::editor::MarkerSpan { range, kind });
+                        }
+                        line = line.saturating_add(1);
+                    }
+                    vcs_git::GitDiffLineKind::Context => line = line.saturating_add(1),
+                    vcs_git::GitDiffLineKind::Removal => {
+                        let anchor = line.saturating_sub(1).max(1);
+                        if let Some(range) = line_range(buffer, anchor) {
+                            markers.push(app_ui::editor::MarkerSpan {
+                                range,
+                                kind: app_ui::editor::MarkerKind::Deleted,
+                            });
+                        }
+                    }
+                    vcs_git::GitDiffLineKind::Meta => {}
+                }
+            }
+            if hunk.lines.is_empty() && hunk.new_range.1 > 0 {
+                for offset in 0..hunk.new_range.1 {
+                    if let Some(range) = line_range(buffer, hunk.new_range.0.saturating_add(offset))
+                    {
+                        markers.push(app_ui::editor::MarkerSpan { range, kind });
+                    }
+                }
+            }
+        }
+    }
+    if markers.is_empty() {
+        for entry in &dashboard.changes {
+            let candidate = state
+                .git_root
+                .as_ref()
+                .map_or_else(|| entry.path.clone(), |root| root.join(&entry.path));
+            if matches_path(&candidate) && entry.untracked {
+                if let Some(range) = line_range(buffer, 1) {
+                    markers.push(app_ui::editor::MarkerSpan {
+                        range,
+                        kind: app_ui::editor::MarkerKind::Added,
+                    });
+                }
+            }
+        }
+    }
+    markers
+}
+
+fn line_range(
+    buffer: &editor_core::TextBuffer,
+    one_based_line: usize,
+) -> Option<editor_types::TextRange> {
+    let snapshot = buffer.snapshot();
+    let line = u32::try_from(one_based_line.saturating_sub(1)).ok()?;
+    let start = snapshot
+        .position_to_offset(editor_types::LogicalPosition { line, character: 0 })
+        .ok()?;
+    let end = snapshot
+        .line_text(line)
+        .ok()
+        .map(|text| editor_core::CharacterOffset(start.0.saturating_add(text.chars().count())))?;
+    Some(editor_types::TextRange { start, end })
+}
+
 fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebuffer> {
     let mode = state.input_mode.as_ref()?;
     let width = size.0.saturating_sub(4).clamp(1, 100);
@@ -911,7 +1061,7 @@ mod tests {
             (80, 24),
             editor_types::TerminalCapabilities::default(),
         );
-        let cell = frame.get(31, 1).expect("syntax editor cell");
+        let cell = frame.get(31, 2).expect("syntax editor cell");
         assert_eq!(cell.foreground, StyleRole::SyntaxKeyword);
     }
 

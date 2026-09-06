@@ -46,7 +46,7 @@ impl Default for Theme {
         Self {
             colors: [
                 RgbColor::new(212, 212, 212),
-                RgbColor::new(30, 30, 30),
+                RgbColor::new(0, 0, 0),
                 RgbColor::new(38, 79, 120),
                 RgbColor::new(42, 45, 46),
                 RgbColor::new(133, 133, 133),
@@ -218,6 +218,7 @@ fn color_distance(left: RgbColor, right: RgbColor) -> u32 {
     u32::try_from(red * red + green * green + blue * blue).unwrap_or(u32::MAX)
 }
 
+#[allow(clippy::match_same_arms)]
 const fn role_index(role: StyleRole) -> usize {
     match role {
         StyleRole::EditorText => 0,
@@ -239,6 +240,36 @@ const fn role_index(role: StyleRole) -> usize {
         StyleRole::SyntaxKeyword | StyleRole::SemanticType => 16,
         StyleRole::SyntaxString => 17,
         StyleRole::SyntaxComment => 18,
+        StyleRole::CurrentLineBackground => 3,
+        StyleRole::SelectionForeground => 0,
+        StyleRole::SelectionBackground => 2,
+        StyleRole::SecondaryCursorForeground => 0,
+        StyleRole::SecondaryCursorBackground => 9,
+        StyleRole::LineNumberActive => 4,
+        StyleRole::SplitSeparator => 5,
+        StyleRole::MenuForeground => 0,
+        StyleRole::MenuBackground => 7,
+        StyleRole::MenuSelectedForeground => 0,
+        StyleRole::MenuSelectedBackground => 2,
+        StyleRole::ExplorerForeground => 0,
+        StyleRole::ExplorerBackground => 7,
+        StyleRole::ExplorerDirectory => 10,
+        StyleRole::ExplorerSelectedForeground => 0,
+        StyleRole::ExplorerSelectedBackground => 2,
+        StyleRole::TabForeground => 0,
+        StyleRole::TabBackground => 7,
+        StyleRole::TabActiveForeground => 0,
+        StyleRole::TabActiveBackground => 1,
+        StyleRole::TabPreviewForeground => 10,
+        StyleRole::TabPinnedForeground => 11,
+        StyleRole::PanelForeground => 0,
+        StyleRole::PanelBackground => 7,
+        StyleRole::PanelTitle => 0,
+        StyleRole::InputForeground => 0,
+        StyleRole::InputBackground => 7,
+        StyleRole::StatusForeground => 0,
+        StyleRole::StatusBackground => 6,
+        StyleRole::Border => 5,
     }
 }
 

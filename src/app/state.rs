@@ -674,7 +674,7 @@ fn language_result_from_response(
                     let position = value.get("position")?;
                     Some(app_ui::language::InlayHintView {
                         label: panel_glyphs(&json_label(value)),
-                        document: DocumentId(1),
+                        document,
                         position: LogicalPosition {
                             line: position.get("line")?.as_u64()?.try_into().ok()?,
                             character: position.get("character")?.as_u64()?.try_into().ok()?,
@@ -4701,14 +4701,16 @@ impl AppState {
                 KeyCode::Right => self
                     .buffer
                     .move_right(key.modifiers.contains(Modifier::Shift)),
-                KeyCode::Up => {
-                    self.buffer
-                        .move_vertical(-1, key.modifiers.contains(Modifier::Shift), 4)
-                }
-                KeyCode::Down => {
-                    self.buffer
-                        .move_vertical(1, key.modifiers.contains(Modifier::Shift), 4)
-                }
+                KeyCode::Up => self.buffer.move_vertical(
+                    -1,
+                    key.modifiers.contains(Modifier::Shift),
+                    self.tab_width,
+                ),
+                KeyCode::Down => self.buffer.move_vertical(
+                    1,
+                    key.modifiers.contains(Modifier::Shift),
+                    self.tab_width,
+                ),
                 KeyCode::Character('z') if key.modifiers.contains(Modifier::Control) => {
                     self.buffer.undo().map(|_| ())
                 }
@@ -4883,9 +4885,10 @@ impl AppState {
             if !selection.is_cursor() {
                 edits.push(editor_core::Edit::delete(range));
             } else if range.end.0 < self.buffer.len_chars() {
+                let next = self.buffer.next_grapheme_offset(range.end);
                 edits.push(editor_core::Edit::delete(editor_types::TextRange {
                     start: range.end,
-                    end: editor_types::CharacterOffset(range.end.0 + 1),
+                    end: next,
                 }));
             }
         }
@@ -4941,7 +4944,7 @@ impl AppState {
             method: String::from("textDocument/formatting"),
             params: serde_json::json!({
                 "textDocument": {"uri": self.active_document_uri()},
-                "options": {"tabSize": 4, "insertSpaces": true}
+                "options": {"tabSize": self.tab_width, "insertSpaces": self.insert_spaces}
             }),
         })
     }
@@ -7701,6 +7704,8 @@ mod tests {
                 line_number: 1,
                 line_text: "needle".to_owned(),
                 matched_text: "needle".to_owned(),
+                byte_range: 0..6,
+                line_byte_range: 0..6,
             },
         });
         state.apply_event(Event::SearchResult {
@@ -7710,6 +7715,8 @@ mod tests {
                 line_number: 1,
                 line_text: "needle".to_owned(),
                 matched_text: "needle".to_owned(),
+                byte_range: 0..6,
+                line_byte_range: 0..6,
             },
         });
         assert_eq!(state.workspace_ui.search.results.len(), 1);

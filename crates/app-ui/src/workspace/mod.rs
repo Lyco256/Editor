@@ -213,6 +213,8 @@ mod tests {
                 line_number: 12,
                 line_text: "needle alpha".to_owned(),
                 matched_text: "needle".to_owned(),
+                byte_range: 0..6,
+                line_byte_range: 0..6,
             },
         );
         ui.state.search.push_result(
@@ -222,6 +224,8 @@ mod tests {
                 line_number: 22,
                 line_text: "needle beta".to_owned(),
                 matched_text: "needle".to_owned(),
+                byte_range: 0..6,
+                line_byte_range: 0..6,
             },
         );
         let rendered = frame_lines(&ui, 84, 12);
@@ -248,6 +252,8 @@ mod tests {
                 line_number: 1,
                 line_text: "stale".to_owned(),
                 matched_text: "stale".to_owned(),
+                byte_range: 0..5,
+                line_byte_range: 0..5,
             },
         );
         let rendered = frame_lines(&ui, 84, 10);

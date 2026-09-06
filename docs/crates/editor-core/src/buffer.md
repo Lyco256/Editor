@@ -14,6 +14,8 @@ Important types:
 - `AppliedTransaction` reports whether a transaction changed text and which version it produced.
 - `TextBuffer` also supports structural cloning/equality for root-state snapshots; Ropey remains
   private to this module.
+- Grapheme navigation is exposed through `TextBuffer::next_grapheme_offset`, so forward deletion
+  and cursor movement share the same Unicode-safe boundary logic.
 
 Invariants:
 

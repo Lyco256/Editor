@@ -6,6 +6,9 @@ runtime errors. Error variants preserve both runtime and restoration failures. T
 composes the pure shell/editor views from immutable state and terminal capabilities, including
 persistent Explorer/Output visibility, tabs, and horizontal/vertical split panes alongside the
 command-palette model. Syntax highlights, folds, bracket pairs, and active workspace search ranges
+are projected with exact byte ranges, and Git hunks become line-local gutter markers. Resize events
+update dimensions immediately (zero-sized frames are ignored) and the terminal adapter presents a
+native steady-bar cursor for the active editor.
 are projected from immutable service snapshots, including negotiated semantic-token spans. Status
 rendering projects the active tab's detected encoding and line-ending metadata. `run_interactive` uses one adapter for rendering and normalized input and
 blocks while idle instead of polling. Dispatchers may poll typed completion events from background

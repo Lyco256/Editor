@@ -115,3 +115,16 @@ popup rendering, same-document split-buffer projection, and a dedicated `mvp_gap
 All audited MVP paths are now covered: the palette materializes the typed registry consumed by
 keybinding dispatch, inlay hints retain logical positions and render inline, recent roots persist
 through `SessionState`, and the verified `devenv` state has been promoted to `main`.
+
+## Requirements 42–51 and latest UI audit
+
+The current working tree contains the new requirement specifications and the first stabilization
+slice: terminal resize events are applied immediately, layout snapshots expose exact tab rectangles,
+menu labels are rendered from the root shell, search/Git projections preserve precise ranges, cursor
+rendering is delegated to a native steady-bar terminal cursor, and forward deletion is grapheme-safe.
+The corresponding workspace gates (`cargo fmt --all`, workspace Clippy with warnings denied, full
+workspace tests, and `cargo test --test doc_mirror`) pass locally. Remaining A-01–A-27 items that
+require further work before release promotion include full root pointer-layout routing, preview/open/
+pinned tab disposition, pane-local mouse gestures, contextual overlay anchoring, and the dedicated
+per-item regression matrix. Therefore this snapshot is pushed as integration progress on `devenv`,
+not reported as final completion or as a verified `main` promotion.

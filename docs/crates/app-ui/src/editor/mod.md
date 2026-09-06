@@ -5,6 +5,8 @@ Role: pure editor viewport rendering and editor-local action types.
 This module owns the text-viewport state used by the UI shell, including line numbers, gutter
 markers, selections, multiple cursors, fold presentation, syntax/semantic spans, bracket/search
 highlighting, overview ruler markers, and status-bar summary data.
+The primary caret is presented through the terminal's native steady-bar cursor; viewport rendering
+never overwrites source cells with a caret glyph. `cursor_cell` exposes its pane-local position.
 Typed inlay-hint positions are carried into the viewport and painted inline without mutating the
 document buffer.
 
