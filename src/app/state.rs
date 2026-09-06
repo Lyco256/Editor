@@ -3216,6 +3216,13 @@ impl AppState {
         }
         self.sync_active_tab();
         self.active_tab = index;
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+        {
+            pane.displayed_tab = index;
+        }
         let tab = self.tabs[index].clone();
         self.active_path = tab.path;
         self.buffer = tab.buffer;
@@ -4562,6 +4569,23 @@ impl AppState {
                 _ => Ok(()),
             },
             InputEvent::Mouse(mouse) => {
+                if self.split_axis.is_some()
+                    && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
+                {
+                    let secondary = match self.split_axis {
+                        Some(app_ui::shell::SplitAxis::Vertical) => mouse.position.column >= 60,
+                        Some(app_ui::shell::SplitAxis::Horizontal) => mouse.position.row >= 20,
+                        None => false,
+                    };
+                    let pane_id = u32::from(secondary);
+                    if self.focus_pane(pane_id) {
+                        if let Some(tab) = self.panes.iter().find(|pane| pane.id == pane_id) {
+                            if tab.displayed_tab < self.tabs.len() {
+                                self.switch_tab(tab.displayed_tab);
+                            }
+                        }
+                    }
+                }
                 if matches!(self.input_mode, Some(InputMode::QuickOpen))
                     && matches!(mouse.action, MouseAction::Down(MouseButton::Left))
                 {
@@ -5497,12 +5521,15 @@ impl AppState {
     fn mouse_offset(&self, screen_row: u16, screen_column: u16) -> Option<CharacterOffset> {
         // The shell reserves one row for tabs and a narrow Explorer gutter. On compact layouts
         // the subtraction saturates, keeping clicks within the first document line.
-        let line = u32::from(screen_row.saturating_sub(2));
+        let pane = self.focused_pane();
+        let line = u32::from(screen_row.saturating_sub(2))
+            .saturating_add(pane.map_or(0, |pane| pane.viewport.top_line));
         let column = u32::from(if self.explorer_visible {
             screen_column.saturating_sub(25)
         } else {
             screen_column.saturating_sub(1)
-        });
+        })
+        .saturating_add(u32::from(pane.map_or(0, |pane| pane.viewport.left_column)));
         self.buffer
             .position_to_offset(LogicalPosition {
                 line,
