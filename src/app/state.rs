@@ -3521,9 +3521,14 @@ impl AppState {
             self.switch_tab(index);
             return Ok(());
         }
+        let focused_preview_path = self
+            .focused_pane()
+            .and_then(|pane| self.tabs.get(pane.displayed_tab))
+            .and_then(|tab| tab.path.clone());
         if let Some(index) = self.tabs.iter().position(|tab| {
             tab.disposition == app_ui::shell::TabDisposition::Preview
                 && !tab.buffer.is_dirty()
+                && tab.path == focused_preview_path
                 && tab.path.as_ref() != Some(&requested)
         }) {
             self.close_tab_if_clean(index);
@@ -6552,6 +6557,10 @@ impl AppState {
         if self.explorer_entries.is_empty() {
             self.explorer_scroll = 0;
         } else if self.explorer_cursor < self.explorer_scroll {
+            self.explorer_scroll = self.explorer_cursor;
+        } else if self.explorer_cursor > self.explorer_scroll {
+            // The shell supplies the viewport height; keeping the selected row at the
+            // leading visible position is the conservative policy when that height is unknown.
             self.explorer_scroll = self.explorer_cursor;
         }
     }
