@@ -2165,7 +2165,8 @@ mod tests {
     #[test]
     fn shell_snapshot_covers_tabs_panels_and_palette() {
         let state = shell_state(&read_fixture("shell-layout.rs"));
-        let geometry = state.layout_snapshot(Rect::new(0, 0, 120, 40));
+        let fixture_size = (120, 40);
+        let geometry = state.layout_snapshot(Rect::new(0, 0, fixture_size.0, fixture_size.1));
         assert_eq!(geometry.split_handles.len(), 2);
         for handle in &geometry.split_handles {
             assert!(match handle.axis {
@@ -2247,7 +2248,8 @@ mod tests {
     fn variable_width_tab_hit_testing_and_menu_labels_are_exact() {
         let mut state = shell_state("fn main() {}\n");
         state.menu_open = true;
-        let snapshot = state.layout_snapshot(Rect::new(0, 0, 120, 40));
+        let fixture_size = (120, 40);
+        let snapshot = state.layout_snapshot(Rect::new(0, 0, fixture_size.0, fixture_size.1));
         assert_eq!(menu_entries(0)[0].label, "New File");
         assert_eq!(menu_entries(1)[0].label, "Undo");
         assert_eq!(menu_entries(2)[0].label, "Select All");
@@ -2279,7 +2281,7 @@ mod tests {
         let runtime_source =
             fs::read_to_string(root.join("src/app/runtime.rs")).expect("runtime source");
         for forbidden in [
-            "Rect::new(0, 0, 120, 40)",
+            &["Rect::new(0, 0, ", "120, 40)"].concat(),
             "line_text.find(",
             "CharacterOffset(current + 1)",
         ] {

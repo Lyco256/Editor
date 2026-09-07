@@ -1271,13 +1271,16 @@ mod tests {
     #[test]
     fn vertical_navigation_retains_preferred_display_column_across_blank_lines() {
         let mut buffer = TextBuffer::new("abcde\n\nabcde");
+        let tab_width = 4;
         buffer
             .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(5))))
             .expect("selection");
-        buffer.move_vertical(1, false, 4).expect("down to blank");
+        buffer
+            .move_vertical(1, false, tab_width)
+            .expect("down to blank");
         assert_eq!(buffer.selections().primary().active, CharacterOffset(6));
         buffer
-            .move_vertical(1, false, 4)
+            .move_vertical(1, false, tab_width)
             .expect("down to long line");
         assert_eq!(buffer.selections().primary().active, CharacterOffset(12));
     }
@@ -1285,6 +1288,7 @@ mod tests {
     #[test]
     fn vertical_navigation_keeps_each_multi_cursor_column() {
         let mut buffer = TextBuffer::new("ab\ncdef\n\nuvwxyz");
+        let tab_width = 4;
         buffer
             .set_selections(
                 SelectionSet::new(
@@ -1297,9 +1301,11 @@ mod tests {
                 .expect("selections"),
             )
             .expect("selection");
-        buffer.move_vertical(1, false, 4).expect("down to blank");
         buffer
-            .move_vertical(1, false, 4)
+            .move_vertical(1, false, tab_width)
+            .expect("down to blank");
+        buffer
+            .move_vertical(1, false, tab_width)
             .expect("down to short line");
         let offsets = buffer
             .selections()

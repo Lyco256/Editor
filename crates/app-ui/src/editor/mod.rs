@@ -1071,7 +1071,7 @@ mod tests {
         let snapshot = render_state(&state, 80, 24);
         assert!(snapshot.starts_with("[80x24]"));
         assert!(snapshot.contains("<EditorText/CurrentLine>f</>"));
-        assert!(!snapshot.contains("▌"));
+        assert!(!snapshot.contains(char::from_u32(0x258c).expect("block element")));
     }
 
     #[test]

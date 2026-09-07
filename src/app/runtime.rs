@@ -264,15 +264,8 @@ fn scene_for_state(
     // The active tab buffer is authoritative. `active_text` is a projection used by recovery and
     // serialization; reconstructing a TextBuffer here would reset selections and undo history on
     // every frame.
-    let buffer = state
-        .tabs
-        .get(state.active_tab)
-        .map_or(&state.buffer, |tab| &tab.buffer);
-    let snapshot = if state.active_text == buffer.snapshot().text() {
-        buffer.snapshot()
-    } else {
-        editor_core::TextSnapshot::from_text(state.active_text.clone())
-    };
+    let buffer = &state.buffer;
+    let snapshot = buffer.snapshot();
     let file_name = state
         .active_path
         .as_ref()
@@ -481,9 +474,9 @@ fn scene_for_state(
             diagnostics: diagnostic_markers,
             ..SemanticMarkerSet::default()
         },
-        syntax_spans,
-        search_matches,
-        bracket_matches,
+        syntax_spans: syntax_spans.clone(),
+        search_matches: search_matches.clone(),
+        bracket_matches: bracket_matches.clone(),
         status: status.clone(),
         show_line_numbers: state.show_line_numbers,
         tab_width: state.tab_width,
@@ -571,10 +564,12 @@ fn scene_for_state(
         });
     }
     let second_viewport = state
-        .split_secondary_tab
-        .and_then(|index| state.tabs.get(index))
-        .map(|tab| {
-            let shared = state.split_secondary_tab == Some(state.active_tab);
+        .panes
+        .iter()
+        .find(|pane| pane.id != state.focused_pane)
+        .and_then(|pane| state.tabs.get(pane.displayed_tab).map(|tab| (pane, tab)))
+        .map(|(pane, tab)| {
+            let shared = pane.displayed_tab == state.active_tab;
             let title = tab
                 .path
                 .as_ref()
@@ -584,49 +579,56 @@ fn scene_for_state(
                     |name| name.to_string_lossy().into_owned(),
                 );
             EditorViewportState {
-                pane_id: 1,
-                title,
+                pane_id: pane.id,
+                title: title.clone(),
                 snapshot: if shared {
                     buffer.snapshot()
                 } else {
                     tab.buffer.snapshot()
                 },
-                viewport: state
-                    .panes
-                    .iter()
-                    .find(|pane| {
-                        pane.displayed_tab == state.split_secondary_tab.unwrap_or(usize::MAX)
-                    })
-                    .map_or_else(app_ui::editor::TextViewport::default, |pane| pane.viewport),
+                viewport: pane.viewport,
                 selections: if shared {
                     buffer.selections().clone()
                 } else {
                     tab.buffer.selections().clone()
                 },
-                folds: state
-                    .panes
-                    .iter()
-                    .find(|pane| {
-                        pane.displayed_tab == state.split_secondary_tab.unwrap_or(usize::MAX)
-                    })
-                    .map_or_else(|| folds.clone(), |pane| pane.folds.clone()),
-                markers: SemanticMarkerSet {
-                    language: language_markers,
-                    git: git_markers,
-                    ..SemanticMarkerSet::default()
+                folds: pane.folds.clone(),
+                // Diagnostics, syntax, search, Git and inlay data are document-scoped. Until
+                // their respective stores are keyed by document id, never leak focused-pane
+                // decorations into a different secondary document.
+                markers: if shared {
+                    SemanticMarkerSet {
+                        language: language_markers.clone(),
+                        git: git_markers.clone(),
+                        ..SemanticMarkerSet::default()
+                    }
+                } else {
+                    SemanticMarkerSet::default()
                 },
-                syntax_spans: Vec::new(),
-                search_matches: Vec::new(),
-                bracket_matches: Vec::new(),
-                status: status.clone(),
+                syntax_spans: if shared {
+                    syntax_spans.clone()
+                } else {
+                    Vec::new()
+                },
+                search_matches: if shared {
+                    search_matches.clone()
+                } else {
+                    Vec::new()
+                },
+                bracket_matches: if shared {
+                    bracket_matches.clone()
+                } else {
+                    Vec::new()
+                },
+                status: EditorStatusData {
+                    file_name: title.clone(),
+                    dirty: tab.buffer.is_dirty(),
+                    ..status.clone()
+                },
                 show_line_numbers: state.show_line_numbers,
                 tab_width: state.tab_width,
                 overview_whole_document: true,
-                inlay_hints: state
-                    .language_ui
-                    .inlay_hints
-                    .current()
-                    .map_or_else(Vec::new, |view| view.positions.clone()),
+                inlay_hints: Vec::new(),
             }
         });
     let root = match (state.split_axis, second_viewport) {
@@ -1302,6 +1304,7 @@ mod tests {
     #[test]
     fn root_frame_projects_syntax_roles_and_folds() {
         let mut state = AppState::default();
+        state.buffer = editor_core::TextBuffer::new("fn main() {\n  1\n}");
         state.active_text = String::from("fn main() {\n  1\n}");
         state.syntax_snapshot = syntax_engine::SyntaxSnapshot {
             ticket: Some(syntax_engine::ParseTicket {

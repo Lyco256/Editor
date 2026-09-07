@@ -1212,6 +1212,20 @@ impl AppState {
             .or_else(|| self.panes.first())
     }
 
+    /// Returns the document tab displayed by a pane, keeping pane projection tied to its
+    /// persistent tab identity rather than the focused document's compatibility string.
+    #[must_use]
+    pub fn tabs_for_pane(&self, pane_id: u32) -> Option<&TabState> {
+        let pane = self.panes.iter().find(|pane| pane.id == pane_id)?;
+        self.tabs.get(pane.displayed_tab)
+    }
+
+    /// Returns the persistent buffer owned by the document displayed in a pane.
+    #[must_use]
+    pub fn buffer_for_pane(&self, pane_id: u32) -> Option<&TextBuffer> {
+        self.tabs_for_pane(pane_id).map(|tab| &tab.buffer)
+    }
+
     /// Focuses a pane by stable id and keeps exactly one focused pane.
     pub fn focus_pane(&mut self, id: u32) -> bool {
         if !self.panes.iter().any(|pane| pane.id == id) {
@@ -6006,7 +6020,20 @@ impl AppState {
             // Raw screen coordinates are translated by the runtime into `Action::Pointer` using
             // the last rendered layout snapshot. AppState deliberately does not infer workbench
             // geometry from terminal coordinates.
-            InputEvent::Mouse(_) | InputEvent::Resize { .. } => Ok(()),
+            InputEvent::Mouse(_) => Ok(()),
+            // Runtime owns terminal dimensions; a direct state dispatch remains an explicit
+            // event so callers cannot mistake a silently discarded resize for handled input.
+            InputEvent::Resize { columns, rows } => {
+                if columns == 0 || rows == 0 {
+                    self.output.push(OutputMessage {
+                        subsystem: "runtime".to_owned(),
+                        operation: "resize".to_owned(),
+                        level: OutputLevel::Warning,
+                        message: "terminal resize dimensions must be non-zero".to_owned(),
+                    });
+                }
+                Ok(())
+            }
         };
         if let Err(error) = result {
             self.output.push(OutputMessage {

@@ -68,6 +68,8 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+manual-assert-eq = "allow"
+assigning-clones = "allow"
 
 [lints]
 workspace = true
