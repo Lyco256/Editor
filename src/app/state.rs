@@ -5419,7 +5419,14 @@ impl AppState {
                 text_width,
             } => {
                 if self.focus_pane(pane_id) {
-                    self.apply_editor_pointer(pointer, local, region, text_origin, text_width);
+                    self.apply_editor_pointer(
+                        pointer,
+                        pane_id,
+                        local,
+                        region,
+                        text_origin,
+                        text_width,
+                    );
                 }
             }
             PointerTarget::Bottom(index) => {
@@ -5478,29 +5485,31 @@ impl AppState {
     fn apply_editor_pointer(
         &mut self,
         pointer: app_ui::shell::PointerEvent,
+        pane_id: u32,
         local: editor_types::ScreenCell,
         region: app_ui::shell::EditorPointerRegion,
         text_origin: u16,
         text_width: u16,
     ) {
-        let pane = self
-            .panes
-            .iter()
-            .find(|pane| pane.id == self.focused_pane)
-            .cloned();
+        let pane = self.panes.iter().find(|pane| pane.id == pane_id).cloned();
         let Some(pane) = pane else {
             return;
         };
+        let target_tab = pane.displayed_tab;
+        let mut buffer = if target_tab == self.active_tab {
+            self.buffer.clone()
+        } else {
+            let Some(tab) = self.tabs.get(target_tab) else {
+                return;
+            };
+            tab.buffer.clone()
+        };
         let requested_line = pane.viewport.top_line.saturating_add(u32::from(local.row));
-        let snapshot = self.buffer.snapshot();
+        let snapshot = buffer.snapshot();
         let last_line = u32::try_from(snapshot.line_count().saturating_sub(1)).unwrap_or(u32::MAX);
         let line = requested_line.min(last_line);
         if let MouseAction::ScrollLines(delta) = pointer.action {
-            if let Some(pane) = self
-                .panes
-                .iter_mut()
-                .find(|pane| pane.id == self.focused_pane)
-            {
+            if let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == pane_id) {
                 let next = u32::try_from(
                     i64::from(pane.viewport.top_line)
                         .saturating_add(i64::from(delta))
@@ -5518,26 +5527,20 @@ impl AppState {
             ) {
                 if matches!(region, app_ui::shell::EditorPointerRegion::LineNumber) {
                     if let Some((start, end)) = Self::line_range(&snapshot, line) {
-                        let anchor_line = self
-                            .buffer
+                        let anchor_line = buffer
                             .snapshot()
-                            .offset_to_position(self.buffer.selections().primary().anchor)
+                            .offset_to_position(buffer.selections().primary().anchor)
                             .map_or(line, |position| position.line);
                         let (anchor_start, _) =
                             Self::line_range(&snapshot, anchor_line).unwrap_or((start, end));
                         let selection = if pointer.modifiers.contains(Modifier::Shift) {
-                            editor_core::Selection::new(
-                                self.buffer.selections().primary().anchor,
-                                end,
-                            )
+                            editor_core::Selection::new(buffer.selections().primary().anchor, end)
                         } else if matches!(pointer.action, MouseAction::Drag(MouseButton::Left)) {
                             editor_core::Selection::new(anchor_start, end)
                         } else {
                             editor_core::Selection::new(start, end)
                         };
-                        let _ = self
-                            .buffer
-                            .set_selections(editor_core::SelectionSet::single(selection));
+                        let _ = buffer.set_selections(editor_core::SelectionSet::single(selection));
                     }
                 } else if matches!(region, app_ui::shell::EditorPointerRegion::Gutter) {
                     let _ = self.apply_action_inner(Action::ToggleFold { line });
@@ -5548,11 +5551,12 @@ impl AppState {
                     );
                 }
             }
+            self.commit_pointer_buffer(target_tab, buffer);
             return;
         }
         let local_column = local.column.saturating_sub(text_origin).min(text_width);
         let column = pane.viewport.left_column.saturating_add(local_column);
-        let snapshot = self.buffer.snapshot();
+        let snapshot = buffer.snapshot();
         let Ok(offset) =
             snapshot.offset_for_display_column(line, usize::from(column), self.tab_width)
         else {
@@ -5562,57 +5566,57 @@ impl AppState {
             MouseAction::Down(MouseButton::Left) => {
                 if pointer.click_count >= 3 {
                     if let Some((start, end)) = Self::line_range(&snapshot, line) {
-                        let _ = self
-                            .buffer
-                            .set_selections(editor_core::SelectionSet::single(
-                                editor_core::Selection::new(start, end),
-                            ));
+                        let _ = buffer.set_selections(editor_core::SelectionSet::single(
+                            editor_core::Selection::new(start, end),
+                        ));
                         self.mouse_anchor = Some(start);
                     }
                 } else if pointer.click_count == 2 {
-                    if let Ok(range) = self.buffer.word_range_at(offset) {
-                        let _ = self
-                            .buffer
-                            .set_selections(editor_core::SelectionSet::single(
-                                editor_core::Selection::new(range.start, range.end),
-                            ));
+                    if let Ok(range) = buffer.word_range_at(offset) {
+                        let _ = buffer.set_selections(editor_core::SelectionSet::single(
+                            editor_core::Selection::new(range.start, range.end),
+                        ));
                         self.mouse_anchor = Some(range.start);
                     }
                 } else if pointer.modifiers.contains(Modifier::Alt) {
-                    let selection = self.buffer.selections();
+                    let selection = buffer.selections();
                     if let Ok(with_cursor) =
                         selection.with_cursor(editor_core::Selection::cursor(offset))
                     {
-                        let _ = self.buffer.set_selections(with_cursor);
+                        let _ = buffer.set_selections(with_cursor);
                     }
                     self.mouse_anchor = None;
                 } else if pointer.modifiers.contains(Modifier::Shift) {
-                    let anchor = self.buffer.selections().primary().anchor;
+                    let anchor = buffer.selections().primary().anchor;
                     self.mouse_anchor = Some(anchor);
-                    let _ = self
-                        .buffer
-                        .set_selections(editor_core::SelectionSet::single(
-                            editor_core::Selection::new(anchor, offset),
-                        ));
+                    let _ = buffer.set_selections(editor_core::SelectionSet::single(
+                        editor_core::Selection::new(anchor, offset),
+                    ));
                 } else {
                     self.mouse_anchor = Some(offset);
-                    let _ = self
-                        .buffer
-                        .set_selections(editor_core::SelectionSet::single(
-                            editor_core::Selection::cursor(offset),
-                        ));
+                    let _ = buffer.set_selections(editor_core::SelectionSet::single(
+                        editor_core::Selection::cursor(offset),
+                    ));
                 }
             }
             MouseAction::Drag(MouseButton::Left) => {
                 let anchor = self.mouse_anchor.unwrap_or(offset);
-                let _ = self
-                    .buffer
-                    .set_selections(editor_core::SelectionSet::single(
-                        editor_core::Selection::new(anchor, offset),
-                    ));
+                let _ = buffer.set_selections(editor_core::SelectionSet::single(
+                    editor_core::Selection::new(anchor, offset),
+                ));
             }
             MouseAction::Up(MouseButton::Left) => self.mouse_anchor = None,
             _ => {}
+        }
+        self.commit_pointer_buffer(target_tab, buffer);
+    }
+
+    fn commit_pointer_buffer(&mut self, tab_index: usize, buffer: TextBuffer) {
+        if tab_index == self.active_tab {
+            self.buffer = buffer;
+            self.sync_buffer_projection();
+        } else if let Some(tab) = self.tabs.get_mut(tab_index) {
+            tab.buffer = buffer;
         }
     }
 
@@ -7934,7 +7938,7 @@ impl AppState {
 mod tests {
     use editor_types::{InputEvent, KeyCode, KeyEvent, LanguageServerStatus, RequestId};
 
-    use super::{AppState, BottomPanelView, PendingFormat};
+    use super::{AppState, BottomPanelView, PaneState, PendingFormat, TabState};
     use crate::app::{
         action::Action,
         effect::{Effect, ExternalProcessKind, ProcessSpec},
@@ -8984,6 +8988,52 @@ mod tests {
         let _ = state.apply_action(Action::Pointer(drag));
         assert_eq!(state.buffer.selections().primary().range().start.0, 0);
         assert_eq!(state.buffer.selections().primary().range().end.0, 5);
+    }
+
+    #[test]
+    fn secondary_pane_pointer_updates_only_its_displayed_tab() {
+        use editor_types::{Modifiers, MouseAction, MouseButton, ScreenCell};
+        let primary = TabState {
+            path: None,
+            buffer: TextBuffer::new("primary"),
+            encoding: workspace_core::EncodingKind::Utf8,
+            with_bom: false,
+            line_endings: workspace_core::LineEndings::Lf,
+            disposition: app_ui::shell::TabDisposition::Open,
+        };
+        let secondary = TabState {
+            path: None,
+            buffer: TextBuffer::new("secondary"),
+            encoding: workspace_core::EncodingKind::Utf8,
+            with_bom: false,
+            line_endings: workspace_core::LineEndings::Lf,
+            disposition: app_ui::shell::TabDisposition::Open,
+        };
+        let mut state = AppState {
+            tabs: vec![primary, secondary],
+            panes: vec![PaneState::new(0, 0, true), PaneState::new(1, 1, false)],
+            ..AppState::default()
+        };
+        state.active_tab = 0;
+        state.buffer = state.tabs[0].buffer.clone();
+        state.sync_buffer_projection();
+        let click = app_ui::shell::PointerEvent {
+            target: app_ui::shell::PointerTarget::Editor {
+                pane_id: 1,
+                local: ScreenCell { row: 0, column: 1 },
+                region: app_ui::shell::EditorPointerRegion::Text,
+                text_origin: 0,
+                text_width: 80,
+            },
+            screen: ScreenCell { row: 0, column: 1 },
+            action: MouseAction::Down(MouseButton::Left),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        state.apply_action(Action::Pointer(click));
+        assert_eq!(state.tabs[0].buffer.selections().primary().active.0, 0);
+        assert_eq!(state.tabs[1].buffer.selections().primary().active.0, 1);
+        assert_eq!(state.buffer.selections().primary().active.0, 0);
     }
 
     #[test]

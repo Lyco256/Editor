@@ -122,3 +122,5 @@ flows pass the selected options into the typed workspace search effect.
 
 AppState keeps stable pane records, authoritative tab buffers, focused-pane status, fold state,
 recent workspace persistence and root-routed lifecycle/multi-cursor commands.
+Pointer events resolve the addressed pane's displayed tab before converting screen coordinates or
+updating selections, so secondary-pane clicks and drags cannot mutate the active tab buffer.
