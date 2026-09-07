@@ -124,3 +124,5 @@ AppState keeps stable pane records, authoritative tab buffers, focused-pane stat
 recent workspace persistence and root-routed lifecycle/multi-cursor commands.
 Pointer events resolve the addressed pane's displayed tab before converting screen coordinates or
 updating selections, so secondary-pane clicks and drags cannot mutate the active tab buffer.
+Each pane also retains its own selection/cursor state; focusing a pane persists the previous
+selection and restores the displayed pane's selection before keyboard or pointer actions.

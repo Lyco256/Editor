@@ -38,3 +38,5 @@ height, allowing pointer drag ratio updates and page navigation to use current t
 
 Frame construction reads the persistent active tab buffer and pane viewport/folds directly; it
 does not reconstruct a TextBuffer from the projected `active_text` field.
+Focused and secondary pane selections are projected from their pane-local state, while each pane's
+displayed tab supplies the corresponding document snapshot.

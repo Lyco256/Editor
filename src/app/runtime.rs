@@ -466,7 +466,10 @@ fn scene_for_state(
             .iter()
             .find(|pane| pane.id == state.focused_pane)
             .map_or_else(app_ui::editor::TextViewport::default, |pane| pane.viewport),
-        selections: buffer.selections().clone(),
+        selections: state.focused_pane().map_or_else(
+            || buffer.selections().clone(),
+            |pane| pane.selections.clone(),
+        ),
         folds: folds.clone(),
         markers: SemanticMarkerSet {
             language: language_markers.clone(),
@@ -587,11 +590,7 @@ fn scene_for_state(
                     tab.buffer.snapshot()
                 },
                 viewport: pane.viewport,
-                selections: if shared {
-                    buffer.selections().clone()
-                } else {
-                    tab.buffer.selections().clone()
-                },
+                selections: pane.selections.clone(),
                 folds: pane.folds.clone(),
                 // Diagnostics, syntax, search, Git and inlay data are document-scoped. Until
                 // their respective stores are keyed by document id, never leak focused-pane

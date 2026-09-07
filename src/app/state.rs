@@ -175,6 +175,7 @@ pub struct PaneState {
     pub page_lines: u32,
     pub text_width: u16,
     pub folds: editor_core::FoldSet,
+    pub selections: editor_core::SelectionSet,
     pub focused: bool,
 }
 
@@ -187,6 +188,9 @@ impl PaneState {
             page_lines: 1,
             text_width: 1,
             folds: editor_core::FoldSet::default(),
+            selections: editor_core::SelectionSet::single(editor_core::Selection::cursor(
+                CharacterOffset(0),
+            )),
             focused,
         }
     }
@@ -1231,10 +1235,30 @@ impl AppState {
         if !self.panes.iter().any(|pane| pane.id == id) {
             return false;
         }
+        if let Some(current) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+        {
+            current.selections = self.buffer.selections().clone();
+        }
         self.focused_pane = id;
         for pane in &mut self.panes {
             pane.focused = pane.id == id;
         }
+        let Some((displayed_tab, selections)) = self
+            .panes
+            .iter()
+            .find(|pane| pane.id == id)
+            .map(|pane| (pane.displayed_tab, pane.selections.clone()))
+        else {
+            return false;
+        };
+        if displayed_tab != self.active_tab {
+            self.switch_tab(displayed_tab);
+        }
+        let _ = self.buffer.set_selections(selections);
+        self.sync_buffer_projection();
         true
     }
 
@@ -4208,9 +4232,17 @@ impl AppState {
     }
 
     fn sync_active_tab(&mut self) {
+        let selections = self.buffer.selections().clone();
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.path.clone_from(&self.active_path);
             tab.buffer = self.buffer.clone();
+        }
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+        {
+            pane.selections = selections;
         }
     }
 
@@ -5612,11 +5644,19 @@ impl AppState {
     }
 
     fn commit_pointer_buffer(&mut self, tab_index: usize, buffer: TextBuffer) {
+        let selections = buffer.selections().clone();
         if tab_index == self.active_tab {
             self.buffer = buffer;
             self.sync_buffer_projection();
         } else if let Some(tab) = self.tabs.get_mut(tab_index) {
             tab.buffer = buffer;
+        }
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.displayed_tab == tab_index && pane.id == self.focused_pane)
+        {
+            pane.selections = selections;
         }
     }
 
@@ -7043,7 +7083,15 @@ impl AppState {
     fn sync_buffer_projection(&mut self) {
         self.active_text = self.buffer.to_string();
         self.active_dirty = self.buffer.is_dirty();
+        let selections = self.buffer.selections().clone();
         self.sync_active_tab();
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+        {
+            pane.selections = selections;
+        }
     }
 
     fn apply_language_command(
@@ -9033,7 +9081,8 @@ mod tests {
         state.apply_action(Action::Pointer(click));
         assert_eq!(state.tabs[0].buffer.selections().primary().active.0, 0);
         assert_eq!(state.tabs[1].buffer.selections().primary().active.0, 1);
-        assert_eq!(state.buffer.selections().primary().active.0, 0);
+        assert_eq!(state.active_tab, 1);
+        assert_eq!(state.buffer.selections().primary().active.0, 1);
     }
 
     #[test]
