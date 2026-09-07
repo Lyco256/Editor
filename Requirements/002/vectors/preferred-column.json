@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {
+      "case_id": "K004_PREFERRED_COLUMN_EMPTY",
+      "variant_id": "empty-middle-line",
+      "document": "abcde\n\nabcde",
+      "tab_width": 4,
+      "initial_char_offset": 5,
+      "operations": [
+        "down",
+        "down"
+      ],
+      "checkpoints": [
+        {
+          "after_operation": 1,
+          "char_offset": 6,
+          "logical_line": 1,
+          "logical_character": 0,
+          "display_column": 0,
+          "preferred_display_column": 5
+        },
+        {
+          "after_operation": 2,
+          "char_offset": 12,
+          "logical_line": 2,
+          "logical_character": 5,
+          "display_column": 5,
+          "preferred_display_column": 5
+        }
+      ]
+    },
+    {
+      "case_id": "K005_PREFERRED_COLUMN_SHORT",
+      "variant_id": "short-middle-line",
+      "document": "12345\nx\n12345",
+      "tab_width": 4,
+      "initial_char_offset": 5,
+      "operations": [
+        "down",
+        "down"
+      ],
+      "checkpoints": [
+        {
+          "after_operation": 1,
+          "char_offset": 7,
+          "logical_line": 1,
+          "logical_character": 1,
+          "display_column": 1,
+          "preferred_display_column": 5
+        },
+        {
+          "after_operation": 2,
+          "char_offset": 13,
+          "logical_line": 2,
+          "logical_character": 5,
+          "display_column": 5,
+          "preferred_display_column": 5
+        }
+      ]
+    },
+    {
+      "case_id": "K006_PREFERRED_COLUMN_TABS",
+      "variant_id": "tab-width-4",
+      "document": "\tabc\n0123456789ABCDE",
+      "tab_width": 4,
+      "initial_char_offset": 3,
+      "operations": [
+        "down"
+      ],
+      "checkpoints": [
+        {
+          "after_operation": 1,
+          "char_offset": 11,
+          "logical_line": 1,
+          "logical_character": 6,
+          "display_column": 6,
+          "preferred_display_column": 6
+        }
+      ]
+    },
+    {
+      "case_id": "K006_PREFERRED_COLUMN_TABS",
+      "variant_id": "tab-width-8",
+      "document": "\tabc\n0123456789ABCDE",
+      "tab_width": 8,
+      "initial_char_offset": 3,
+      "operations": [
+        "down"
+      ],
+      "checkpoints": [
+        {
+          "after_operation": 1,
+          "char_offset": 15,
+          "logical_line": 1,
+          "logical_character": 10,
+          "display_column": 10,
+          "preferred_display_column": 10
+        }
+      ]
+    }
+  ]
+}

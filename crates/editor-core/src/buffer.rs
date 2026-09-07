@@ -251,6 +251,12 @@ impl TextBuffer {
         &self.selections
     }
 
+    /// Returns the currently retained vertical display goal for each selection.
+    #[must_use]
+    pub fn preferred_display_columns(&self) -> Option<&[usize]> {
+        self.preferred_display_columns.as_deref()
+    }
+
     pub fn set_selections(&mut self, selections: SelectionSet) -> Result<()> {
         validate_selections_in_text(&self.rope.to_string(), &selections)?;
         self.selections = selections;

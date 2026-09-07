@@ -33,6 +33,10 @@ Cursor composition is Unicode-safe and transaction-compatible: `add_cursor_above
 `remove_last_cursor`, `collapse_selections`, and occurrence selection APIs operate on character
 offsets and retain undo/redo state.
 
+`TextBuffer::preferred_display_columns` provides a read-only view of the retained vertical display
+goal for each selection, allowing acceptance adapters to verify navigation state without mutating
+the buffer.
+
 Navigation parity includes smart Home toggling, document start/end, caller-supplied page movement,
 word-range selection and word deletion, whole-document/line selection, and grapheme-safe movement.
 Each page/vertical move preserves a preferred display column per cursor; horizontal, document, and

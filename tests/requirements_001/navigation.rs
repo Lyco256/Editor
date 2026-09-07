@@ -1,6 +1,182 @@
 use super::support::{buffer_with_text, cursor, key, key_with};
-use editor_core::CharacterOffset;
+use editor_core::{CharacterOffset, Selection, SelectionSet, TextBuffer};
 use editor_types::{KeyCode, Modifier, Modifiers};
+
+#[derive(Debug)]
+struct PreferredColumnFile {
+    vectors: Vec<PreferredColumnVector>,
+}
+
+#[derive(Debug)]
+struct PreferredColumnVector {
+    case_id: String,
+    variant_id: String,
+    document: String,
+    tab_width: usize,
+    initial_char_offset: usize,
+    operations: Vec<String>,
+    checkpoints: Vec<PreferredCheckpoint>,
+}
+
+#[derive(Debug)]
+struct PreferredCheckpoint {
+    after_operation: usize,
+    char_offset: usize,
+    logical_line: u32,
+    logical_character: u32,
+    display_column: usize,
+    preferred_display_column: usize,
+}
+
+fn preferred_vectors() -> PreferredColumnFile {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("Requirements/002/vectors/preferred-column.json");
+    let text = std::fs::read_to_string(path).expect("canonical preferred-column vectors");
+    let root: serde_json::Value =
+        serde_json::from_str(&text).expect("canonical preferred-column JSON schema");
+    let vectors = root
+        .get("vectors")
+        .and_then(serde_json::Value::as_array)
+        .expect("canonical vectors array")
+        .iter()
+        .map(|vector| PreferredColumnVector {
+            case_id: vector["case_id"].as_str().expect("case_id").to_owned(),
+            variant_id: vector["variant_id"]
+                .as_str()
+                .expect("variant_id")
+                .to_owned(),
+            document: vector["document"].as_str().expect("document").to_owned(),
+            tab_width: usize::try_from(vector["tab_width"].as_u64().expect("tab_width"))
+                .expect("tab_width fits usize"),
+            initial_char_offset: usize::try_from(
+                vector["initial_char_offset"]
+                    .as_u64()
+                    .expect("initial_char_offset"),
+            )
+            .expect("initial_char_offset fits usize"),
+            operations: vector["operations"]
+                .as_array()
+                .expect("operations")
+                .iter()
+                .map(|operation| operation.as_str().expect("operation").to_owned())
+                .collect(),
+            checkpoints: vector["checkpoints"]
+                .as_array()
+                .expect("checkpoints")
+                .iter()
+                .map(|checkpoint| PreferredCheckpoint {
+                    after_operation: usize::try_from(
+                        checkpoint["after_operation"]
+                            .as_u64()
+                            .expect("after_operation"),
+                    )
+                    .expect("after_operation fits usize"),
+                    char_offset: usize::try_from(
+                        checkpoint["char_offset"].as_u64().expect("char_offset"),
+                    )
+                    .expect("char_offset fits usize"),
+                    logical_line: u32::try_from(
+                        checkpoint["logical_line"].as_u64().expect("logical_line"),
+                    )
+                    .expect("logical_line fits u32"),
+                    logical_character: u32::try_from(
+                        checkpoint["logical_character"]
+                            .as_u64()
+                            .expect("logical_character"),
+                    )
+                    .expect("logical_character fits u32"),
+                    display_column: usize::try_from(
+                        checkpoint["display_column"]
+                            .as_u64()
+                            .expect("display_column"),
+                    )
+                    .expect("display_column fits usize"),
+                    preferred_display_column: usize::try_from(
+                        checkpoint["preferred_display_column"]
+                            .as_u64()
+                            .expect("preferred_display_column"),
+                    )
+                    .expect("preferred_display_column fits usize"),
+                })
+                .collect(),
+        })
+        .collect();
+    PreferredColumnFile { vectors }
+}
+
+fn run_preferred_vector(vector: &PreferredColumnVector) {
+    assert_eq!(
+        vector.checkpoints.len(),
+        vector.operations.len(),
+        "canonical checkpoints must cover every operation"
+    );
+    let mut buffer = TextBuffer::new(&vector.document);
+    buffer
+        .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(
+            vector.initial_char_offset,
+        ))))
+        .expect("canonical initial caret is valid");
+    assert!(buffer.preferred_display_columns().is_none());
+    for (operation_index, operation) in vector.operations.iter().enumerate() {
+        assert_eq!(operation, "down", "unsupported canonical operation");
+        buffer
+            .move_vertical(1, false, vector.tab_width)
+            .expect("canonical vertical operation");
+        let checkpoint = vector
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.after_operation == operation_index + 1)
+            .expect("checkpoint for canonical operation");
+        let active = buffer.selections().primary().active;
+        let snapshot = buffer.snapshot();
+        let position = snapshot
+            .offset_to_position(active)
+            .expect("actual caret position");
+        let display_column = snapshot
+            .display_column(active, vector.tab_width)
+            .expect("actual display column");
+        let preferred = buffer
+            .preferred_display_columns()
+            .and_then(|columns| columns.first().copied())
+            .expect("stored preferred display column");
+        assert_eq!(
+            (
+                active.0,
+                position.line,
+                position.character,
+                display_column,
+                preferred
+            ),
+            (
+                checkpoint.char_offset,
+                checkpoint.logical_line,
+                checkpoint.logical_character,
+                checkpoint.display_column,
+                checkpoint.preferred_display_column,
+            ),
+            "{}::{} operation {}",
+            vector.case_id,
+            vector.variant_id,
+            operation_index + 1
+        );
+    }
+}
+
+fn run_preferred_case(case_id: &str) {
+    let file = preferred_vectors();
+    let selected = file
+        .vectors
+        .iter()
+        .filter(|vector| vector.case_id == case_id)
+        .collect::<Vec<_>>();
+    assert!(
+        !selected.is_empty(),
+        "canonical vector missing for {case_id}"
+    );
+    for vector in selected {
+        run_preferred_vector(vector);
+    }
+}
 
 #[test]
 fn k001_left_right_grapheme() {
@@ -25,26 +201,15 @@ fn k003_shift_extends() {
 }
 #[test]
 fn k004_preferred_column_empty() {
-    let mut b = buffer_with_text("12345\n\nxyz");
-    cursor(&mut b, 5);
-    b.move_vertical(1, false, 4).unwrap();
-    b.move_vertical(1, false, 4).unwrap();
-    assert_eq!(b.selections().primary().active, CharacterOffset(8));
+    run_preferred_case("K004_PREFERRED_COLUMN_EMPTY");
 }
 #[test]
 fn k005_preferred_column_short() {
-    let mut b = buffer_with_text("12345\nx\n12345");
-    cursor(&mut b, 5);
-    b.move_vertical(1, false, 4).unwrap();
-    b.move_vertical(1, false, 4).unwrap();
-    assert_eq!(b.selections().primary().active, CharacterOffset(10));
+    run_preferred_case("K005_PREFERRED_COLUMN_SHORT");
 }
 #[test]
 fn k006_preferred_column_tabs() {
-    let mut b = buffer_with_text("\tabc\n\tx");
-    cursor(&mut b, 4);
-    b.move_vertical(1, false, 4).unwrap();
-    assert_eq!(b.selections().primary().active, CharacterOffset(6));
+    run_preferred_case("K006_PREFERRED_COLUMN_TABS");
 }
 #[test]
 fn k007_preferred_column_multi() {
