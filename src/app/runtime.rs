@@ -190,6 +190,15 @@ where
         self.terminal
             .present_cursor(scene.cursor)
             .map_err(|error| RuntimeError::Render(error.to_string()))?;
+        if let Some(group) = scene
+            .layout
+            .editor_groups
+            .iter()
+            .find(|group| group.group_id == self.state.focused_pane().map_or(0, |pane| pane.id))
+        {
+            self.state
+                .set_page_lines(group.content.height.saturating_sub(1).into());
+        }
         self.state.frame_number += 1;
         Ok(())
     }
@@ -633,6 +642,7 @@ fn scene_for_state(
             roots,
             entries,
             visible: state.explorer_visible,
+            scroll: state.explorer_scroll,
         },
         tabs: state
             .tabs

@@ -29,6 +29,8 @@ Data flow:
   `smart_enter_with_rules_and_actions` additionally applies compiled indentation and Enter rules,
   including safe append/remove actions.
 - `indent_selections` computes touched lines from a snapshot and indents them in one transaction.
+- `outdent_selections` removes one configured indentation unit from each touched line in one
+  transaction, preserving non-indentation content.
 
 Concurrency and error behavior:
 

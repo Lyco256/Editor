@@ -63,6 +63,7 @@ pub struct AppState {
     pub explorer_visible: bool,
     pub(crate) explorer_focus: bool,
     pub(crate) explorer_cursor: usize,
+    pub(crate) explorer_scroll: usize,
     pub bottom_panel_visible: bool,
     pub(crate) bottom_panel_view: BottomPanelView,
     pub palette_visible: bool,
@@ -154,6 +155,7 @@ pub struct PaneState {
     pub id: u32,
     pub displayed_tab: usize,
     pub viewport: app_ui::editor::TextViewport,
+    pub page_lines: u32,
     pub folds: editor_core::FoldSet,
     pub focused: bool,
 }
@@ -164,6 +166,7 @@ impl PaneState {
             id,
             displayed_tab,
             viewport: app_ui::editor::TextViewport::default(),
+            page_lines: 1,
             folds: editor_core::FoldSet::default(),
             focused,
         }
@@ -978,6 +981,7 @@ impl Default for AppState {
             explorer_visible: true,
             explorer_focus: false,
             explorer_cursor: 0,
+            explorer_scroll: 0,
             bottom_panel_visible: false,
             bottom_panel_view: BottomPanelView::Output,
             palette_visible: false,
@@ -1005,6 +1009,13 @@ impl Default for AppState {
                 CommandEntry::available("editor.removeLastCursor", "Remove Last Cursor"),
                 CommandEntry::available("editor.collapseCursors", "Collapse Cursors"),
                 CommandEntry::available("editor.selectAllOccurrences", "Select All Occurrences"),
+                CommandEntry::available("editor.selectAll", "Select All"),
+                CommandEntry::available("editor.selectLine", "Select Line"),
+                CommandEntry::available("editor.selectNextOccurrence", "Select Next Match"),
+                CommandEntry::available("editor.skipNextOccurrence", "Skip Current Selection"),
+                CommandEntry::available("editor.keepOpen", "Keep Editor Open"),
+                CommandEntry::available("editor.pin", "Pin Editor"),
+                CommandEntry::available("editor.unpin", "Unpin Editor"),
                 CommandEntry::available("editor.toggleLineComment", "Toggle Line Comment"),
                 CommandEntry::available("editor.toggleBlockComment", "Toggle Block Comment"),
                 CommandEntry::available("editor.insertSnippet", "Insert Snippet"),
@@ -1081,14 +1092,10 @@ impl Default for AppState {
                 CommandEntry::disabled("editor.reopenEncoding", "Reopen with Encoding"),
                 CommandEntry::disabled("editor.saveEncoding", "Save with Encoding"),
                 CommandEntry::disabled("workspace.replace", "Replace in Files"),
-                CommandEntry::disabled("editor.selectAll", "Select All"),
-                CommandEntry::disabled("editor.selectLine", "Select Line"),
-                CommandEntry::disabled("editor.selectNextOccurrence", "Select Next Match"),
-                CommandEntry::disabled("editor.skipNextOccurrence", "Skip Current Selection"),
-                CommandEntry::disabled("workbench.focusLeft", "Focus Left Group"),
-                CommandEntry::disabled("workbench.focusRight", "Focus Right Group"),
-                CommandEntry::disabled("workbench.focusAbove", "Focus Group Above"),
-                CommandEntry::disabled("workbench.focusBelow", "Focus Group Below"),
+                CommandEntry::available("workbench.focusLeft", "Focus Left Group"),
+                CommandEntry::available("workbench.focusRight", "Focus Right Group"),
+                CommandEntry::available("workbench.focusAbove", "Focus Group Above"),
+                CommandEntry::available("workbench.focusBelow", "Focus Group Below"),
                 CommandEntry::available("workbench.toggleLineNumbers", "Toggle Line Numbers"),
                 CommandEntry::disabled("editor.goToLine", "Go to Line/Column"),
                 CommandEntry::disabled("workbench.nextProblem", "Next Problem"),
@@ -1171,6 +1178,27 @@ impl AppState {
         true
     }
 
+    fn focus_relative(&mut self, direction: i32) {
+        if self.panes.len() < 2 {
+            return;
+        }
+        let current = self
+            .panes
+            .iter()
+            .position(|pane| pane.id == self.focused_pane)
+            .unwrap_or(0);
+        let target = if direction.is_negative() {
+            current.saturating_sub(1)
+        } else {
+            current
+                .saturating_add(1)
+                .min(self.panes.len().saturating_sub(1))
+        };
+        if target != current {
+            let _ = self.focus_pane(self.panes[target].id);
+        }
+    }
+
     /// Toggles the fold starting at `line` in the focused pane.
     pub fn toggle_fold(&mut self, line: u32) -> bool {
         self.panes
@@ -1202,6 +1230,21 @@ impl AppState {
                 left_column,
             };
         }
+    }
+
+    /// Records the visible editor page height supplied by the current rendered layout.
+    pub fn set_page_lines(&mut self, lines: u32) {
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+        {
+            pane.page_lines = lines.max(1);
+        }
+    }
+
+    fn page_lines(&self) -> u32 {
+        self.focused_pane().map_or(1, |pane| pane.page_lines.max(1))
     }
 
     /// Applies an editor-view action through the same root transition path used by terminal input.
@@ -3378,6 +3421,19 @@ impl AppState {
         path: impl AsRef<Path>,
     ) -> Result<(), workspace_core::DocumentOpenError> {
         let path = path.as_ref().to_path_buf();
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.path.as_ref() == Some(&path))
+        {
+            self.switch_tab(index);
+            if let Some(tab) = self.tabs.get_mut(index) {
+                if tab.disposition == app_ui::shell::TabDisposition::Preview {
+                    tab.disposition = app_ui::shell::TabDisposition::Open;
+                }
+            }
+            return Ok(());
+        }
         let document_settings = self.load_editorconfig(&path);
         let mut load_options = workspace_core::DocumentLoadOptions::default();
         if let Some(charset) = document_settings.charset.clone() {
@@ -3411,12 +3467,23 @@ impl AppState {
         &mut self,
         path: impl AsRef<Path>,
     ) -> Result<(), workspace_core::DocumentOpenError> {
+        let requested = path.as_ref().to_path_buf();
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.path.as_ref() == Some(&requested))
+        {
+            self.switch_tab(index);
+            return Ok(());
+        }
         if let Some(index) = self.tabs.iter().position(|tab| {
-            tab.disposition == app_ui::shell::TabDisposition::Preview && !tab.buffer.is_dirty()
+            tab.disposition == app_ui::shell::TabDisposition::Preview
+                && !tab.buffer.is_dirty()
+                && tab.path.as_ref() != Some(&requested)
         }) {
             self.close_tab_if_clean(index);
         }
-        self.open_tab(path)?;
+        self.open_tab(requested)?;
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.disposition = app_ui::shell::TabDisposition::Preview;
         }
@@ -3473,6 +3540,23 @@ impl AppState {
         } else {
             self.apply_editorconfig_settings(&config_core::DocumentSettings::default());
         }
+    }
+
+    fn sort_pinned_tabs(&mut self) {
+        let active_path = self.active_path.clone();
+        self.sync_active_tab();
+        self.tabs
+            .sort_by_key(|tab| u8::from(tab.disposition != app_ui::shell::TabDisposition::Pinned));
+        self.active_tab = active_path
+            .as_ref()
+            .and_then(|path| {
+                self.tabs
+                    .iter()
+                    .position(|tab| tab.path.as_ref() == Some(path))
+            })
+            .unwrap_or(0)
+            .min(self.tabs.len().saturating_sub(1));
+        self.buffer = self.tabs[self.active_tab].buffer.clone();
     }
 
     fn load_editorconfig(&mut self, path: &Path) -> config_core::DocumentSettings {
@@ -4022,11 +4106,11 @@ impl AppState {
             Action::CloseActive => self.apply_action_inner(Action::CloseTab(self.active_tab)),
             Action::CloseOtherTabs => {
                 let active = self.active_tab;
-                let dirty_other = self
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .any(|(index, tab)| index != active && tab.buffer.is_dirty());
+                let dirty_other = self.tabs.iter().enumerate().any(|(index, tab)| {
+                    index != active
+                        && tab.disposition != app_ui::shell::TabDisposition::Pinned
+                        && tab.buffer.is_dirty()
+                });
                 if dirty_other {
                     self.output.push(OutputMessage {
                         subsystem: "editor".to_owned(),
@@ -4040,8 +4124,22 @@ impl AppState {
                         .get(active)
                         .cloned()
                         .unwrap_or_else(TabState::untitled);
-                    self.tabs = vec![active_tab];
-                    self.active_tab = 0;
+                    let mut preserved = self
+                        .tabs
+                        .iter()
+                        .filter(|tab| tab.disposition == app_ui::shell::TabDisposition::Pinned)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if active_tab.disposition != app_ui::shell::TabDisposition::Pinned {
+                        preserved.push(active_tab);
+                    }
+                    self.tabs = preserved;
+                    self.active_tab = self
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.path == self.active_path)
+                        .unwrap_or_else(|| self.tabs.len().saturating_sub(1));
+                    self.buffer = self.tabs[self.active_tab].buffer.clone();
                 }
                 Transition {
                     render: true,
@@ -4636,10 +4734,51 @@ impl AppState {
         match pointer.target {
             PointerTarget::Tab(index) => {
                 if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
+                    if pointer.click_count >= 2 {
+                        if let Some(tab) = self.tabs.get_mut(index) {
+                            if tab.disposition == app_ui::shell::TabDisposition::Preview {
+                                tab.disposition = app_ui::shell::TabDisposition::Open;
+                            }
+                        }
+                    }
                     self.switch_tab(index);
                 }
             }
+            PointerTarget::SplitHandle(handle) => {
+                if matches!(
+                    pointer.action,
+                    MouseAction::Down(MouseButton::Left) | MouseAction::Drag(MouseButton::Left)
+                ) {
+                    let ratio = match handle.axis {
+                        app_ui::shell::SplitAxis::Vertical => {
+                            pointer
+                                .screen
+                                .column
+                                .saturating_sub(handle.parent.x)
+                                .saturating_mul(100)
+                                / handle.parent.width.max(1)
+                        }
+                        app_ui::shell::SplitAxis::Horizontal => {
+                            pointer
+                                .screen
+                                .row
+                                .saturating_sub(handle.parent.y)
+                                .saturating_mul(100)
+                                / handle.parent.height.max(1)
+                        }
+                    };
+                    self.split_ratio_percent = ratio.clamp(10, 90);
+                }
+            }
             PointerTarget::Explorer(index) => {
+                if let MouseAction::ScrollLines(delta) = pointer.action {
+                    self.scroll_explorer(delta);
+                    return Transition {
+                        effects,
+                        render: true,
+                        ..Transition::default()
+                    };
+                }
                 if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
                     let entry_index = index.saturating_sub(1);
                     if let Some(entry) = self.explorer_entries.get(entry_index).cloned() {
@@ -4663,7 +4802,8 @@ impl AppState {
                             effects.extend(self.explorer_refresh_transition().effects);
                         } else {
                             self.blur_explorer();
-                            if pointer.click_count >= 2 {
+                            if pointer.click_count >= 2 || pointer.modifiers.contains(Modifier::Alt)
+                            {
                                 let _ = self.open_tab(entry.path);
                             } else {
                                 let _ = self.open_preview_tab(entry.path);
@@ -4677,6 +4817,14 @@ impl AppState {
                 is_directory,
                 toggle,
             } => {
+                if let MouseAction::ScrollLines(delta) = pointer.action {
+                    self.scroll_explorer(delta);
+                    return Transition {
+                        effects,
+                        render: true,
+                        ..Transition::default()
+                    };
+                }
                 if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
                     if let Some(entry_index) = entry_index {
                         if let Some(entry) = self.explorer_entries.get(entry_index).cloned() {
@@ -4705,7 +4853,9 @@ impl AppState {
                                 effects.extend(self.explorer_refresh_transition().effects);
                             } else {
                                 self.blur_explorer();
-                                if pointer.click_count >= 2 {
+                                if pointer.click_count >= 2
+                                    || pointer.modifiers.contains(Modifier::Alt)
+                                {
                                     let _ = self.open_tab(entry.path);
                                 } else {
                                     let _ = self.open_preview_tab(entry.path);
@@ -4778,6 +4928,7 @@ impl AppState {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_editor_pointer(
         &mut self,
         pointer: app_ui::shell::PointerEvent,
@@ -4798,22 +4949,6 @@ impl AppState {
         let snapshot = self.buffer.snapshot();
         let last_line = u32::try_from(snapshot.line_count().saturating_sub(1)).unwrap_or(u32::MAX);
         let line = requested_line.min(last_line);
-        if !matches!(region, app_ui::shell::EditorPointerRegion::Text) {
-            if matches!(pointer.action, MouseAction::Down(MouseButton::Left)) {
-                if matches!(region, app_ui::shell::EditorPointerRegion::LineNumber) {
-                    if let Some((start, end)) = Self::line_range(&snapshot, line) {
-                        let _ = self
-                            .buffer
-                            .set_selections(editor_core::SelectionSet::single(
-                                editor_core::Selection::new(start, end),
-                            ));
-                    }
-                } else if matches!(region, app_ui::shell::EditorPointerRegion::Gutter) {
-                    let _ = self.apply_action_inner(Action::ToggleFold { line });
-                }
-            }
-            return;
-        }
         if let MouseAction::ScrollLines(delta) = pointer.action {
             if let Some(pane) = self
                 .panes
@@ -4827,6 +4962,45 @@ impl AppState {
                 )
                 .unwrap_or(u32::MAX);
                 pane.viewport.top_line = next;
+            }
+            return;
+        }
+        if !matches!(region, app_ui::shell::EditorPointerRegion::Text) {
+            if matches!(
+                pointer.action,
+                MouseAction::Down(MouseButton::Left) | MouseAction::Drag(MouseButton::Left)
+            ) {
+                if matches!(region, app_ui::shell::EditorPointerRegion::LineNumber) {
+                    if let Some((start, end)) = Self::line_range(&snapshot, line) {
+                        let anchor_line = self
+                            .buffer
+                            .snapshot()
+                            .offset_to_position(self.buffer.selections().primary().anchor)
+                            .map_or(line, |position| position.line);
+                        let (anchor_start, _) =
+                            Self::line_range(&snapshot, anchor_line).unwrap_or((start, end));
+                        let selection = if pointer.modifiers.contains(Modifier::Shift) {
+                            editor_core::Selection::new(
+                                self.buffer.selections().primary().anchor,
+                                end,
+                            )
+                        } else if matches!(pointer.action, MouseAction::Drag(MouseButton::Left)) {
+                            editor_core::Selection::new(anchor_start, end)
+                        } else {
+                            editor_core::Selection::new(start, end)
+                        };
+                        let _ = self
+                            .buffer
+                            .set_selections(editor_core::SelectionSet::single(selection));
+                    }
+                } else if matches!(region, app_ui::shell::EditorPointerRegion::Gutter) {
+                    let _ = self.apply_action_inner(Action::ToggleFold { line });
+                } else if matches!(region, app_ui::shell::EditorPointerRegion::Overview) {
+                    self.set_viewport(
+                        line.saturating_sub(self.page_lines() / 2),
+                        pane.viewport.left_column,
+                    );
+                }
             }
             return;
         }
@@ -4849,6 +5023,31 @@ impl AppState {
                             ));
                         self.mouse_anchor = Some(start);
                     }
+                } else if pointer.click_count == 2 {
+                    if let Ok(range) = self.buffer.word_range_at(offset) {
+                        let _ = self
+                            .buffer
+                            .set_selections(editor_core::SelectionSet::single(
+                                editor_core::Selection::new(range.start, range.end),
+                            ));
+                        self.mouse_anchor = Some(range.start);
+                    }
+                } else if pointer.modifiers.contains(Modifier::Alt) {
+                    let selection = self.buffer.selections();
+                    if let Ok(with_cursor) =
+                        selection.with_cursor(editor_core::Selection::cursor(offset))
+                    {
+                        let _ = self.buffer.set_selections(with_cursor);
+                    }
+                    self.mouse_anchor = None;
+                } else if pointer.modifiers.contains(Modifier::Shift) {
+                    let anchor = self.buffer.selections().primary().anchor;
+                    self.mouse_anchor = Some(anchor);
+                    let _ = self
+                        .buffer
+                        .set_selections(editor_core::SelectionSet::single(
+                            editor_core::Selection::new(anchor, offset),
+                        ));
                 } else {
                     self.mouse_anchor = Some(offset);
                     let _ = self
@@ -4928,6 +5127,29 @@ impl AppState {
                     return None;
                 }
             }
+            if key.modifiers.contains(Modifier::Control)
+                && !key.modifiers.contains(Modifier::Alt)
+                && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            {
+                if let Some(pane) = self
+                    .panes
+                    .iter_mut()
+                    .find(|pane| pane.id == self.focused_pane)
+                {
+                    let delta = if matches!(key.code, KeyCode::Up) {
+                        -1_i64
+                    } else {
+                        1_i64
+                    };
+                    pane.viewport.top_line = u32::try_from(
+                        i64::from(pane.viewport.top_line)
+                            .saturating_add(delta)
+                            .max(0),
+                    )
+                    .unwrap_or(u32::MAX);
+                }
+                return None;
+            }
             if key.modifiers.contains(Modifier::Control) {
                 if let KeyCode::Character('d') = key.code {
                     let query = self.buffer.selections().primary().range();
@@ -4991,11 +5213,22 @@ impl AppState {
                         }
                     }
                     KeyCode::Enter => return self.explorer_activate_cursor(),
+                    KeyCode::Character(' ') => {
+                        if let Some(entry) =
+                            self.explorer_entries.get(self.explorer_cursor).cloned()
+                        {
+                            if !entry.is_directory {
+                                self.blur_explorer();
+                                let _ = self.open_preview_tab(entry.path);
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 let mut entries = std::mem::take(&mut self.explorer_entries);
                 self.mark_explorer_cursor(&mut entries);
                 self.explorer_entries = entries;
+                self.ensure_explorer_cursor_visible();
                 return None;
             }
             // Git panel owns its keyboard focus and routes every mutation through the
@@ -5140,6 +5373,12 @@ impl AppState {
                         .smart_insert(&character.to_string(), &self.pair_config)
                         .map(|_| ())
                 }
+                KeyCode::Enter if key.modifiers.contains(Modifier::Control) => {
+                    self.insert_line_break(key.modifiers.contains(Modifier::Shift), false)
+                }
+                KeyCode::Enter if key.modifiers.contains(Modifier::Alt) => {
+                    self.insert_line_break(false, true)
+                }
                 KeyCode::Enter => self
                     .buffer
                     .smart_enter_with_rules_and_actions(
@@ -5149,12 +5388,22 @@ impl AppState {
                         &self.on_enter_rules,
                     )
                     .map(|_| ()),
+                KeyCode::Tab if key.modifiers.contains(Modifier::Shift) => self
+                    .buffer
+                    .outdent_selections(self.indent_style)
+                    .map(|_| ()),
                 KeyCode::Tab if self.expand_snippet() => Ok(()),
                 KeyCode::Tab => self
                     .buffer
                     .smart_insert(&self.indent_style.unit(), &self.pair_config)
                     .map(|_| ()),
+                KeyCode::Backspace if key.modifiers.contains(Modifier::Control) => {
+                    self.buffer.delete_word_left().map(|_| ())
+                }
                 KeyCode::Backspace => self.buffer.smart_backspace().map(|_| ()),
+                KeyCode::Delete if key.modifiers.contains(Modifier::Control) => {
+                    self.buffer.delete_word_right().map(|_| ())
+                }
                 KeyCode::Delete => self.delete_forward(),
                 KeyCode::Left if key.modifiers.contains(Modifier::Control) => self
                     .buffer
@@ -5168,12 +5417,24 @@ impl AppState {
                 KeyCode::Right => self
                     .buffer
                     .move_right(key.modifiers.contains(Modifier::Shift)),
+                KeyCode::Home if key.modifiers.contains(Modifier::Control) => self
+                    .buffer
+                    .move_document_start(key.modifiers.contains(Modifier::Shift)),
                 KeyCode::Home => self
                     .buffer
                     .move_home(key.modifiers.contains(Modifier::Shift)),
+                KeyCode::End if key.modifiers.contains(Modifier::Control) => self
+                    .buffer
+                    .move_document_end(key.modifiers.contains(Modifier::Shift)),
                 KeyCode::End => self
                     .buffer
                     .move_end(key.modifiers.contains(Modifier::Shift)),
+                KeyCode::Up if key.modifiers.contains(Modifier::Alt) => {
+                    self.move_current_line(-1, key.modifiers.contains(Modifier::Shift))
+                }
+                KeyCode::Down if key.modifiers.contains(Modifier::Alt) => {
+                    self.move_current_line(1, key.modifiers.contains(Modifier::Shift))
+                }
                 KeyCode::Up => self.buffer.move_vertical(
                     -1,
                     key.modifiers.contains(Modifier::Shift),
@@ -5184,21 +5445,23 @@ impl AppState {
                     key.modifiers.contains(Modifier::Shift),
                     self.tab_width,
                 ),
-                KeyCode::PageUp => {
-                    let lines = 1_u16;
-                    self.buffer.move_vertical(
-                        -i32::from(lines),
-                        key.modifiers.contains(Modifier::Shift),
-                        self.tab_width,
-                    )
+                KeyCode::PageUp => self.buffer.move_page(
+                    self.page_lines(),
+                    -1,
+                    key.modifiers.contains(Modifier::Shift),
+                    self.tab_width,
+                ),
+                KeyCode::PageDown => self.buffer.move_page(
+                    self.page_lines(),
+                    1,
+                    key.modifiers.contains(Modifier::Shift),
+                    self.tab_width,
+                ),
+                KeyCode::Character('a') if key.modifiers.contains(Modifier::Control) => {
+                    self.buffer.select_all()
                 }
-                KeyCode::PageDown => {
-                    let lines = 1_u16;
-                    self.buffer.move_vertical(
-                        i32::from(lines),
-                        key.modifiers.contains(Modifier::Shift),
-                        self.tab_width,
-                    )
+                KeyCode::Character('l') if key.modifiers.contains(Modifier::Control) => {
+                    self.buffer.select_line()
                 }
                 KeyCode::Character('z') if key.modifiers.contains(Modifier::Control) => {
                     self.buffer.undo().map(|_| ())
@@ -5325,6 +5588,99 @@ impl AppState {
         }
         let transaction = editor_core::Transaction::new(edits)?;
         self.buffer.apply_transaction(transaction).map(|_| ())
+    }
+
+    fn insert_line_break(&mut self, above: bool, copy_line: bool) -> editor_core::Result<()> {
+        let snapshot = self.buffer.snapshot();
+        let position = snapshot.offset_to_position(self.buffer.selections().primary().active)?;
+        let (start, end) = Self::line_range(&snapshot, position.line).ok_or(
+            editor_core::EditorError::InvalidPosition {
+                line: position.line,
+                character: position.character,
+            },
+        )?;
+        if copy_line {
+            let text = snapshot.text_in_range(TextRange { start, end })?.to_owned();
+            return self
+                .buffer
+                .apply_transaction(Transaction::new(vec![Edit::insert(end, &text)])?)
+                .map(|_| ());
+        }
+        let at = if above { start } else { end };
+        self.buffer.insert(at, "\n").map(|_| ())
+    }
+
+    fn move_current_line(&mut self, direction: i32, copy: bool) -> editor_core::Result<()> {
+        let snapshot = self.buffer.snapshot();
+        let primary = self.buffer.selections().primary();
+        let position = snapshot.offset_to_position(primary.active)?;
+        let mut lines: Vec<String> = snapshot
+            .text()
+            .split_inclusive('\n')
+            .map(ToOwned::to_owned)
+            .collect();
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let start_line = usize::try_from(snapshot.offset_to_position(primary.range().start)?.line)
+            .unwrap_or(0)
+            .min(lines.len() - 1);
+        let mut end_line = usize::try_from(snapshot.offset_to_position(primary.range().end)?.line)
+            .unwrap_or(start_line)
+            .min(lines.len() - 1);
+        if primary.range().end.0 > 0
+            && snapshot
+                .text()
+                .chars()
+                .nth(primary.range().end.0.saturating_sub(1))
+                == Some('\n')
+        {
+            end_line = end_line.saturating_sub(1);
+        }
+        let block_len = end_line.saturating_sub(start_line).saturating_add(1);
+        let target_start = if direction < 0 {
+            start_line.checked_sub(1)
+        } else {
+            (end_line + 1 < lines.len()).then_some(start_line + 1)
+        };
+        let Some(target_start) = target_start else {
+            return Ok(());
+        };
+        if copy {
+            let block = lines[start_line..=end_line].to_vec();
+            lines.splice(target_start..target_start, block);
+        } else if direction < 0 {
+            lines[start_line - 1..=end_line].rotate_left(1);
+        } else {
+            lines[start_line..=end_line + 1].rotate_left(block_len);
+        }
+        let new_text = lines.concat();
+        let new_index = if copy {
+            target_start
+        } else if direction < 0 {
+            start_line - 1
+        } else {
+            start_line + 1
+        };
+        let line_start: usize = lines
+            .iter()
+            .take(new_index)
+            .map(|line| line.chars().count())
+            .sum();
+        let column = usize::try_from(position.character).unwrap_or(0);
+        let line_len = lines[new_index].trim_end_matches('\n').chars().count();
+        let new_offset = CharacterOffset(line_start + column.min(line_len));
+        self.buffer.replace(
+            TextRange {
+                start: CharacterOffset(0),
+                end: CharacterOffset(snapshot.text().chars().count()),
+            },
+            &new_text,
+        )?;
+        self.buffer
+            .set_selections(editor_core::SelectionSet::single(
+                editor_core::Selection::cursor(new_offset),
+            ))
     }
 
     fn start_format(&mut self, save_after: bool) -> Option<Effect> {
@@ -5548,6 +5904,8 @@ impl AppState {
             "workbench.previousEditor" => {
                 let _ = self.apply_action_inner(Action::PreviousTab);
             }
+            "workbench.focusLeft" | "workbench.focusAbove" => self.focus_relative(-1),
+            "workbench.focusRight" | "workbench.focusBelow" => self.focus_relative(1),
             "workbench.toggleLineNumbers" => self.show_line_numbers = !self.show_line_numbers,
             "workbench.openRecent" => {
                 let _ = self.apply_action_inner(Action::QuickOpenRecent);
@@ -5639,6 +5997,42 @@ impl AppState {
             }
             "editor.expandSelection" => {
                 let _ = self.apply_editor_action(app_ui::editor::EditorAction::ExpandSelection);
+            }
+            "editor.selectAll" => {
+                let _ = self.buffer.select_all();
+            }
+            "editor.selectLine" => {
+                let _ = self.buffer.select_line();
+            }
+            "editor.selectNextOccurrence" | "editor.skipNextOccurrence" => {
+                let _ = self.buffer.select_next_occurrence(
+                    &self.find_query,
+                    editor_core::FindOptions::default(),
+                    command == "editor.skipNextOccurrence",
+                );
+            }
+            "editor.keepOpen" => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if tab.disposition == app_ui::shell::TabDisposition::Preview {
+                        tab.disposition = app_ui::shell::TabDisposition::Open;
+                    }
+                }
+            }
+            "editor.pin" => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if tab.disposition == app_ui::shell::TabDisposition::Preview {
+                        tab.disposition = app_ui::shell::TabDisposition::Open;
+                    }
+                    tab.disposition = app_ui::shell::TabDisposition::Pinned;
+                }
+                self.sort_pinned_tabs();
+            }
+            "editor.unpin" => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if tab.disposition == app_ui::shell::TabDisposition::Pinned {
+                        tab.disposition = app_ui::shell::TabDisposition::Open;
+                    }
+                }
             }
             "editor.addCursorAbove" => {
                 let _ = self.apply_action_inner(Action::AddCursorAbove);
@@ -6092,6 +6486,27 @@ impl AppState {
         let mut entries = std::mem::take(&mut self.explorer_entries);
         self.mark_explorer_cursor(&mut entries);
         self.explorer_entries = entries;
+        self.ensure_explorer_cursor_visible();
+    }
+
+    fn scroll_explorer(&mut self, delta: i16) {
+        let amount = usize::from(delta.unsigned_abs());
+        if delta.is_negative() {
+            self.explorer_scroll = self.explorer_scroll.saturating_sub(amount);
+        } else {
+            self.explorer_scroll = self
+                .explorer_scroll
+                .saturating_add(amount)
+                .min(self.explorer_entries.len().saturating_sub(1));
+        }
+    }
+
+    fn ensure_explorer_cursor_visible(&mut self) {
+        if self.explorer_entries.is_empty() {
+            self.explorer_scroll = 0;
+        } else if self.explorer_cursor < self.explorer_scroll {
+            self.explorer_scroll = self.explorer_cursor;
+        }
     }
 
     fn blur_explorer(&mut self) {
@@ -7751,6 +8166,103 @@ mod tests {
         let _ = state.apply_action(Action::Pointer(drag));
         assert_eq!(state.buffer.selections().primary().range().start.0, 0);
         assert_eq!(state.buffer.selections().primary().range().end.0, 5);
+    }
+
+    #[test]
+    fn pointer_modifiers_select_words_and_add_secondary_cursors() {
+        use editor_types::{Modifiers, MouseAction, MouseButton, ScreenCell};
+        let mut state = AppState {
+            buffer: TextBuffer::new("hello world"),
+            ..AppState::default()
+        };
+        state.sync_buffer_projection();
+        let target = |column, modifiers, click_count, action| app_ui::shell::PointerEvent {
+            target: app_ui::shell::PointerTarget::Editor {
+                pane_id: 0,
+                local: ScreenCell { row: 0, column },
+                region: app_ui::shell::EditorPointerRegion::Text,
+                text_origin: 0,
+                text_width: 80,
+            },
+            screen: ScreenCell { row: 1, column },
+            action,
+            modifiers,
+            click_count,
+        };
+        state.apply_action(Action::Pointer(target(
+            1,
+            Modifiers::default(),
+            2,
+            MouseAction::Down(MouseButton::Left),
+        )));
+        assert_eq!(
+            state.buffer.selections().primary().range(),
+            editor_types::TextRange {
+                start: editor_types::CharacterOffset(0),
+                end: editor_types::CharacterOffset(5)
+            }
+        );
+        state.apply_action(Action::Pointer(target(
+            7,
+            Modifiers::from_modifiers([editor_types::Modifier::Alt]),
+            1,
+            MouseAction::Down(MouseButton::Left),
+        )));
+        assert_eq!(state.buffer.selections().len(), 2);
+    }
+
+    #[test]
+    fn pin_and_close_other_tabs_preserve_pinned_editor() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let first = directory.path().join("first.rs");
+        let second = directory.path().join("second.rs");
+        std::fs::write(&first, "one").expect("first");
+        std::fs::write(&second, "two").expect("second");
+        let mut state = AppState::default();
+        state.open_startup_path(&first);
+        state.open_tab(&second).expect("second tab");
+        state.apply_action(Action::Invoke(editor_types::CommandId::new("editor.pin")));
+        state.apply_action(Action::CloseOtherTabs);
+        assert_eq!(
+            state
+                .tabs
+                .iter()
+                .filter(|tab| tab.disposition == app_ui::shell::TabDisposition::Pinned)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn explorer_wheel_updates_explorer_scroll_without_editor_scroll() {
+        use super::ExplorerProjection;
+        use editor_types::{Modifiers, MouseAction, ScreenCell};
+        let mut state = AppState {
+            explorer_entries: (0..8)
+                .map(|index| ExplorerProjection {
+                    path: std::path::PathBuf::from(format!("file{index}")),
+                    depth: 0,
+                    label: format!("file{index}"),
+                    active: false,
+                    expanded: false,
+                    is_directory: false,
+                })
+                .collect(),
+            ..AppState::default()
+        };
+        let before = state.focused_pane().expect("pane").viewport.top_line;
+        state.apply_action(Action::Pointer(app_ui::shell::PointerEvent {
+            target: app_ui::shell::PointerTarget::Explorer(1),
+            screen: ScreenCell { row: 1, column: 1 },
+            action: MouseAction::ScrollLines(3),
+            modifiers: Modifiers::default(),
+            click_count: 0,
+        }));
+        assert_eq!(state.explorer_scroll, 3);
+        assert_eq!(
+            state.focused_pane().expect("pane").viewport.top_line,
+            before
+        );
     }
 
     #[test]

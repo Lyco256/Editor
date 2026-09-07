@@ -17,6 +17,7 @@ Important types:
 - `SplitAxis` and `PaneNode` for recursive horizontal/vertical split rendering.
 - `TabEntry`, `ExplorerState`, and `BottomPanelState` for shell chrome data.
 - `ShellLayout` for collapse-aware geometry.
+- `SplitHandleLayout` for exact one-cell draggable split separators.
 - `ShellState` for the full shell view model.
 - `ShellAction` for normalized user intents.
 
@@ -32,6 +33,8 @@ Data flow:
 - The shell computes a layout from the available framebuffer area.
 - It renders explorer, tabs, editor panes, bottom panel, status bar, and palette into the frame.
 - Mouse hits are translated into shell actions by pure hit-testing.
+- Split separators are represented in the snapshot and hit-tested by their rendered rectangle;
+  no fixed half-screen or tab-width arithmetic is used.
 
 Concurrency:
 

@@ -146,7 +146,12 @@ impl PaneNode {
                             let _ = frame.set(
                                 divider,
                                 row,
-                                cell("│", StyleRole::Gutter, StyleRole::EditorBackground, false),
+                                cell(
+                                    "│",
+                                    StyleRole::SplitSeparator,
+                                    StyleRole::EditorBackground,
+                                    false,
+                                ),
                             );
                         }
                     }
@@ -173,7 +178,12 @@ impl PaneNode {
                             let _ = frame.set(
                                 column,
                                 divider,
-                                cell("─", StyleRole::Gutter, StyleRole::EditorBackground, false),
+                                cell(
+                                    "─",
+                                    StyleRole::SplitSeparator,
+                                    StyleRole::EditorBackground,
+                                    false,
+                                ),
                             );
                         }
                     }
@@ -220,6 +230,7 @@ pub struct ExplorerState {
     pub roots: Vec<String>,
     pub entries: Vec<ExplorerEntry>,
     pub visible: bool,
+    pub scroll: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +263,15 @@ pub struct ExplorerRowLayout {
     pub rect: Rect,
     pub entry_index: Option<usize>,
     pub is_directory: bool,
+}
+
+/// Hit-test geometry for a draggable split separator. `parent` is the full
+/// split rectangle and `rect` is the one-cell divider itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitHandleLayout {
+    pub axis: SplitAxis,
+    pub parent: Rect,
+    pub rect: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,6 +541,7 @@ pub struct WorkbenchLayoutSnapshot {
     pub editor_groups: Vec<EditorGroupLayout>,
     pub group_tab_rects: Vec<(u32, usize, Rect)>,
     pub explorer_rows: Vec<ExplorerRowLayout>,
+    pub split_handles: Vec<SplitHandleLayout>,
     pub active_menu: Option<Rect>,
     pub menu_category: usize,
     pub compact: bool,
@@ -534,6 +555,7 @@ pub enum PointerTarget {
         index: usize,
     },
     Tab(usize),
+    SplitHandle(SplitHandleLayout),
     Explorer(usize),
     ExplorerRow {
         entry_index: Option<usize>,
@@ -584,6 +606,8 @@ impl ShellState {
         collect_pane_rects(&self.root, layout.editor, &mut editor_panes);
         let mut editor_groups = Vec::new();
         collect_group_layouts(&self.root, layout.editor, &mut editor_groups);
+        let mut split_handles = Vec::new();
+        collect_split_handles(&self.root, layout.editor, &mut split_handles);
         let group_tab_rects: Vec<(u32, usize, Rect)> = editor_groups
             .iter()
             .flat_map(|group| {
@@ -623,6 +647,7 @@ impl ShellState {
             editor_groups,
             group_tab_rects,
             explorer_rows,
+            split_handles,
             compact: layout.compact,
         }
     }
@@ -1100,7 +1125,13 @@ impl ShellState {
             });
             row = row.saturating_add(1);
         }
-        for (index, entry) in self.explorer.entries.iter().enumerate() {
+        for (index, entry) in self
+            .explorer
+            .entries
+            .iter()
+            .enumerate()
+            .skip(self.explorer.scroll)
+        {
             if row >= rect.bottom() {
                 break;
             }
@@ -1154,7 +1185,7 @@ impl ShellState {
             );
             row = row.saturating_add(1);
         }
-        for entry in &self.explorer.entries {
+        for entry in self.explorer.entries.iter().skip(self.explorer.scroll) {
             if row >= rect.bottom() {
                 break;
             }
@@ -1557,6 +1588,13 @@ impl WorkbenchLayoutSnapshot {
                 return Some(PointerTarget::Tab(*index));
             }
         }
+        if let Some(handle) = self
+            .split_handles
+            .iter()
+            .find(|handle| handle.rect.contains(column, row))
+        {
+            return Some(PointerTarget::SplitHandle(*handle));
+        }
         if let Some(explorer) = self.explorer {
             if explorer.contains(column, row) {
                 if let Some(visible) = self
@@ -1612,6 +1650,75 @@ impl WorkbenchLayoutSnapshot {
                     text_width: group.text.width,
                 }
             })
+    }
+}
+
+fn collect_split_handles(node: &PaneNode, rect: Rect, output: &mut Vec<SplitHandleLayout>) {
+    let PaneNode::Split {
+        axis,
+        ratio_percent,
+        first,
+        second,
+    } = node
+    else {
+        return;
+    };
+    let extent = match axis {
+        SplitAxis::Vertical => rect
+            .width
+            .saturating_mul(*ratio_percent)
+            .saturating_div(100)
+            .max(1),
+        SplitAxis::Horizontal => rect
+            .height
+            .saturating_mul(*ratio_percent)
+            .saturating_div(100)
+            .max(1),
+    };
+    let divider = match axis {
+        SplitAxis::Vertical => rect.x.saturating_add(extent),
+        SplitAxis::Horizontal => rect.y.saturating_add(extent),
+    };
+    let handle_rect = match axis {
+        SplitAxis::Vertical => Rect::new(divider, rect.y, 1, rect.height),
+        SplitAxis::Horizontal => Rect::new(rect.x, divider, rect.width, 1),
+    };
+    output.push(SplitHandleLayout {
+        axis: *axis,
+        parent: rect,
+        rect: handle_rect,
+    });
+    match axis {
+        SplitAxis::Vertical => {
+            collect_split_handles(
+                first,
+                Rect::new(rect.x, rect.y, extent, rect.height),
+                output,
+            );
+            collect_split_handles(
+                second,
+                Rect::new(
+                    divider.saturating_add(1),
+                    rect.y,
+                    rect.width.saturating_sub(extent).saturating_sub(1),
+                    rect.height,
+                ),
+                output,
+            );
+        }
+        SplitAxis::Horizontal => {
+            collect_split_handles(first, Rect::new(rect.x, rect.y, rect.width, extent), output);
+            collect_split_handles(
+                second,
+                Rect::new(
+                    rect.x,
+                    divider.saturating_add(1),
+                    rect.width,
+                    rect.height.saturating_sub(extent).saturating_sub(1),
+                ),
+                output,
+            );
+        }
     }
 }
 
@@ -1938,6 +2045,7 @@ mod tests {
                     },
                 ],
                 visible: true,
+                scroll: 0,
             },
             tabs: vec![
                 TabEntry {
@@ -2057,6 +2165,18 @@ mod tests {
     #[test]
     fn shell_snapshot_covers_tabs_panels_and_palette() {
         let state = shell_state(&read_fixture("shell-layout.rs"));
+        let geometry = state.layout_snapshot(Rect::new(0, 0, 120, 40));
+        assert_eq!(geometry.split_handles.len(), 2);
+        for handle in &geometry.split_handles {
+            assert!(match handle.axis {
+                SplitAxis::Vertical => handle.rect.width == 1,
+                SplitAxis::Horizontal => handle.rect.height == 1,
+            });
+            assert!(matches!(
+                geometry.pointer_target(handle.rect.x, handle.rect.y),
+                Some(PointerTarget::SplitHandle(_))
+            ));
+        }
         let snapshot = render_shell(&state, 120, 40);
         assert!(snapshot.starts_with("[120x40]"));
         assert!(snapshot.contains("MenuForeground/MenuBackground"));

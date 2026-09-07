@@ -428,6 +428,49 @@ impl TextBuffer {
             .collect::<Result<Vec<_>>>()?;
         self.apply_transaction(TransactionBuilder::new().extend(edits).build()?)
     }
+
+    /// Removes one indentation unit from every touched logical line as one transaction.
+    pub fn outdent_selections(&mut self, style: IndentStyle) -> Result<AppliedTransaction> {
+        let snapshot = self.snapshot();
+        let mut lines: Vec<u32> = self
+            .selections()
+            .selections()
+            .iter()
+            .flat_map(|selection| {
+                let start = snapshot.offset_to_position(selection.range().start);
+                let end = snapshot.offset_to_position(selection.range().end);
+                match (start, end) {
+                    (Ok(start), Ok(end)) => (start.line..=end.line).collect(),
+                    _ => Vec::new(),
+                }
+            })
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        let unit_width = match style {
+            IndentStyle::Spaces(width) => width.max(1),
+            IndentStyle::Tabs => 1,
+        };
+        let mut edits = Vec::new();
+        for line in lines {
+            let text = snapshot.line_text(line)?;
+            let remove = if text.starts_with('\t') {
+                1
+            } else {
+                text.chars()
+                    .take(unit_width)
+                    .take_while(|character| *character == ' ')
+                    .count()
+            };
+            if remove > 0 {
+                let start =
+                    snapshot.position_to_offset(crate::LogicalPosition { line, character: 0 })?;
+                let end = crate::CharacterOffset(start.0.saturating_add(remove));
+                edits.push(Edit::delete(crate::TextRange { start, end }));
+            }
+        }
+        self.apply_transaction(TransactionBuilder::new().extend(edits).build()?)
+    }
 }
 
 #[derive(Debug)]
@@ -628,5 +671,20 @@ mod tests {
             .smart_enter_with_rules_and_actions(&[], IndentStyle::Spaces(4), None, &rules)
             .expect("enter");
         assert_eq!(buffer.to_string(), "/// docs\n/// ");
+    }
+
+    #[test]
+    fn outdent_removes_only_configured_indentation() {
+        let mut buffer = TextBuffer::new("    one\n  two\ntext");
+        buffer
+            .set_selections(SelectionSet::single(Selection::new(
+                CharacterOffset(0),
+                CharacterOffset(12),
+            )))
+            .expect("selection");
+        buffer
+            .outdent_selections(IndentStyle::Spaces(2))
+            .expect("outdent");
+        assert_eq!(buffer.to_string(), "  one\ntwo\ntext");
     }
 }

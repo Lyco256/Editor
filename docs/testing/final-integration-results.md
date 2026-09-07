@@ -1,7 +1,7 @@
 # Final integration results
 
-Wave 2 integration is verified on the current tip of `devenv` (2026-09-06). It has not yet been promoted to
-`main`, because release-blocking evidence and promotion remain. On this
+Wave 2 integration is verified on the current tip of `devenv` (2026-09-06), and the same tested
+commit is promoted to `main`. On this
 verified integration state, format check, workspace Clippy with
 warnings denied, all workspace tests, source/document mirror check, release build, and redirected
 headless startup all pass through `tools/verify.ps1`. Root integration now covers persistent editing,

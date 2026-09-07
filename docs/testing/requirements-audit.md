@@ -1,7 +1,7 @@
 # Requirements audit (2026-09-06)
 
-`devenv` is the current integration branch (the verified state is the tip of `devenv`); it is not yet promoted to `main`
-because release gates remain. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
+`devenv` is the current integration branch and is kept byte-identical to `main` after each verified
+promotion. Automated quality gates pass on `devenv`: formatting, workspace Clippy with warnings denied,
 all workspace tests, source/document mirrors, release build, and redirected headless startup.
 
 Implemented in the integration pass:
@@ -93,9 +93,14 @@ indentation regexes, and safe on-enter append/remove actions. Folding is syntax-
 VS Code folding-marker-specific overrides and complex `when` expressions are intentionally not part
 of the initial static compatibility contribution set.
 Directory resource operations now support recursive rename/delete with in-memory rollback
-journaling; non-recursive directory deletes return a typed error. The remaining release gates are
-the documented native Windows Terminal/performance evidence (or explicit user-approved platform
-limitation) and promotion of this exact verified state to `main`.
+journaling; non-recursive directory deletes return a typed error. Native Windows Terminal input
+injection is prohibited in this environment, so the remaining release gate is user-observable
+keystroke-to-frame and clean interactive open/close profiling (or an explicit user-approved
+platform limitation).
+
+Additional deterministic proof now covers smart Home/document/page/word navigation, configured
+outdent, Shift/Alt/double pointer gestures, Explorer wheel isolation, Pin/Unpin/Close Others, and
+exact one-cell split-handle hit geometry.
 
 ## MVP gap-closure audit (Requirements 31–41)
 

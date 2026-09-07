@@ -478,6 +478,42 @@ impl TextBuffer {
         Ok(())
     }
 
+    /// Returns the word-like range containing a character offset using the core fallback policy.
+    pub fn word_range_at(&self, offset: CharacterOffset) -> Result<TextRange> {
+        let chars: Vec<char> = self.rope.to_string().chars().collect();
+        if offset.0 > chars.len() {
+            return Err(EditorError::OffsetOutOfBounds {
+                offset: offset.0,
+                length: chars.len(),
+            });
+        }
+        let index = offset.0.min(chars.len());
+        if chars.is_empty() {
+            return Ok(TextRange {
+                start: CharacterOffset(0),
+                end: CharacterOffset(0),
+            });
+        }
+        let probe = if index == chars.len() {
+            index.saturating_sub(1)
+        } else {
+            index
+        };
+        let class = is_word_character(chars[probe]);
+        let mut start = probe;
+        while start > 0 && is_word_character(chars[start - 1]) == class {
+            start -= 1;
+        }
+        let mut end = probe.saturating_add(1);
+        while end < chars.len() && is_word_character(chars[end]) == class {
+            end += 1;
+        }
+        Ok(TextRange {
+            start: CharacterOffset(start),
+            end: CharacterOffset(end),
+        })
+    }
+
     /// Moves every caret to the beginning of its logical line.
     pub fn move_home(&mut self, extend: bool) -> Result<()> {
         self.preferred_display_columns = None;
@@ -485,13 +521,23 @@ impl TextBuffer {
         let mut moved = Vec::with_capacity(self.selections.len());
         for selection in self.selections.selections() {
             let position = offset_to_position_in_text(&text, selection.active)?;
-            let active = position_to_offset_in_text(
-                &text,
-                LogicalPosition {
+            let (start, content_end, _) =
+                line_bounds(&text, position.line).ok_or(crate::EditorError::InvalidPosition {
                     line: position.line,
-                    character: 0,
-                },
-            )?;
+                    character: position.character,
+                })?;
+            let line_text = &text[char_to_byte(&text, start)..char_to_byte(&text, content_end)];
+            let first_non_whitespace = line_text
+                .char_indices()
+                .find(|(_, character)| !character.is_whitespace())
+                .map_or(content_end, |(offset, _)| {
+                    start + line_text[..offset].chars().count()
+                });
+            let active = if selection.active.0 == first_non_whitespace {
+                CharacterOffset(start)
+            } else {
+                CharacterOffset(first_non_whitespace)
+            };
             moved.push(selection.with_active(active, extend));
         }
         self.selections = SelectionSet::new(moved, self.selections.primary_index())?;
@@ -514,6 +560,104 @@ impl TextBuffer {
         }
         self.selections = SelectionSet::new(moved, self.selections.primary_index())?;
         Ok(())
+    }
+
+    /// Moves every active endpoint to the beginning of the document.
+    pub fn move_document_start(&mut self, extend: bool) -> Result<()> {
+        self.preferred_display_columns = None;
+        self.selections = self
+            .selections
+            .mapped(|selection| selection.with_active(CharacterOffset(0), extend))?;
+        Ok(())
+    }
+
+    /// Moves every active endpoint to the end of the document.
+    pub fn move_document_end(&mut self, extend: bool) -> Result<()> {
+        self.preferred_display_columns = None;
+        let end = CharacterOffset(self.rope.len_chars());
+        self.selections = self
+            .selections
+            .mapped(|selection| selection.with_active(end, extend))?;
+        Ok(())
+    }
+
+    /// Moves by a caller-supplied visible page while retaining preferred display columns.
+    pub fn move_page(
+        &mut self,
+        page_lines: u32,
+        direction: i32,
+        extend: bool,
+        tab_width: usize,
+    ) -> Result<()> {
+        let lines = i32::try_from(page_lines).unwrap_or(i32::MAX);
+        self.move_vertical(lines.saturating_mul(direction), extend, tab_width)
+    }
+
+    /// Deletes the complete word to the left of each selection as one transaction.
+    pub fn delete_word_left(&mut self) -> Result<AppliedTransaction> {
+        self.delete_word(false)
+    }
+
+    /// Deletes the complete word to the right of each selection as one transaction.
+    pub fn delete_word_right(&mut self) -> Result<AppliedTransaction> {
+        self.delete_word(true)
+    }
+
+    fn delete_word(&mut self, right: bool) -> Result<AppliedTransaction> {
+        let text = self.rope.to_string();
+        let selections = self.selections.clone();
+        let mut edits = Vec::new();
+        let mut resulting = Vec::with_capacity(selections.len());
+        for selection in selections.selections() {
+            let range = if selection.is_cursor() {
+                if right {
+                    TextRange {
+                        start: selection.active,
+                        end: next_word_offset(&text, selection.active),
+                    }
+                } else {
+                    TextRange {
+                        start: previous_word_offset(&text, selection.active),
+                        end: selection.active,
+                    }
+                }
+            } else {
+                selection.range()
+            };
+            resulting.push(Selection::cursor(range.start));
+            if range.start != range.end {
+                edits.push(Edit::delete(range));
+            }
+        }
+        let resulting = SelectionSet::new(resulting, selections.primary_index())?;
+        let transaction = TransactionBuilder::new()
+            .extend(edits)
+            .selection_after(resulting)
+            .build()?;
+        self.apply_transaction(transaction)
+    }
+
+    /// Selects the whole document, retaining a single primary selection.
+    pub fn select_all(&mut self) -> Result<()> {
+        let end = CharacterOffset(self.rope.len_chars());
+        self.set_selections(SelectionSet::single(Selection::new(
+            CharacterOffset(0),
+            end,
+        )))
+    }
+
+    /// Selects the logical line containing the primary active endpoint.
+    pub fn select_line(&mut self) -> Result<()> {
+        let snapshot = self.snapshot();
+        let line = snapshot
+            .offset_to_position(self.selections.primary().active)?
+            .line;
+        let (start, _, newline_end) = line_bounds(&snapshot.text, line)
+            .ok_or(EditorError::InvalidPosition { line, character: 0 })?;
+        self.set_selections(SelectionSet::single(Selection::new(
+            CharacterOffset(start),
+            CharacterOffset(newline_end),
+        )))
     }
 
     pub fn move_vertical(&mut self, line_delta: i32, extend: bool, tab_width: usize) -> Result<()> {
@@ -1178,6 +1322,58 @@ mod tests {
             buffer.semantic_service_policy(),
             SemanticServicePolicy::SuppressedLargeFile
         );
+    }
+
+    #[test]
+    fn navigation_commands_cover_document_word_page_and_selection() {
+        let mut buffer = TextBuffer::new("one two\nthree");
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(7))))
+            .expect("selection");
+        buffer.move_document_start(false).expect("document start");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(0));
+        buffer.move_document_end(false).expect("document end");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(13));
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(4))))
+            .expect("selection");
+        buffer.move_word_left(false).expect("word left");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(0));
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(4))))
+            .expect("selection");
+        buffer.move_page(1, 1, false, 4).expect("page");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(12));
+        buffer.select_line().expect("line selection");
+        assert_eq!(
+            buffer
+                .snapshot()
+                .text_in_range(buffer.selections().primary().range())
+                .expect("range"),
+            "three"
+        );
+        buffer.select_all().expect("all selection");
+        assert_eq!(
+            buffer.selections().primary().range().end,
+            CharacterOffset(13)
+        );
+    }
+
+    #[test]
+    fn smart_home_and_word_delete_are_safe() {
+        let mut buffer = TextBuffer::new("  alpha beta");
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(8))))
+            .expect("selection");
+        buffer.move_home(false).expect("smart home");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(2));
+        buffer.move_home(false).expect("absolute home");
+        assert_eq!(buffer.selections().primary().active, CharacterOffset(0));
+        buffer
+            .set_selections(SelectionSet::single(Selection::cursor(CharacterOffset(8))))
+            .expect("selection");
+        buffer.delete_word_left().expect("word delete");
+        assert_eq!(buffer.to_string(), "  beta");
     }
 
     proptest! {

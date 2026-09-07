@@ -27,6 +27,8 @@ confirm/cancel actions; only a confirmed plan reaches the background dispatcher.
 Quick Open and find/search/replace prompts are rendered as small overlays above the shell and are
 driven by normalized keyboard/mouse input; Explorer focus/navigation is likewise represented in root
 state, and its resulting open/expand actions dispatch deferred effects through this runtime.
+The rendered layout snapshot also carries one-cell split-handle geometry and focused-group content
+height, allowing pointer drag ratio updates and page navigation to use current terminal dimensions.
 # Rendering authority
 
 Frame construction reads the persistent active tab buffer and pane viewport/folds directly; it

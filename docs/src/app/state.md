@@ -32,10 +32,16 @@ Trusting a file workspace discovers a conventional language server on `PATH`; it
 events update the visible `LanguageServerStatus` without allowing untrusted process execution.
 Left-click and drag input is translated from screen cells to logical buffer selections with bounded
 layout offsets, keeping mouse selection in the same state machine as keyboard editing.
+Shift-click extends, Alt-click adds a secondary cursor, double/triple click selects a word/line,
+line-number drags select whole lines, and overview clicks reveal the requested line without moving
+the text caret. Wheel events are routed to the exact Explorer or editor pane under the pointer.
 Explorer focus supports Up/Down navigation, Left/Right expand/collapse, and Enter activation;
 Escape returns focus to the editor. Mouse clicks on the tab strip switch tabs, directory rows toggle
 asynchronous Explorer expansion, file rows open tabs, and drag gestures adjust an active split ratio
 with bounded 10–90% limits.
+Preview tabs promote to Open on modification, double-click, Keep Open, or Alt-click; Pin/Unpin
+changes the explicit disposition and pinned tabs sort ahead of ordinary tabs while surviving Close
+Other Editors. Opening an already visible path focuses it instead of duplicating the tab.
 Workspace roots and Explorer entries are retained in root state; `OpenPath` and `AddWorkspaceRoot`
 actions refresh the projection without letting views perform filesystem I/O.
 `apply_editor_action`, `apply_language_action`, and `apply_git_action` are typed adapters for the
