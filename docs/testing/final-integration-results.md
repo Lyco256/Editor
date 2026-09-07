@@ -1,12 +1,13 @@
 # Final integration results
 
-Wave 2 integration is verified on the current tip of `devenv` (2026-09-06), and the same tested
+Wave 2 integration is verified on the current tip of `devenv` (2026-09-07), and the same tested
 commit is promoted to `main`. On this
 verified integration state, format check, workspace Clippy with
 warnings denied, all workspace tests, source/document mirror check, release build, and redirected
 headless startup all pass through `tools/verify.ps1`. Root integration now covers persistent editing,
 atomic save effects, dirty-quit protection, Save As, split/session recovery, clipboard transactions,
-manual formatter transactions, project replacement effects, command palette routing, native watcher
+manual formatter transactions, project replacement effects, command palette routing for lifecycle and
+high-level Git operations, shared encoding/EOL pickers, native watcher
 abstraction, and session recovery.
 
 The release binary was launched without arguments and with a file path in the current environment;
