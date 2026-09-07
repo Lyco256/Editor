@@ -72,6 +72,8 @@ pub struct AppState {
     pub menu_item: usize,
     pub(crate) input_mode: Option<InputMode>,
     pub(crate) input_buffer: String,
+    pub(crate) encoding_picker: Option<app_ui::widgets::GenericPicker>,
+    pub(crate) line_endings_picker: Option<app_ui::widgets::GenericPicker>,
     pub(crate) palette: CommandPaletteState,
     pub(crate) tabs: Vec<TabState>,
     pub(crate) active_tab: usize,
@@ -84,6 +86,8 @@ pub struct AppState {
     pending_lsp_format: HashMap<RequestId, PendingFormat>,
     pending_git_discard: Option<vcs_git::GitDiscardPlan>,
     pending_file_operation: Option<workspace_core::FileOperationPlan>,
+    pending_replacement_plan: Option<workspace_core::ReplacementPlan>,
+    pending_replacement_text: Option<String>,
     deferred_effects: Vec<Effect>,
     pub(crate) format_on_save: bool,
     pub(crate) format_on_paste: bool,
@@ -117,7 +121,15 @@ pub(crate) enum BottomPanelView {
 pub(crate) enum InputMode {
     QuickOpen,
     OpenFolder,
+    SaveAs,
+    GoToLine,
+    Encoding { save: bool },
+    LineEndings,
+    GitCreateBranch,
+    GitSwitchBranch,
     ProjectSearch,
+    ProjectReplaceQuery,
+    ProjectReplaceReplacement { query: String },
     Find,
     ReplaceQuery,
     ReplaceReplacement { query: String },
@@ -992,6 +1004,8 @@ impl Default for AppState {
             menu_item: 0,
             input_mode: None,
             input_buffer: String::new(),
+            encoding_picker: None,
+            line_endings_picker: None,
             palette: CommandPaletteState::new(vec![
                 CommandEntry::available("workbench.newFile", "New File"),
                 CommandEntry::available("workbench.openFolder", "Open Folder"),
@@ -1031,6 +1045,7 @@ impl Default for AppState {
                 CommandEntry::available("editor.setEolLf", "Set End of Line: LF"),
                 CommandEntry::available("editor.setEolCrlf", "Set End of Line: CRLF"),
                 CommandEntry::available("editor.setEolPreserve", "Preserve End of Line"),
+                CommandEntry::available("editor.changeEol", "Change End of Line Sequence"),
                 CommandEntry::available("editor.toggleFormatOnSave", "Toggle Format on Save"),
                 CommandEntry::available("editor.toggleFormatOnPaste", "Toggle Format on Paste"),
                 CommandEntry::available("workbench.splitVertical", "Split Editor Vertical"),
@@ -1048,8 +1063,17 @@ impl Default for AppState {
                 CommandEntry::available("workbench.commandPalette", "Command Palette"),
                 CommandEntry::available("workspace.confirmFileOperation", "Confirm File Operation"),
                 CommandEntry::available("workspace.cancelFileOperation", "Cancel File Operation"),
+                CommandEntry::available("workspace.confirmReplace", "Confirm Replace in Files"),
+                CommandEntry::available("workspace.cancelReplace", "Cancel Replace in Files"),
                 CommandEntry::available("editor.quit", "Quit"),
                 CommandEntry::available("git.refresh", "Refresh Git Status"),
+                CommandEntry::available("git.commit", "Git: Commit"),
+                CommandEntry::available("git.fetch", "Git: Fetch"),
+                CommandEntry::available("git.pull", "Git: Pull"),
+                CommandEntry::available("git.push", "Git: Push"),
+                CommandEntry::available("git.createBranch", "Git: Create Branch"),
+                CommandEntry::available("git.switchBranch", "Git: Switch Branch"),
+                CommandEntry::available("git.stash", "Git: Stash"),
                 CommandEntry::available("git.showChanges", "Show Git Changes"),
                 CommandEntry::available("git.showDiff", "Show Git Diff"),
                 CommandEntry::available("git.showBranches", "Show Git Branches"),
@@ -1086,24 +1110,24 @@ impl Default for AppState {
                     "language.requestRangeFormatting",
                     "Request Range Formatting",
                 ),
-                // Menu-only command IDs remain in the authoritative registry even when a
-                // platform-specific implementation is not available in the current state.
-                CommandEntry::disabled("workbench.openFile", "Open File"),
-                CommandEntry::disabled("workspace.addRoot", "Add Folder to Workspace"),
-                CommandEntry::disabled("editor.saveAs", "Save As"),
-                CommandEntry::disabled("editor.reopenEncoding", "Reopen with Encoding"),
-                CommandEntry::disabled("editor.saveEncoding", "Save with Encoding"),
-                CommandEntry::disabled("workspace.replace", "Replace in Files"),
+                // Lifecycle commands remain in the authoritative registry so palette and
+                // keybinding dispatch share the same typed root routes.
+                CommandEntry::available("workbench.openFile", "Open File"),
+                CommandEntry::available("workspace.addRoot", "Add Folder to Workspace"),
+                CommandEntry::available("editor.saveAs", "Save As"),
+                CommandEntry::available("editor.reopenEncoding", "Reopen with Encoding"),
+                CommandEntry::available("editor.saveEncoding", "Save with Encoding"),
+                CommandEntry::available("workspace.replace", "Replace in Files"),
                 CommandEntry::available("workbench.focusLeft", "Focus Left Group"),
                 CommandEntry::available("workbench.focusRight", "Focus Right Group"),
                 CommandEntry::available("workbench.focusAbove", "Focus Group Above"),
                 CommandEntry::available("workbench.focusBelow", "Focus Group Below"),
                 CommandEntry::available("workbench.toggleLineNumbers", "Toggle Line Numbers"),
-                CommandEntry::disabled("editor.goToLine", "Go to Line/Column"),
-                CommandEntry::disabled("workbench.nextProblem", "Next Problem"),
-                CommandEntry::disabled("workbench.previousProblem", "Previous Problem"),
-                CommandEntry::disabled("workbench.keyboardShortcuts", "Show Keyboard Shortcuts"),
-                CommandEntry::disabled("workbench.about", "About Editor"),
+                CommandEntry::available("editor.goToLine", "Go to Line/Column"),
+                CommandEntry::available("workbench.nextProblem", "Next Problem"),
+                CommandEntry::available("workbench.previousProblem", "Previous Problem"),
+                CommandEntry::available("workbench.keyboardShortcuts", "Show Keyboard Shortcuts"),
+                CommandEntry::available("workbench.about", "About Editor"),
             ]),
             tabs: vec![TabState::untitled()],
             active_tab: 0,
@@ -1116,6 +1140,8 @@ impl Default for AppState {
             pending_lsp_format: HashMap::new(),
             pending_git_discard: None,
             pending_file_operation: None,
+            pending_replacement_plan: None,
+            pending_replacement_text: None,
             deferred_effects: Vec::new(),
             format_on_save: false,
             format_on_paste: false,
@@ -1290,6 +1316,50 @@ impl AppState {
             left = column.saturating_sub(width.saturating_sub(1));
         }
         self.set_viewport(top, u16::try_from(left).unwrap_or(u16::MAX));
+    }
+
+    fn navigate_problem(&mut self, direction: i32) {
+        if self.diagnostics.is_empty() {
+            self.output.push(OutputMessage {
+                subsystem: "editor".to_owned(),
+                operation: "problem-navigation".to_owned(),
+                level: OutputLevel::Information,
+                message: "no problems in the active document".to_owned(),
+            });
+            return;
+        }
+        let current = self.buffer.selections().primary().active;
+        let next = if direction.is_negative() {
+            self.diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.range.start < current)
+                .map(|diagnostic| diagnostic.range.start)
+                .next_back()
+                .or_else(|| {
+                    self.diagnostics
+                        .last()
+                        .map(|diagnostic| diagnostic.range.start)
+                })
+        } else {
+            self.diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.range.start > current)
+                .map(|diagnostic| diagnostic.range.start)
+                .or_else(|| {
+                    self.diagnostics
+                        .first()
+                        .map(|diagnostic| diagnostic.range.start)
+                })
+        };
+        if let Some(offset) = next {
+            let _ = self
+                .buffer
+                .set_selections(editor_core::SelectionSet::single(
+                    editor_core::Selection::cursor(offset),
+                ));
+            self.reveal_primary_cursor();
+            self.sync_buffer_projection();
+        }
     }
 
     /// Applies an editor-view action through the same root transition path used by terminal input.
@@ -2932,10 +3002,83 @@ impl AppState {
 
     fn begin_input_mode(&mut self, mode: InputMode) {
         self.input_buffer.clear();
+        self.encoding_picker = None;
+        self.line_endings_picker = None;
         if matches!(mode, InputMode::QuickOpen) {
             self.workspace_ui.quick_open.set_query("");
         }
         self.input_mode = Some(mode);
+    }
+
+    fn begin_encoding_picker(&mut self, save: bool) {
+        let rows = [
+            "UTF-8",
+            "UTF-8 (BOM)",
+            "UTF-16LE",
+            "UTF-16BE",
+            "Shift_JIS",
+            "EUC-JP",
+            "EUC-KR",
+            "GBK",
+            "GB18030",
+            "Big5",
+            "IBM866",
+            "ISO-2022-JP",
+            "ISO-8859-2",
+            "ISO-8859-3",
+            "ISO-8859-4",
+            "ISO-8859-5",
+            "ISO-8859-6",
+            "ISO-8859-7",
+            "ISO-8859-8",
+            "ISO-8859-8-I",
+            "ISO-8859-10",
+            "ISO-8859-13",
+            "ISO-8859-14",
+            "ISO-8859-15",
+            "ISO-8859-16",
+            "KOI8-R",
+            "KOI8-U",
+            "Macintosh",
+            "replacement",
+            "windows-1250",
+            "windows-1251",
+            "windows-1252",
+            "windows-1253",
+            "windows-1254",
+            "windows-1255",
+            "windows-1256",
+            "windows-1257",
+            "windows-1258",
+            "windows-874",
+            "x-mac-cyrillic",
+            "x-user-defined",
+        ];
+        self.encoding_picker = Some(app_ui::widgets::GenericPicker::new(
+            if save {
+                "Save with Encoding"
+            } else {
+                "Reopen with Encoding"
+            },
+            rows.into_iter()
+                .map(|label| app_ui::widgets::PickerRow::new(label, label))
+                .collect(),
+        ));
+        self.input_buffer.clear();
+        self.input_mode = Some(InputMode::Encoding { save });
+    }
+
+    fn begin_line_endings_picker(&mut self) {
+        self.encoding_picker = None;
+        self.line_endings_picker = Some(app_ui::widgets::GenericPicker::new(
+            "Change End of Line Sequence",
+            vec![
+                app_ui::widgets::PickerRow::new("lf", "LF"),
+                app_ui::widgets::PickerRow::new("crlf", "CRLF"),
+            ],
+        ));
+        self.input_buffer.clear();
+        self.input_mode = Some(InputMode::LineEndings);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2947,6 +3090,8 @@ impl AppState {
         if key.code == KeyCode::Escape {
             self.input_mode = None;
             self.input_buffer.clear();
+            self.encoding_picker = None;
+            self.line_endings_picker = None;
             return None;
         }
         match mode {
@@ -2984,8 +3129,124 @@ impl AppState {
                 }
                 _ => {}
             },
+            InputMode::LineEndings => {
+                if let Some(picker) = self.line_endings_picker.as_mut() {
+                    match key.code {
+                        KeyCode::Up => picker.move_selection(-1),
+                        KeyCode::Down => picker.move_selection(1),
+                        KeyCode::Home => picker.select_index(0),
+                        KeyCode::End => picker.select_index(1),
+                        KeyCode::Enter => {
+                            let endings = match picker.accept() {
+                                Some("crlf") => workspace_core::LineEndings::Crlf,
+                                Some("lf") => workspace_core::LineEndings::Lf,
+                                _ => {
+                                    self.output.push(OutputMessage {
+                                        subsystem: "workspace".to_owned(),
+                                        operation: "line-endings".to_owned(),
+                                        level: OutputLevel::Warning,
+                                        message: "choose LF or CRLF".to_owned(),
+                                    });
+                                    return None;
+                                }
+                            };
+                            let transition =
+                                self.apply_action_inner(Action::SetLineEndings(endings));
+                            self.deferred_effects.extend(transition.effects);
+                            self.input_mode = None;
+                            self.input_buffer.clear();
+                            self.line_endings_picker = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            InputMode::Encoding { save } => {
+                if let Some(picker) = self.encoding_picker.as_mut() {
+                    match key.code {
+                        KeyCode::Up => picker.move_selection(-1),
+                        KeyCode::Down => picker.move_selection(1),
+                        KeyCode::PageUp => picker.move_selection(-8),
+                        KeyCode::PageDown => picker.move_selection(8),
+                        KeyCode::Home => picker.select_index(0),
+                        KeyCode::End => {
+                            let last = picker.visible_rows().len().saturating_sub(1);
+                            picker.select_index(last);
+                        }
+                        KeyCode::Character(ch)
+                            if !key.modifiers.contains(Modifier::Control)
+                                && !key.modifiers.contains(Modifier::Alt)
+                                && !key.modifiers.contains(Modifier::Meta) =>
+                        {
+                            self.input_buffer.push(ch);
+                            picker.set_query(&self.input_buffer);
+                        }
+                        KeyCode::Backspace => {
+                            self.input_buffer.pop();
+                            picker.set_query(&self.input_buffer);
+                        }
+                        KeyCode::Enter => {
+                            let label = picker.accept().map(ToOwned::to_owned).or_else(|| {
+                                (!self.input_buffer.trim().is_empty())
+                                    .then(|| self.input_buffer.trim().to_owned())
+                            });
+                            let parsed = label.as_deref().map(|label| {
+                                if label == "UTF-8 (BOM)" {
+                                    Ok((workspace_core::EncodingKind::Utf8, true))
+                                } else {
+                                    workspace_core::EncodingKind::for_label(label).map(|encoding| {
+                                        let with_bom = matches!(
+                                            encoding,
+                                            workspace_core::EncodingKind::Utf16Le
+                                                | workspace_core::EncodingKind::Utf16Be
+                                        );
+                                        (encoding, with_bom)
+                                    })
+                                }
+                            });
+                            match parsed {
+                                Some(Ok((encoding, with_bom))) if save => {
+                                    let transition = self.apply_action_inner(Action::SetEncoding {
+                                        encoding,
+                                        with_bom,
+                                    });
+                                    self.deferred_effects.extend(transition.effects);
+                                }
+                                Some(Ok((encoding, _))) => {
+                                    let transition = self
+                                        .apply_action_inner(Action::ReopenWithEncoding(encoding));
+                                    self.deferred_effects.extend(transition.effects);
+                                }
+                                Some(Err(error)) => self.output.push(OutputMessage {
+                                    subsystem: "workspace".to_owned(),
+                                    operation: "encoding".to_owned(),
+                                    level: OutputLevel::Warning,
+                                    message: error.to_string(),
+                                }),
+                                None => self.output.push(OutputMessage {
+                                    subsystem: "workspace".to_owned(),
+                                    operation: "encoding".to_owned(),
+                                    level: OutputLevel::Warning,
+                                    message: "choose an encoding or type a supported label"
+                                        .to_owned(),
+                                }),
+                            }
+                            self.input_mode = None;
+                            self.input_buffer.clear();
+                            self.encoding_picker = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             InputMode::OpenFolder
+            | InputMode::SaveAs
+            | InputMode::GoToLine
+            | InputMode::GitCreateBranch
+            | InputMode::GitSwitchBranch
             | InputMode::ProjectSearch
+            | InputMode::ProjectReplaceQuery
+            | InputMode::ProjectReplaceReplacement { .. }
             | InputMode::Find
             | InputMode::ReplaceQuery
             | InputMode::ReplaceReplacement { .. } => {
@@ -3022,6 +3283,85 @@ impl AppState {
                         self.input_mode = None;
                         self.input_buffer.clear();
                     }
+                    InputMode::SaveAs => {
+                        let path = PathBuf::from(self.input_buffer.trim());
+                        if path.as_os_str().is_empty() {
+                            self.output.push(OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "save-as".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "save path must not be empty".to_owned(),
+                            });
+                        } else {
+                            let transition = self.apply_action_inner(Action::SaveAs(path));
+                            self.deferred_effects.extend(transition.effects);
+                            self.input_mode = None;
+                            self.input_buffer.clear();
+                        }
+                    }
+                    InputMode::GoToLine => {
+                        let mut parts = self.input_buffer.split([':', ',']);
+                        let line = parts
+                            .next()
+                            .and_then(|value| value.trim().parse::<usize>().ok());
+                        let column = parts
+                            .next()
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(1);
+                        if let Some(line) = line.filter(|line| *line > 0) {
+                            let logical = editor_types::LogicalPosition {
+                                line: u32::try_from(line - 1).unwrap_or(u32::MAX),
+                                character: u32::try_from(column.saturating_sub(1))
+                                    .unwrap_or(u32::MAX),
+                            };
+                            if let Ok(offset) = self.buffer.position_to_offset(logical) {
+                                let _ =
+                                    self.buffer
+                                        .set_selections(editor_core::SelectionSet::single(
+                                            editor_core::Selection::cursor(offset),
+                                        ));
+                                self.reveal_primary_cursor();
+                                self.sync_buffer_projection();
+                            } else {
+                                self.output.push(OutputMessage {
+                                    subsystem: "editor".to_owned(),
+                                    operation: "go-to-line".to_owned(),
+                                    level: OutputLevel::Warning,
+                                    message: "line or column is outside the document".to_owned(),
+                                });
+                            }
+                        } else {
+                            self.output.push(OutputMessage {
+                                subsystem: "editor".to_owned(),
+                                operation: "go-to-line".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "line must be a positive number".to_owned(),
+                            });
+                        }
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
+                    InputMode::GitCreateBranch | InputMode::GitSwitchBranch => {
+                        let name = self.input_buffer.trim().to_owned();
+                        if name.is_empty() {
+                            self.output.push(OutputMessage {
+                                subsystem: "git".to_owned(),
+                                operation: "branch".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "branch name must not be empty".to_owned(),
+                            });
+                        } else {
+                            let action = if matches!(mode, InputMode::GitCreateBranch) {
+                                app_ui::git::GitAction::CreateBranch(name)
+                            } else {
+                                app_ui::git::GitAction::SwitchBranch(name)
+                            };
+                            let transition = self.apply_git_action(action);
+                            self.deferred_effects.extend(transition.effects);
+                        }
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
                     InputMode::ProjectSearch => {
                         if self.input_buffer.trim().is_empty() {
                             self.output.push(OutputMessage {
@@ -3037,6 +3377,31 @@ impl AppState {
                             );
                             self.deferred_effects.extend(transition.effects);
                         }
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
+                    InputMode::ProjectReplaceQuery => {
+                        if self.input_buffer.trim().is_empty() {
+                            self.output.push(OutputMessage {
+                                subsystem: "workspace".to_owned(),
+                                operation: "replace".to_owned(),
+                                level: OutputLevel::Warning,
+                                message: "replace query must not be empty".to_owned(),
+                            });
+                        } else {
+                            let query = self.input_buffer.clone();
+                            self.input_mode = Some(InputMode::ProjectReplaceReplacement { query });
+                            self.input_buffer.clear();
+                        }
+                    }
+                    InputMode::ProjectReplaceReplacement { query } => {
+                        let replacement = self.input_buffer.clone();
+                        self.pending_replacement_text = Some(replacement);
+                        let transition = self.start_workspace_search(
+                            query,
+                            app_ui::workspace::SearchOptionsView::default(),
+                        );
+                        self.deferred_effects.extend(transition.effects);
                         self.input_mode = None;
                         self.input_buffer.clear();
                     }
@@ -3083,7 +3448,7 @@ impl AppState {
                         self.input_mode = None;
                         self.input_buffer.clear();
                     }
-                    InputMode::QuickOpen => {}
+                    InputMode::Encoding { .. } | InputMode::LineEndings | InputMode::QuickOpen => {}
                 }
             }
         }
@@ -3594,6 +3959,18 @@ impl AppState {
 
     fn sort_pinned_tabs(&mut self) {
         let active_path = self.active_path.clone();
+        let pane_tabs = self
+            .panes
+            .iter()
+            .map(|pane| {
+                (
+                    pane.displayed_tab,
+                    self.tabs
+                        .get(pane.displayed_tab)
+                        .and_then(|tab| tab.path.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
         self.sync_active_tab();
         self.tabs
             .sort_by_key(|tab| u8::from(tab.disposition != app_ui::shell::TabDisposition::Pinned));
@@ -3606,6 +3983,16 @@ impl AppState {
             })
             .unwrap_or(0)
             .min(self.tabs.len().saturating_sub(1));
+        for (pane, (old_index, path)) in self.panes.iter_mut().zip(pane_tabs) {
+            pane.displayed_tab = path
+                .as_ref()
+                .and_then(|path| {
+                    self.tabs
+                        .iter()
+                        .position(|tab| tab.path.as_ref() == Some(path))
+                })
+                .unwrap_or_else(|| old_index.min(self.tabs.len().saturating_sub(1)));
+        }
         self.buffer = self.tabs[self.active_tab].buffer.clone();
     }
 
@@ -5934,6 +6321,9 @@ impl AppState {
             "workbench.openFile" | "workbench.quickOpen" => {
                 self.begin_input_mode(InputMode::QuickOpen);
             }
+            "editor.saveAs" => self.begin_input_mode(InputMode::SaveAs),
+            "editor.reopenEncoding" => self.begin_encoding_picker(false),
+            "editor.saveEncoding" => self.begin_encoding_picker(true),
             "workbench.commandPalette" => {
                 self.palette_visible = true;
             }
@@ -5962,6 +6352,43 @@ impl AppState {
             "workbench.openRecent" => {
                 let _ = self.apply_action_inner(Action::QuickOpenRecent);
             }
+            "editor.goToLine" => self.begin_input_mode(InputMode::GoToLine),
+            "workbench.nextProblem" => self.navigate_problem(1),
+            "workbench.previousProblem" => self.navigate_problem(-1),
+            "git.commit" => {
+                let transition = self.apply_git_action(app_ui::git::GitAction::Commit);
+                self.deferred_effects.extend(transition.effects);
+            }
+            "git.fetch" => {
+                let transition = self.apply_git_action(app_ui::git::GitAction::Fetch);
+                self.deferred_effects.extend(transition.effects);
+            }
+            "git.pull" => {
+                let transition = self.apply_git_action(app_ui::git::GitAction::Pull);
+                self.deferred_effects.extend(transition.effects);
+            }
+            "git.push" => {
+                let transition = self.apply_git_action(app_ui::git::GitAction::Push);
+                self.deferred_effects.extend(transition.effects);
+            }
+            "git.createBranch" => self.begin_input_mode(InputMode::GitCreateBranch),
+            "git.switchBranch" => self.begin_input_mode(InputMode::GitSwitchBranch),
+            "git.stash" => {
+                let transition = self.apply_git_action(app_ui::git::GitAction::CreateStash);
+                self.deferred_effects.extend(transition.effects);
+            }
+            "workbench.keyboardShortcuts" => self.output.push(OutputMessage {
+                subsystem: "editor".to_owned(),
+                operation: "keyboard-shortcuts".to_owned(),
+                level: OutputLevel::Information,
+                message: "Ctrl+P palette; Ctrl+S save; Ctrl+F find; F10 menu".to_owned(),
+            }),
+            "workbench.about" => self.output.push(OutputMessage {
+                subsystem: "editor".to_owned(),
+                operation: "about".to_owned(),
+                level: OutputLevel::Information,
+                message: "Editor — terminal-native Rust code editor".to_owned(),
+            }),
             "editor.setEolLf" => {
                 let _ = self
                     .apply_action_inner(Action::SetLineEndings(workspace_core::LineEndings::Lf));
@@ -5974,6 +6401,7 @@ impl AppState {
                 let _ = self
                     .apply_action_inner(Action::SetLineEndings(workspace_core::LineEndings::Mixed));
             }
+            "editor.changeEol" => self.begin_line_endings_picker(),
             "editor.undo" => {
                 let _ = self.buffer.undo();
             }
@@ -6116,6 +6544,20 @@ impl AppState {
             }
             "editor.find" => self.begin_input_mode(InputMode::Find),
             "editor.replace" => self.begin_input_mode(InputMode::ReplaceQuery),
+            "workspace.replace" => self.begin_input_mode(InputMode::ProjectReplaceQuery),
+            "workspace.confirmReplace" => {
+                if let Some(plan) = self.pending_replacement_plan.take() {
+                    self.pending_replacement_text = None;
+                    self.workspace_ui.search.confirm_replace_preview();
+                    let transition = self.apply_action_inner(Action::ApplyReplacementPlan(plan));
+                    self.deferred_effects.extend(transition.effects);
+                }
+            }
+            "workspace.cancelReplace" => {
+                self.pending_replacement_plan = None;
+                self.pending_replacement_text = None;
+                self.workspace_ui.search.replace_preview = None;
+            }
             "workspace.search" => {
                 self.begin_input_mode(InputMode::ProjectSearch);
                 self.bottom_panel_view = BottomPanelView::Search;
@@ -6908,9 +7350,38 @@ impl AppState {
             Event::SearchResult { session_id, result } => self.workspace_ui.apply_event(
                 app_ui::workspace::WorkspaceModelEvent::SearchResult { session_id, result },
             ),
-            Event::SearchFinished { session_id } => self
-                .workspace_ui
-                .apply_event(app_ui::workspace::WorkspaceModelEvent::SearchFinished { session_id }),
+            Event::SearchFinished { session_id } => {
+                self.workspace_ui.apply_event(
+                    app_ui::workspace::WorkspaceModelEvent::SearchFinished { session_id },
+                );
+                if let Some(replacement) = self.pending_replacement_text.take() {
+                    let hits = self
+                        .workspace_ui
+                        .search
+                        .results
+                        .iter()
+                        .cloned()
+                        .map(|result| workspace_core::SearchHit {
+                            path: result.path,
+                            line_number: result.line_number,
+                            line_text: result.line_text,
+                            byte_range: result.byte_range,
+                            line_byte_range: result.line_byte_range,
+                            matched_text: result.matched_text,
+                        })
+                        .collect::<Vec<_>>();
+                    let plan = workspace_core::plan_replacements(&hits, &replacement);
+                    let match_count = hits.len();
+                    let file_count = plan.files.len();
+                    self.pending_replacement_plan = Some(plan);
+                    self.workspace_ui.apply_event(
+                        app_ui::workspace::WorkspaceModelEvent::ReplacePreview {
+                            file_count,
+                            match_count,
+                        },
+                    );
+                }
+            }
             Event::SearchCancelled { session_id } => self.workspace_ui.apply_event(
                 app_ui::workspace::WorkspaceModelEvent::SearchCancelled { session_id },
             ),
@@ -7743,6 +8214,108 @@ mod tests {
         let _ = state.apply_action(key(KeyCode::Enter));
         assert!(!state.running);
         assert!(!state.palette_visible);
+    }
+
+    #[test]
+    fn lifecycle_and_navigation_commands_are_reachable_from_registry() {
+        use super::InputMode;
+        let mut state = AppState::default();
+        for command in [
+            "workbench.openFile",
+            "workspace.addRoot",
+            "editor.saveAs",
+            "editor.reopenEncoding",
+            "editor.saveEncoding",
+            "editor.changeEol",
+            "workspace.replace",
+            "git.commit",
+            "git.fetch",
+            "git.pull",
+            "git.push",
+            "git.createBranch",
+            "git.switchBranch",
+            "git.stash",
+            "editor.goToLine",
+            "workbench.nextProblem",
+            "workbench.previousProblem",
+            "workbench.keyboardShortcuts",
+            "workbench.about",
+        ] {
+            assert!(
+                state
+                    .command_registry()
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.id.as_str() == command && entry.available)
+            );
+        }
+        let _ = state.apply_command("editor.saveAs");
+        assert!(matches!(state.input_mode, Some(InputMode::SaveAs)));
+        state.input_mode = None;
+        let _ = state.apply_command("editor.goToLine");
+        assert!(matches!(state.input_mode, Some(InputMode::GoToLine)));
+        state.input_mode = None;
+        let _ = state.apply_command("editor.reopenEncoding");
+        assert!(matches!(
+            state.input_mode,
+            Some(InputMode::Encoding { save: false })
+        ));
+        assert!(
+            state
+                .encoding_picker
+                .as_ref()
+                .is_some_and(|picker| { picker.rows().iter().any(|row| row.label == "Shift_JIS") })
+        );
+        state.input_mode = None;
+        let _ = state.apply_command("editor.changeEol");
+        assert!(matches!(state.input_mode, Some(InputMode::LineEndings)));
+        assert_eq!(
+            state
+                .line_endings_picker
+                .as_ref()
+                .map(|picker| picker.rows().len()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn project_replace_requires_preview_before_apply_effect() {
+        use std::path::PathBuf;
+        let mut state = AppState::default();
+        let path = PathBuf::from("workspace/sample.rs");
+        state.start_workspace_search("old", app_ui::workspace::SearchOptionsView::default());
+        state.pending_replacement_text = Some("new".to_owned());
+        state.apply_event(Event::SearchResult {
+            session_id: state.workspace_ui.search.session_id,
+            result: app_ui::workspace::SearchResult {
+                path,
+                line_number: 1,
+                line_text: "old old".to_owned(),
+                matched_text: "old".to_owned(),
+                byte_range: 0..3,
+                line_byte_range: 0..3,
+            },
+        });
+        state.apply_event(Event::SearchFinished {
+            session_id: state.workspace_ui.search.session_id,
+        });
+        assert_eq!(
+            state
+                .workspace_ui
+                .search
+                .replace_preview
+                .as_ref()
+                .map(|preview| preview.match_count),
+            Some(1)
+        );
+        assert!(state.pending_replacement_plan.is_some());
+        let _ = state.apply_command("workspace.confirmReplace");
+        assert!(
+            state
+                .take_deferred_effects()
+                .iter()
+                .any(|effect| matches!(effect, Effect::ApplyReplacementPlan { .. }))
+        );
     }
 
     #[test]

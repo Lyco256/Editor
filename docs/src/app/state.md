@@ -106,6 +106,13 @@ refresh.
 In-document find and replace are root actions backed by editor-core; match ranges are retained for
 overview consumers and replace-all is undoable. Invalid search expressions are reported as typed
 editor Output errors and never silently converted to an empty result set.
+Lifecycle commands expose terminal-native Save As, Go to Line/Column, and encoding entry flows.
+Replace in Files runs search first, stores exact-hit replacement plans, renders affected file/match
+counts, and only emits the apply effect after an explicit confirm command; cancellation discards the
+pending plan without writing.
+Command Palette exposes typed Git commit/fetch/pull/push/stash routes and branch create/switch
+interactions. Encoding and end-of-line commands open the shared feature-neutral picker; picker
+acceptance resolves stable row ids to supported `encoding_rs` labels or LF/CRLF actions.
 # Persistent integration state
 
 AppState keeps stable pane records, authoritative tab buffers, focused-pane status, fold state,
