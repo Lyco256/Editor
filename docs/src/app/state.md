@@ -113,6 +113,11 @@ pending plan without writing.
 Command Palette exposes typed Git commit/fetch/pull/push/stash routes and branch create/switch
 interactions. Encoding and end-of-line commands open the shared feature-neutral picker; picker
 acceptance resolves stable row ids to supported `encoding_rs` labels or LF/CRLF actions.
+Open Recent Workspace uses the same picker with stable path ids; missing paths remain disabled and
+are never silently removed.
+Workspace search options are persisted in root state and have palette routes for regex/literal,
+case sensitivity, whole-word, include, and exclude filters; the active search and Replace in Files
+flows pass the selected options into the typed workspace search effect.
 # Persistent integration state
 
 AppState keeps stable pane records, authoritative tab buffers, focused-pane status, fold state,

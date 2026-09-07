@@ -29,6 +29,9 @@ driven by normalized keyboard/mouse input; Explorer focus/navigation is likewise
 state, and its resulting open/expand actions dispatch deferred effects through this runtime.
 Encoding and end-of-line lifecycle prompts use the shared GenericPicker contract, rendering stable
 row ids with keyboard filtering/selection before routing typed conversion actions.
+The project-search prompt renders the active literal/regex, case, whole-word, include, and exclude
+settings; palette option commands update those settings before the next search or replacement.
+Open Recent Workspace is rendered as a picker overlay with disabled missing-path rows.
 The rendered layout snapshot also carries one-cell split-handle geometry and focused-group content
 height, allowing pointer drag ratio updates and page navigation to use current terminal dimensions.
 # Rendering authority

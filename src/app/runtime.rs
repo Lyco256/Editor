@@ -1103,9 +1103,9 @@ fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebu
     let width = size.0.saturating_sub(4).clamp(1, 100);
     let height = match mode {
         super::state::InputMode::QuickOpen => size.1.saturating_sub(2).clamp(1, 16),
-        super::state::InputMode::Encoding { .. } | super::state::InputMode::LineEndings => {
-            size.1.saturating_sub(2).clamp(5, 16)
-        }
+        super::state::InputMode::Encoding { .. }
+        | super::state::InputMode::LineEndings
+        | super::state::InputMode::RecentWorkspace => size.1.saturating_sub(2).clamp(5, 16),
         _ => 3.min(size.1.saturating_sub(1).max(1)),
     };
     let mut overlay = Framebuffer::new(width, height);
@@ -1116,6 +1116,8 @@ fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebu
     let label = match mode {
         super::state::InputMode::OpenFolder => "Open Folder",
         super::state::InputMode::ProjectSearch => "Search workspace",
+        super::state::InputMode::ProjectSearchInclude => "Search include filter",
+        super::state::InputMode::ProjectSearchExclude => "Search exclude filter",
         super::state::InputMode::ProjectReplaceQuery => "Replace in Files query",
         super::state::InputMode::ProjectReplaceReplacement { .. } => "Replace in Files with",
         super::state::InputMode::SaveAs => "Save As",
@@ -1123,6 +1125,7 @@ fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebu
         super::state::InputMode::Encoding { save: true } => "Save with Encoding",
         super::state::InputMode::Encoding { save: false } => "Reopen with Encoding",
         super::state::InputMode::LineEndings => "Change End of Line Sequence",
+        super::state::InputMode::RecentWorkspace => "Open Recent Workspace",
         super::state::InputMode::GitCreateBranch => "Git: Create Branch",
         super::state::InputMode::GitSwitchBranch => "Git: Switch Branch",
         super::state::InputMode::Find => "Find",
@@ -1142,6 +1145,24 @@ fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebu
         "Enter=apply  Esc=cancel  Backspace=delete",
         StyleRole::Information,
     );
+    if matches!(mode, super::state::InputMode::ProjectSearch) {
+        let options = &state.project_search_options;
+        let include = options.include.as_deref().unwrap_or("*");
+        let exclude = options.exclude.as_deref().unwrap_or("-");
+        write_overlay_line(
+            &mut overlay,
+            2,
+            &format!(
+                "{} case={} whole-word={} include={} exclude={}",
+                if options.literal { "literal" } else { "regex" },
+                options.case_sensitive,
+                options.whole_word,
+                include,
+                exclude
+            ),
+            StyleRole::Information,
+        );
+    }
     if matches!(mode, super::state::InputMode::Encoding { .. }) {
         write_overlay_line(
             &mut overlay,
@@ -1202,6 +1223,47 @@ fn input_overlay_for_state(state: &AppState, size: (u16, u16)) -> Option<Framebu
                     &mut overlay,
                     row_number,
                     &format!("{marker}{}", row.label),
+                    role,
+                );
+            }
+        }
+    }
+    if matches!(mode, super::state::InputMode::RecentWorkspace) {
+        write_overlay_line(
+            &mut overlay,
+            2,
+            "Up/Down select  Enter open  Esc cancel",
+            StyleRole::Information,
+        );
+        if let Some(picker) = state.recent_picker.as_ref() {
+            let selected = picker.selected().map(|row| row.id.as_str());
+            for (index, row) in picker
+                .visible_rows()
+                .into_iter()
+                .take(usize::from(height.saturating_sub(3)))
+                .enumerate()
+            {
+                let row_number = u16::try_from(index).unwrap_or(u16::MAX).saturating_add(3);
+                let marker = if selected == Some(row.id.as_str()) {
+                    "> "
+                } else {
+                    "  "
+                };
+                let role = if selected == Some(row.id.as_str()) {
+                    StyleRole::Selection
+                } else if row.disabled {
+                    StyleRole::Warning
+                } else {
+                    StyleRole::Information
+                };
+                write_overlay_line(
+                    &mut overlay,
+                    row_number,
+                    &format!(
+                        "{marker}{}{}",
+                        row.label,
+                        if row.disabled { " (missing)" } else { "" }
+                    ),
                     role,
                 );
             }

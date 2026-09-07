@@ -38,6 +38,7 @@ pub struct AppState {
     pub(crate) language_ui: app_ui::language::LanguageModel,
     pub(crate) lsp_results: HashMap<String, serde_json::Value>,
     pub(crate) find_query: String,
+    pub(crate) project_search_options: app_ui::workspace::SearchOptionsView,
     pub(crate) find_matches: Vec<TextRange>,
     pub(crate) pair_config: Vec<PairConfig>,
     pub(crate) indentation_rules: Option<editor_core::IndentationRules>,
@@ -74,6 +75,7 @@ pub struct AppState {
     pub(crate) input_buffer: String,
     pub(crate) encoding_picker: Option<app_ui::widgets::GenericPicker>,
     pub(crate) line_endings_picker: Option<app_ui::widgets::GenericPicker>,
+    pub(crate) recent_picker: Option<app_ui::widgets::GenericPicker>,
     pub(crate) palette: CommandPaletteState,
     pub(crate) tabs: Vec<TabState>,
     pub(crate) active_tab: usize,
@@ -125,9 +127,12 @@ pub(crate) enum InputMode {
     GoToLine,
     Encoding { save: bool },
     LineEndings,
+    RecentWorkspace,
     GitCreateBranch,
     GitSwitchBranch,
     ProjectSearch,
+    ProjectSearchInclude,
+    ProjectSearchExclude,
     ProjectReplaceQuery,
     ProjectReplaceReplacement { query: String },
     Find,
@@ -970,6 +975,7 @@ impl Default for AppState {
             language_ui: app_ui::language::LanguageModel::new(0),
             lsp_results: HashMap::new(),
             find_query: String::new(),
+            project_search_options: app_ui::workspace::SearchOptionsView::default(),
             find_matches: Vec::new(),
             pair_config: PairConfig::common_defaults(),
             indentation_rules: None,
@@ -1006,6 +1012,7 @@ impl Default for AppState {
             input_buffer: String::new(),
             encoding_picker: None,
             line_endings_picker: None,
+            recent_picker: None,
             palette: CommandPaletteState::new(vec![
                 CommandEntry::available("workbench.newFile", "New File"),
                 CommandEntry::available("workbench.openFolder", "Open Folder"),
@@ -1019,6 +1026,17 @@ impl Default for AppState {
                 CommandEntry::available("editor.replace", "Replace in Document"),
                 CommandEntry::available("workbench.quickOpen", "Quick Open"),
                 CommandEntry::available("workspace.search", "Search Workspace"),
+                CommandEntry::available("workspace.searchToggleRegex", "Search: Toggle Regex"),
+                CommandEntry::available(
+                    "workspace.searchToggleCase",
+                    "Search: Toggle Case Sensitive",
+                ),
+                CommandEntry::available(
+                    "workspace.searchToggleWholeWord",
+                    "Search: Toggle Whole Word",
+                ),
+                CommandEntry::available("workspace.searchInclude", "Search: Set Include Filter"),
+                CommandEntry::available("workspace.searchExclude", "Search: Set Exclude Filter"),
                 CommandEntry::available("editor.expandSelection", "Expand Selection"),
                 CommandEntry::available("editor.addCursorAbove", "Add Cursor Above"),
                 CommandEntry::available("editor.addCursorBelow", "Add Cursor Below"),
@@ -3004,6 +3022,7 @@ impl AppState {
         self.input_buffer.clear();
         self.encoding_picker = None;
         self.line_endings_picker = None;
+        self.recent_picker = None;
         if matches!(mode, InputMode::QuickOpen) {
             self.workspace_ui.quick_open.set_query("");
         }
@@ -3081,6 +3100,27 @@ impl AppState {
         self.input_mode = Some(InputMode::LineEndings);
     }
 
+    fn begin_recent_picker(&mut self) {
+        let rows = self
+            .workspace_ui
+            .recent_rows()
+            .into_iter()
+            .map(|row| {
+                let mut picker_row =
+                    app_ui::widgets::PickerRow::new(row.id.clone(), row.path.display().to_string());
+                picker_row.disabled = !row.exists;
+                picker_row.detail = (!row.exists).then(|| "missing path".to_owned());
+                picker_row
+            })
+            .collect();
+        self.recent_picker = Some(app_ui::widgets::GenericPicker::new(
+            "Open Recent Workspace",
+            rows,
+        ));
+        self.input_buffer.clear();
+        self.input_mode = Some(InputMode::RecentWorkspace);
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply_input_mode(
         &mut self,
@@ -3156,6 +3196,43 @@ impl AppState {
                             self.input_mode = None;
                             self.input_buffer.clear();
                             self.line_endings_picker = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            InputMode::RecentWorkspace => {
+                if let Some(picker) = self.recent_picker.as_mut() {
+                    match key.code {
+                        KeyCode::Up => picker.move_selection(-1),
+                        KeyCode::Down => picker.move_selection(1),
+                        KeyCode::PageUp => picker.move_selection(-8),
+                        KeyCode::PageDown => picker.move_selection(8),
+                        KeyCode::Home => picker.select_index(0),
+                        KeyCode::End => {
+                            picker.select_index(picker.visible_rows().len().saturating_sub(1));
+                        }
+                        KeyCode::Character(ch)
+                            if !key.modifiers.contains(Modifier::Control)
+                                && !key.modifiers.contains(Modifier::Alt)
+                                && !key.modifiers.contains(Modifier::Meta) =>
+                        {
+                            self.input_buffer.push(ch);
+                            picker.set_query(&self.input_buffer);
+                        }
+                        KeyCode::Backspace => {
+                            self.input_buffer.pop();
+                            picker.set_query(&self.input_buffer);
+                        }
+                        KeyCode::Enter => {
+                            if let Some(id) = picker.accept() {
+                                let path = PathBuf::from(id);
+                                let transition = self.apply_action_inner(Action::OpenFolder(path));
+                                self.deferred_effects.extend(transition.effects);
+                                self.input_mode = None;
+                                self.input_buffer.clear();
+                                self.recent_picker = None;
+                            }
                         }
                         _ => {}
                     }
@@ -3245,6 +3322,8 @@ impl AppState {
             | InputMode::GitCreateBranch
             | InputMode::GitSwitchBranch
             | InputMode::ProjectSearch
+            | InputMode::ProjectSearchInclude
+            | InputMode::ProjectSearchExclude
             | InputMode::ProjectReplaceQuery
             | InputMode::ProjectReplaceReplacement { .. }
             | InputMode::Find
@@ -3373,10 +3452,24 @@ impl AppState {
                         } else {
                             let transition = self.start_workspace_search(
                                 self.input_buffer.clone(),
-                                app_ui::workspace::SearchOptionsView::default(),
+                                self.project_search_options.clone(),
                             );
                             self.deferred_effects.extend(transition.effects);
                         }
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
+                    InputMode::ProjectSearchInclude => {
+                        self.project_search_options.include =
+                            (!self.input_buffer.trim().is_empty())
+                                .then(|| self.input_buffer.trim().to_owned());
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                    }
+                    InputMode::ProjectSearchExclude => {
+                        self.project_search_options.exclude =
+                            (!self.input_buffer.trim().is_empty())
+                                .then(|| self.input_buffer.trim().to_owned());
                         self.input_mode = None;
                         self.input_buffer.clear();
                     }
@@ -3397,10 +3490,8 @@ impl AppState {
                     InputMode::ProjectReplaceReplacement { query } => {
                         let replacement = self.input_buffer.clone();
                         self.pending_replacement_text = Some(replacement);
-                        let transition = self.start_workspace_search(
-                            query,
-                            app_ui::workspace::SearchOptionsView::default(),
-                        );
+                        let transition =
+                            self.start_workspace_search(query, self.project_search_options.clone());
                         self.deferred_effects.extend(transition.effects);
                         self.input_mode = None;
                         self.input_buffer.clear();
@@ -3448,7 +3539,10 @@ impl AppState {
                         self.input_mode = None;
                         self.input_buffer.clear();
                     }
-                    InputMode::Encoding { .. } | InputMode::LineEndings | InputMode::QuickOpen => {}
+                    InputMode::Encoding { .. }
+                    | InputMode::LineEndings
+                    | InputMode::RecentWorkspace
+                    | InputMode::QuickOpen => {}
                 }
             }
         }
@@ -6350,7 +6444,7 @@ impl AppState {
             "workbench.focusRight" | "workbench.focusBelow" => self.focus_relative(1),
             "workbench.toggleLineNumbers" => self.show_line_numbers = !self.show_line_numbers,
             "workbench.openRecent" => {
-                let _ = self.apply_action_inner(Action::QuickOpenRecent);
+                self.begin_recent_picker();
             }
             "editor.goToLine" => self.begin_input_mode(InputMode::GoToLine),
             "workbench.nextProblem" => self.navigate_problem(1),
@@ -6545,6 +6639,53 @@ impl AppState {
             "editor.find" => self.begin_input_mode(InputMode::Find),
             "editor.replace" => self.begin_input_mode(InputMode::ReplaceQuery),
             "workspace.replace" => self.begin_input_mode(InputMode::ProjectReplaceQuery),
+            "workspace.searchToggleRegex" => {
+                self.project_search_options.literal = !self.project_search_options.literal;
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "search-options".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!(
+                        "search mode: {}",
+                        if self.project_search_options.literal {
+                            "literal"
+                        } else {
+                            "regex"
+                        }
+                    ),
+                });
+            }
+            "workspace.searchToggleCase" => {
+                self.project_search_options.case_sensitive =
+                    !self.project_search_options.case_sensitive;
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "search-options".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!(
+                        "case-sensitive search: {}",
+                        self.project_search_options.case_sensitive
+                    ),
+                });
+            }
+            "workspace.searchToggleWholeWord" => {
+                self.project_search_options.whole_word = !self.project_search_options.whole_word;
+                self.output.push(OutputMessage {
+                    subsystem: "workspace".to_owned(),
+                    operation: "search-options".to_owned(),
+                    level: OutputLevel::Information,
+                    message: format!(
+                        "whole-word search: {}",
+                        self.project_search_options.whole_word
+                    ),
+                });
+            }
+            "workspace.searchInclude" => {
+                self.begin_input_mode(InputMode::ProjectSearchInclude);
+            }
+            "workspace.searchExclude" => {
+                self.begin_input_mode(InputMode::ProjectSearchExclude);
+            }
             "workspace.confirmReplace" => {
                 if let Some(plan) = self.pending_replacement_plan.take() {
                     self.pending_replacement_text = None;
@@ -8228,6 +8369,12 @@ mod tests {
             "editor.saveEncoding",
             "editor.changeEol",
             "workspace.replace",
+            "workspace.searchToggleRegex",
+            "workspace.searchToggleCase",
+            "workspace.searchToggleWholeWord",
+            "workspace.searchInclude",
+            "workspace.searchExclude",
+            "workbench.openRecent",
             "git.commit",
             "git.fetch",
             "git.pull",
@@ -8276,6 +8423,21 @@ mod tests {
                 .map(|picker| picker.rows().len()),
             Some(2)
         );
+        state.input_mode = None;
+        let _ = state.apply_command("workspace.searchToggleRegex");
+        let _ = state.apply_command("workspace.searchToggleCase");
+        let _ = state.apply_command("workspace.searchToggleWholeWord");
+        assert!(!state.project_search_options.literal);
+        assert!(state.project_search_options.case_sensitive);
+        assert!(state.project_search_options.whole_word);
+        let _ = state.apply_command("workspace.searchInclude");
+        assert!(matches!(
+            state.input_mode,
+            Some(InputMode::ProjectSearchInclude)
+        ));
+        state.input_mode = None;
+        let _ = state.apply_command("workbench.openRecent");
+        assert!(matches!(state.input_mode, Some(InputMode::RecentWorkspace)));
     }
 
     #[test]
