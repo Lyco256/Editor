@@ -1,0 +1,10 @@
+Requirements 003 post-fix GREEN evidence
+FIX_COMMIT: bb94d29ac03b3e8b125b15c41afd8122661644ca
+COMMAND: cargo test --test requirements_003 --no-fail-fast -- --nocapture
+EXIT_CODE: 0
+S003-02: PASS focused_pane=1 displayed_buffer=secondary.txt resolved_operation_buffer=SECONDARY! pointer_owner=1 changed_buffers=[secondary] non_target=primary unchanged
+S003-03: PASS focused_pane=1 displayed_buffer=shared.txt resolved_operation_buffer=shared pointer_owner=1 cursors=[2,4]
+S003-04: PASS focus_sequence=A->B->A->B final_resolved_buffer=secondary changed_buffers=[secondary]
+S003-05: PASS displayed_buffer=third.txt resolved_operation_buffer=THIRD! changed_buffers=[third]
+S003-06: PASS split_created=true displayed_buffer=split.txt resolved_operation_buffer=SP!LIT changed_buffers=[split]
+S003-01: PASS same product-boundary scenario now changes the intended visible buffer; prior 002-only PASS is not used as a substitute.

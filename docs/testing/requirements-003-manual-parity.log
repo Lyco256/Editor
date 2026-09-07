@@ -1,0 +1,7 @@
+Requirements 003 manual parity spot-check
+PRODUCT_BOUNDARY: Windows CLI product build (`cargo build --release`)
+COMMAND: cargo test --test requirements_003 s003_02_different_buffer_secondary_pointer_and_edit -- --nocapture
+FIX_COMMIT: bb94d29ac03b3e8b125b15c41afd8122661644ca
+OBSERVATION: The product-boundary event sequence focuses secondary pane B, moves its pointer to the end of `SECONDARY`, pastes `!`, resolves the operation to the displayed secondary document, and leaves `PRIMARY` unchanged.
+TRANSCRIPT: S003-02 observed focused=Some(1) resolved=SECONDARY! primary_after=PRIMARY
+MANUAL PARITY: PASS

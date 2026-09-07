@@ -6,7 +6,7 @@ use editor::app::{action::Action, state::AppState};
 use editor_types::{InputEvent, Modifiers, MouseAction, MouseButton, ScreenCell};
 
 struct Fixture {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     primary: PathBuf,
     secondary: PathBuf,
     state: AppState,
@@ -29,7 +29,7 @@ fn fixture_with_split() -> Fixture {
     });
     state.apply_action(Action::FocusPane(0));
     Fixture {
-        _directory: directory,
+        directory,
         primary,
         secondary,
         state,
@@ -88,12 +88,11 @@ fn s003_02_different_buffer_secondary_pointer_and_edit() {
     println!(
         "S003-02 setup active_tab={} pane0_tab={} pane1_tab={}",
         fixture.state.active_tab_index(),
-        fixture.state.focused_pane().map(|p| p.id).unwrap_or(99),
+        fixture.state.focused_pane().map_or(99, |p| p.id),
         fixture
             .state
             .tabs_for_pane(1)
-            .map(|t| t.path.is_some())
-            .unwrap_or(false)
+            .is_some_and(|t| t.path.is_some())
     );
     fixture.state.apply_action(Action::Pointer(pointer(1, 9)));
     fixture
@@ -115,7 +114,9 @@ fn s003_02_different_buffer_secondary_pointer_and_edit() {
         .buffer_for_pane(0)
         .expect("S003-02 primary after")
         .to_string();
-    println!("S003-02 observed focused={focused:?} resolved={resolved} primary_after={primary_after}");
+    println!(
+        "S003-02 observed focused={focused:?} resolved={resolved} primary_after={primary_after}"
+    );
     if focused != Some(1) {
         issue_failure(
             "S003-02",
@@ -239,7 +240,7 @@ fn s003_04_focus_switch_stress_keeps_resolution_current() {
 #[test]
 fn s003_05_buffer_switch_immediately_before_edit() {
     let mut fixture = fixture_with_split();
-    let third = fixture._directory.path().join("third.txt");
+    let third = fixture.directory.path().join("third.txt");
     std::fs::write(&third, "THIRD").expect("S003-05 step 1: third fixture");
     fixture
         .state

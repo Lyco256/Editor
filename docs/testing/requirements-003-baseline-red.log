@@ -1,0 +1,24 @@
+Requirements 003 baseline RED evidence
+BASELINE_COMMIT: 145b10c7e743726ed38fbef02b04c56d530c249a
+COMMAND: cargo test --test requirements_003 --no-fail-fast -- --nocapture
+EXIT_CODE: 101
+S003-02: FAILED
+  step=4
+  focused_pane=1
+  displayed_buffer=secondary.txt
+  resolved_operation_buffer=SECONDARY
+  pointer_owner=1
+  expected=secondary buffer SECONDARY!
+  actual=SECONDARY
+  non_target_observation=primary_after=!PRIMARY (primary was mutated)
+S003-03: FAILED
+  step=5
+  focused_pane=1
+  displayed_buffer=shared.txt
+  resolved_operation_buffer=shared
+  pointer_owner=1
+  expected=pane cursors A=2 B=4
+  actual=A=4 B=4
+S003-01: FAILED (PRODUCT ACCEPTANCE OBSERVED)
+  The prior 002 completion state passed its verifier but the product-boundary reproduction above still failed,
+  proving that review/checker success alone did not establish user-visible fix effectiveness.
