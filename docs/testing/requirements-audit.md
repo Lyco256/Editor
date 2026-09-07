@@ -116,7 +116,8 @@ workspace row model (bounded to 20), lifecycle command routes, contextual overla
 generic picker/command-registry contracts, pane-aware mouse hit routing, Git keyboard/mouse
 dispatch through the trust-gated root adapter, interactive Open Folder and EOL actions, contextual
 popup rendering, same-document split-buffer projection, typed Git high-level command routes,
-encoding/EOL picker wiring, and a dedicated `mvp_gap_acceptance` command reachability test.
+encoding/EOL/recent-workspace picker wiring, user-reachable search option commands, and a dedicated
+`mvp_gap_acceptance` command reachability test.
 
 All audited MVP paths are now covered: the palette materializes the typed registry consumed by
 keybinding dispatch, inlay hints retain logical positions and render inline, recent roots persist
@@ -160,6 +161,6 @@ is the release evidence for every finding in `Requirements/LATEST_UI_BUG_AUDIT.m
 | A-26 | 50 | `app::state::tests::lsp_results_update_versioned_language_views` | PASS |
 | A-27 | 50 | `app::state::tests::contextual_language_actions_keep_bottom_panel_selection_stable` | PASS |
 
-Repository gates were run on commit `68982d1` with formatting, warnings-denied Clippy, all-feature
+Repository gates were run on commit `0468ff1` with formatting, warnings-denied Clippy, all-feature
 workspace tests, the source/document mirror test, release build, and redirected startup. The exact
 clean commit is present on `devenv`, `main`, `origin/devenv`, and `origin/main`.
