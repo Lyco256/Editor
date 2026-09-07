@@ -1,35 +1,33 @@
-# Requirements index
+# Editor stabilization — top Codex entry point
 
-Working title: **Editor**
+All previous requirement files are assumed to have been moved to `Requirements/old/`.
 
-This directory is the authoritative implementation contract for the initial usable release.
+For this stabilization cycle:
 
-The top Codex reads every file in this directory. A subagent reads `00_MASTER_REQUIREMENTS.md`, `01_AGENT_AND_GIT_RULES.md`, `02_ARCHITECTURE_AND_PROJECT_LAYOUT.md`, and the requirement file assigned to its branch.
+- top-Codex instructions live directly under `Requirements/`;
+- detailed immutable implementation contracts live under `Requirements/001/`;
+- implementation evidence and progress logs are written under `docs/testing/`, not inside `Requirements/001/`.
 
-## Execution order
+## Mandatory read order
 
-1. The top Codex completes `03_TOP_FOUNDATION_STAGE_A.md`.
-2. The top Codex completes `04_TOP_FOUNDATION_STAGE_B.md`.
-3. Wave 1 subagents run in parallel from the same tested `devenv` foundation commit:
-   - `10_EDITOR_CORE.md`
-   - `11_TERMINAL_BACKEND.md`
-   - `12_CONFIG_ENCODING_RECOVERY.md`
-   - `13_WORKSPACE_SEARCH_TRUST.md`
-   - `14_SYNTAX_ENGINE.md`
-   - `15_LSP_CLIENT.md`
-   - `16_GIT_BACKEND.md`
-   - `17_VSCODE_STATIC_COMPAT.md`
-4. The top Codex merges and verifies Wave 1 on `devenv`.
-5. Wave 2 subagents run in parallel from the tested Wave 1 `devenv` commit:
-   - `20_UI_SHELL_EDITOR.md`
-   - `21_UI_WORKSPACE.md`
-   - `22_UI_LANGUAGE.md`
-   - `23_UI_GIT.md`
-6. The top Codex performs `30_INTEGRATION_AND_RELEASE_ACCEPTANCE.md`.
-7. Only after every acceptance gate passes is `devenv` merged into `main`.
+Before changing production code, the top Codex reads these files in order:
 
-## File ownership rule
+1. `Requirements/TOP_CODEX_RUNBOOK.md`
+2. `Requirements/AGENT_ORCHESTRATION.md`
+3. `Requirements/FINAL_GATE.md`
+4. `Requirements/001/000_SCOPE_AND_ORDER.md`
+5. `Requirements/001/001_ACCEPTANCE_CASES.md`
+6. `Requirements/001/002_MICROSOFT_EDIT_ORACLE.md`
+7. `Requirements/001/003_CURRENT_FAILURE_MAP.md`
+8. `Requirements/001/004_INSTALL_ACCEPTANCE_HARNESS.md`
+9. `Requirements/001/005_FREEZE_ACCEPTANCE_BASELINE.md`
 
-The branch-specific requirement files define writable ownership. Subagents do not modify files outside that ownership. Shared interfaces, root orchestration, workspace membership, the root `Cargo.toml`, `Cargo.lock`, and root `src/app/**` are owned by the top Codex.
+The first Codex run is a setup run, not a Goal run. It creates and freezes the acceptance oracle before implementation.
 
-If a branch discovers that a shared interface is insufficient, it records the exact required interface change in its completion report and implements against the existing contract as far as possible. It does not independently redesign shared interfaces.
+After the setup run has created `Requirements/001/BASELINE_REF.txt` and stopped, start Goal Mode with the exact prompt in `Requirements/GOAL_PROMPT.md`.
+
+## Non-negotiable rule
+
+The Goal run may modify production code, normal implementation tests, and source documentation. It must not modify, delete, skip, weaken, or replace the frozen acceptance contract, acceptance tests, required-case manifest, verifier scripts, or Goal contract created by the setup run.
+
+Passing a weakened test suite does not count as completion.
