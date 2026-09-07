@@ -156,6 +156,7 @@ pub struct PaneState {
     pub displayed_tab: usize,
     pub viewport: app_ui::editor::TextViewport,
     pub page_lines: u32,
+    pub text_width: u16,
     pub folds: editor_core::FoldSet,
     pub focused: bool,
 }
@@ -167,6 +168,7 @@ impl PaneState {
             displayed_tab,
             viewport: app_ui::editor::TextViewport::default(),
             page_lines: 1,
+            text_width: 1,
             folds: editor_core::FoldSet::default(),
             focused,
         }
@@ -1243,8 +1245,51 @@ impl AppState {
         }
     }
 
+    pub fn set_text_width(&mut self, width: u16) {
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == self.focused_pane)
+        {
+            pane.text_width = width.max(1);
+        }
+    }
+
     fn page_lines(&self) -> u32 {
         self.focused_pane().map_or(1, |pane| pane.page_lines.max(1))
+    }
+
+    fn reveal_primary_cursor(&mut self) {
+        let Some(pane) = self.focused_pane().cloned() else {
+            return;
+        };
+        let snapshot = self.buffer.snapshot();
+        let Ok(position) = snapshot.offset_to_position(self.buffer.selections().primary().active)
+        else {
+            return;
+        };
+        let visible_lines = self.page_lines();
+        let mut top = pane.viewport.top_line;
+        if position.line < top {
+            top = position.line;
+        } else if position.line >= top.saturating_add(visible_lines) {
+            top = position
+                .line
+                .saturating_sub(visible_lines.saturating_sub(1));
+        }
+        let Ok(column) =
+            snapshot.display_column(self.buffer.selections().primary().active, self.tab_width)
+        else {
+            return;
+        };
+        let mut left = usize::from(pane.viewport.left_column);
+        let width = usize::from(pane.text_width.max(1));
+        if column < left {
+            left = column;
+        } else if column >= left.saturating_add(width) {
+            left = column.saturating_sub(width.saturating_sub(1));
+        }
+        self.set_viewport(top, u16::try_from(left).unwrap_or(u16::MAX));
     }
 
     /// Applies an editor-view action through the same root transition path used by terminal input.
@@ -3935,6 +3980,7 @@ impl AppState {
             }
             self.language_ui
                 .set_document_version(self.buffer.snapshot().version());
+            self.reveal_primary_cursor();
             transition.effects.push(self.syntax_effect());
         }
         transition
@@ -5495,6 +5541,7 @@ impl AppState {
                 }
             }
         }
+        self.reveal_primary_cursor();
         self.sync_buffer_projection();
         None
     }

@@ -198,6 +198,7 @@ where
         {
             self.state
                 .set_page_lines(group.content.height.saturating_sub(1).into());
+            self.state.set_text_width(group.text.width);
         }
         self.state.frame_number += 1;
         Ok(())
